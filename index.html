@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>Clean It · Presentismo GPS</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-lockup">
+        <div class="brand-mark">CI</div>
+        <div>
+          <p class="eyebrow">Clean It</p>
+          <h1>Presentismo GPS</h1>
+        </div>
+      </div>
+      <div class="connection-pill" id="connectionPill">Modo local</div>
+    </header>
+
+    <main>
+      <section id="loginView" class="view active">
+        <div class="hero-card">
+          <div class="hero-copy">
+            <p class="eyebrow">Control operativo en vivo</p>
+            <h2>Marcación simple para operarios. Visibilidad real para supervisión.</h2>
+            <p class="muted">Registro de hora, GPS, precisión, distancia al servicio y estado operativo: presente, demorado o ausente.</p>
+          </div>
+          <div class="login-card">
+            <div class="segmented" role="tablist" aria-label="Tipo de acceso">
+              <button class="segmented-btn active" data-login-mode="operator" type="button">Operario</button>
+              <button class="segmented-btn" data-login-mode="supervisor" type="button">Supervisor</button>
+            </div>
+
+            <form id="localLoginForm" class="form-stack">
+              <div class="notice compact">
+                <strong>Demo local activa.</strong>
+                <span>PIN supervisor: <code>9999</code> · PIN operario: <code>1001</code> o <code>1002</code></span>
+              </div>
+              <label>
+                <span>PIN de acceso</span>
+                <input id="localPin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="Ej. 1001" required />
+              </label>
+              <button class="primary-btn" type="submit">Ingresar</button>
+            </form>
+
+            <form id="supabaseLoginForm" class="form-stack hidden">
+              <label>
+                <span>Email</span>
+                <input id="email" type="email" autocomplete="email" placeholder="usuario@cleanit.com" />
+              </label>
+              <label>
+                <span>Contraseña</span>
+                <input id="password" type="password" autocomplete="current-password" placeholder="Contraseña" />
+              </label>
+              <button class="primary-btn" type="submit">Ingresar con Supabase</button>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section id="operatorView" class="view">
+        <div class="section-head sticky-mobile">
+          <div>
+            <p class="eyebrow">Vista operario</p>
+            <h2 id="operatorTitle">Mi servicio de hoy</h2>
+          </div>
+          <button class="ghost-btn" id="operatorLogoutBtn" type="button">Salir</button>
+        </div>
+
+        <div id="operatorShiftContainer" class="operator-grid"></div>
+      </section>
+
+      <section id="supervisorView" class="view">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Vista supervisor</p>
+            <h2>Panel vivo de presentismo</h2>
+          </div>
+          <button class="ghost-btn" id="supervisorLogoutBtn" type="button">Salir</button>
+        </div>
+
+        <nav class="tabbar" aria-label="Panel supervisor">
+          <button class="tab-btn active" data-tab="live" type="button">En vivo</button>
+          <button class="tab-btn" data-tab="sites" type="button">Servicios</button>
+          <button class="tab-btn" data-tab="shifts" type="button">Turnos</button>
+          <button class="tab-btn" data-tab="operators" type="button">Operarios</button>
+          <button class="tab-btn" data-tab="records" type="button">Registros</button>
+        </nav>
+
+        <section id="liveTab" class="tab-panel active">
+          <div class="toolbar-card">
+            <label>
+              <span>Fecha operativa</span>
+              <input id="dashboardDate" type="date" />
+            </label>
+            <button class="secondary-btn" id="refreshDashboardBtn" type="button">Actualizar</button>
+          </div>
+
+          <div class="kpi-grid" id="kpiGrid"></div>
+          <div class="data-card">
+            <div class="card-title-row">
+              <h3>Estado por servicio</h3>
+              <span id="lastRefreshLabel" class="muted small"></span>
+            </div>
+            <div id="liveTable" class="responsive-table"></div>
+          </div>
+        </section>
+
+        <section id="sitesTab" class="tab-panel">
+          <div class="split-layout">
+            <form id="siteForm" class="data-card form-stack">
+              <div class="card-title-row">
+                <h3 id="siteFormTitle">Nuevo servicio / consorcio</h3>
+                <button class="ghost-btn small-btn hidden" id="cancelSiteEditBtn" type="button">Cancelar edición</button>
+              </div>
+              <input type="hidden" id="siteId" />
+              <label><span>Nombre del servicio</span><input id="siteName" required placeholder="Ej. Consorcio Av. Santa Fe 1234" /></label>
+              <label><span>Dirección</span><input id="siteAddress" required placeholder="Dirección completa" /></label>
+              <div class="two-cols">
+                <label><span>Latitud</span><input id="siteLat" required type="number" step="any" placeholder="-34.6037" /></label>
+                <label><span>Longitud</span><input id="siteLng" required type="number" step="any" placeholder="-58.3816" /></label>
+              </div>
+              <label><span>Radio GPS aceptado en metros</span><input id="siteRadius" required type="number" min="10" max="1000" value="120" /></label>
+              <div class="two-cols">
+                <label><span>Contacto consorcio</span><input id="siteContactName" placeholder="Ej. Encargado / Administración" /></label>
+                <label><span>WhatsApp</span><input id="siteWhatsapp" placeholder="+5491123456789" /></label>
+              </div>
+              <button class="primary-btn" type="submit">Guardar servicio</button>
+              <p class="muted small">Tip operativo: cargá la latitud/longitud del punto exacto de ingreso al servicio, no solo la dirección postal. GPS no es magia; si le das un punto flojo, te devuelve una auditoría floja.</p>
+            </form>
+            <div class="data-card">
+              <h3>Servicios cargados</h3>
+              <div id="sitesList" class="list-stack"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="shiftsTab" class="tab-panel">
+          <div class="split-layout">
+            <form id="shiftForm" class="data-card form-stack">
+              <div class="card-title-row">
+                <h3 id="shiftFormTitle">Nuevo turno</h3>
+                <button class="ghost-btn small-btn hidden" id="cancelShiftEditBtn" type="button">Cancelar edición</button>
+              </div>
+              <input type="hidden" id="shiftId" />
+              <label><span>Fecha</span><input id="shiftDate" type="date" required /></label>
+              <label><span>Operario</span><select id="shiftOperator" required></select></label>
+              <label><span>Servicio</span><select id="shiftSite" required></select></label>
+              <div class="two-cols">
+                <label><span>Hora ingreso</span><input id="shiftStart" type="time" required /></label>
+                <label><span>Hora salida</span><input id="shiftEnd" type="time" required /></label>
+              </div>
+              <div class="two-cols">
+                <label><span>Tolerancia demora min.</span><input id="shiftGrace" type="number" min="0" max="120" value="10" /></label>
+                <label><span>Ausente desde min.</span><input id="shiftAbsentAfter" type="number" min="1" max="240" value="30" /></label>
+              </div>
+              <button class="primary-btn" type="submit">Guardar turno</button>
+            </form>
+            <div class="data-card">
+              <h3>Turnos cargados</h3>
+              <div id="shiftsList" class="list-stack"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="operatorsTab" class="tab-panel">
+          <div class="split-layout">
+            <form id="operatorForm" class="data-card form-stack">
+              <div class="card-title-row">
+                <h3 id="operatorFormTitle">Operario demo/local</h3>
+                <button class="ghost-btn small-btn hidden" id="cancelOperatorEditBtn" type="button">Cancelar edición</button>
+              </div>
+              <input type="hidden" id="operatorId" />
+              <label><span>UUID Auth de Supabase <small class="muted">(solo producción)</small></span><input id="operatorAuthId" placeholder="UUID del usuario creado en Authentication" /></label>
+              <label><span>Nombre completo</span><input id="operatorName" required placeholder="Nombre del operario" /></label>
+              <label><span>Teléfono</span><input id="operatorPhone" placeholder="+549..." /></label>
+              <label><span>PIN local</span><input id="operatorPin" inputmode="numeric" placeholder="Ej. 1003" /></label>
+              <button class="primary-btn" type="submit">Guardar operario</button>
+              <p class="muted small">En Supabase productivo, los usuarios se crean desde Authentication y se vinculan en <code>profiles</code>. Este formulario gestiona operarios en modo local.</p>
+            </form>
+            <div class="data-card">
+              <h3>Operarios</h3>
+              <div id="operatorsList" class="list-stack"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="recordsTab" class="tab-panel">
+          <div class="data-card">
+            <div class="card-title-row">
+              <h3>Historial de marcaciones</h3>
+              <button class="secondary-btn small-btn" id="exportCsvBtn" type="button">Exportar CSV</button>
+            </div>
+            <div id="recordsTable" class="responsive-table"></div>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/config.js"></script>
+  <script src="js/storage.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

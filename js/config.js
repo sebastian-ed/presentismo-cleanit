@@ -1,0 +1,12 @@
+window.APP_CONFIG = {
+  // Para producción: completar con datos de Supabase.
+  // Si queda vacío, la app funciona en modo local con localStorage.
+  SUPABASE_URL: "https://ubdtdangxjjaptkhyqlq.supabase.co",
+  SUPABASE_ANON_KEY: "sb_publishable_jow6AODdziH6cvUx_Wu9xg_cD3lWxdd",
+
+  // Zona horaria operativa para reportes y cálculos visibles.
+  TIMEZONE: "America/Argentina/Buenos_Aires",
+
+  // Nombre operativo usado en mensajes al consorcio.
+  COMPANY_NAME: "Clean It"
+};
