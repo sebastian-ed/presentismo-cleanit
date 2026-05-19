@@ -140,18 +140,44 @@
     pill.classList.remove("status-pending");
   }
 
-  async function handleAuthLogin(event) {
+  function profileMatchesLoginType(profile, expectedRole) {
+    const role = String(profile?.role || "").toLowerCase();
+    if (expectedRole === "operator") return role === "operator";
+    if (expectedRole === "supervisor") return ["supervisor", "admin"].includes(role);
+    return true;
+  }
+
+  function roleLabel(role) {
+    return role === "operator" ? "operario" : "supervisor";
+  }
+
+  async function handleRoleLogin(event, expectedRole) {
     event.preventDefault();
+    const form = event.currentTarget;
+    const emailInput = form.querySelector('input[type="email"]');
+    const passwordInput = form.querySelector('input[type="password"]');
+    const submitButton = form.querySelector('button[type="submit"]');
+
     try {
-      const email = $("#loginEmail").value.trim();
-      const password = $("#loginPassword").value;
+      submitButton.disabled = true;
+      const email = emailInput.value.trim();
+      const password = passwordInput.value;
       const { user, profile } = await store.loginWithPassword(email, password);
+
+      if (!profileMatchesLoginType(profile, expectedRole)) {
+        await store.signOut();
+        throw new Error(`Este acceso es para ${roleLabel(expectedRole)}s. El usuario ingresado tiene rol ${roleLabel(profile.role)}.`);
+      }
+
       state.currentUser = user;
       state.currentProfile = profile;
-      $("#loginPassword").value = "";
+      passwordInput.value = "";
       await afterLogin();
     } catch (error) {
+      passwordInput.value = "";
       toast(error.message || "No se pudo ingresar.");
+    } finally {
+      submitButton.disabled = false;
     }
   }
 
@@ -755,7 +781,8 @@
   }
 
   function bindEvents() {
-    $("#authLoginForm").addEventListener("submit", handleAuthLogin);
+    $("#operatorLoginForm").addEventListener("submit", (event) => handleRoleLogin(event, "operator"));
+    $("#supervisorLoginForm").addEventListener("submit", (event) => handleRoleLogin(event, "supervisor"));
     $("#operatorLogoutBtn").addEventListener("click", logout);
     $("#supervisorLogoutBtn").addEventListener("click", logout);
     $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => renderTab(btn.dataset.tab)));

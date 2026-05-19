@@ -4,7 +4,7 @@ App web responsive para control de presentismo con Supabase Auth, GPS y asignaci
 
 ## Qué resuelve
 
-- Login normal con Supabase Authentication: email y contraseña.
+- Login normal con Supabase Authentication: email y contraseña, separado por acceso de operario y acceso de supervisor.
 - Vista operario para registrar presencia, demora o ausencia.
 - Registro de hora, latitud, longitud, precisión GPS, distancia al servicio y validación contra radio permitido.
 - Vista supervisor con panel en vivo de presentes, demorados, ausentes y pendientes.
@@ -90,7 +90,12 @@ La lógica es simple: Supabase Auth valida la identidad; la tabla `profiles` def
 
 ## Modelo de login
 
-Ya no se usa PIN.
+Ya no se usa PIN. La pantalla inicial tiene dos accesos separados:
+
+- **Operario:** valida email/contraseña y solo permite perfiles con `profiles.role = operator`.
+- **Supervisor:** valida email/contraseña y solo permite perfiles con `profiles.role = supervisor` o `admin`.
+
+Si un operario intenta entrar por el acceso supervisor, la app cierra la sesión y bloquea el ingreso a ese panel. Mismo criterio para el caso inverso.
 
 El flujo correcto es:
 
@@ -100,6 +105,7 @@ El flujo correcto es:
 4. A partir de ahí, el rol se toma desde `profiles.role`:
    - `operator`: vista operario.
    - `supervisor`: vista supervisor.
+   - `admin`: habilitado como acceso supervisor si decidís usar ese rol.
 
 ## Alta de operarios
 
