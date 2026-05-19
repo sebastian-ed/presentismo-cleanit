@@ -58,6 +58,46 @@ where shift_date is null;
 alter table public.attendance_events
   alter column shift_date set not null;
 
+-- Compatibilidad con registro de salida.
+do $$
+declare
+  r record;
+begin
+  for r in
+    select c.conname
+    from pg_constraint c
+    join pg_class t on t.oid = c.conrelid
+    join pg_namespace n on n.oid = t.relnamespace
+    where n.nspname = 'public'
+      and t.relname = 'attendance_events'
+      and c.contype = 'c'
+      and pg_get_constraintdef(c.oid) ilike '%event_type%'
+  loop
+    execute format('alter table public.attendance_events drop constraint if exists %I', r.conname);
+  end loop;
+
+  for r in
+    select c.conname
+    from pg_constraint c
+    join pg_class t on t.oid = c.conrelid
+    join pg_namespace n on n.oid = t.relnamespace
+    where n.nspname = 'public'
+      and t.relname = 'attendance_events'
+      and c.contype = 'c'
+      and pg_get_constraintdef(c.oid) ilike '%observed_status%'
+  loop
+    execute format('alter table public.attendance_events drop constraint if exists %I', r.conname);
+  end loop;
+end $$;
+
+alter table public.attendance_events
+  add constraint attendance_events_event_type_check
+  check (event_type in ('present', 'checkout', 'late', 'absent'));
+
+alter table public.attendance_events
+  add constraint attendance_events_observed_status_check
+  check (observed_status in ('present', 'late', 'absent', 'on_time_exit', 'early_exit'));
+
 create index if not exists idx_profiles_role on public.profiles(role);
 create index if not exists idx_sites_active on public.sites(is_active);
 create index if not exists idx_assignments_operator on public.assignments(operator_id);

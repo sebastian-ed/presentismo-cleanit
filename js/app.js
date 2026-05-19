@@ -66,32 +66,108 @@
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 
-  function latestEventForShift(shiftId) {
+  function shiftEvents(shiftId) {
     return state.events
       .filter(event => event.shift_id === shiftId)
-      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   }
 
-  function getShiftStatus(shift, event = latestEventForShift(shift.id), at = new Date()) {
+  function latestEventForShift(shiftId, types = null) {
+    const events = shiftEvents(shiftId);
+    if (!types) return events[0];
+    const allowed = Array.isArray(types) ? types : [types];
+    return events.find(event => allowed.includes(event.event_type));
+  }
+
+  function getEntryEvent(shift) {
+    return latestEventForShift(shift.id, "present");
+  }
+
+  function getExitEvent(shift) {
+    return latestEventForShift(shift.id, "checkout");
+  }
+
+  function getManualEvent(shift) {
+    return latestEventForShift(shift.id, ["late", "absent"]);
+  }
+
+  function getEntryStatus(shift, entryEvent = getEntryEvent(shift), manualEvent = getManualEvent(shift), at = new Date()) {
     const start = getScheduledDateTime(shift, "scheduled_start");
     const grace = Number(shift.grace_minutes ?? 10);
     const absentAfter = Number(shift.absence_after_minutes ?? 30);
 
-    if (event) {
-      if (event.event_type === "absent") return { key: "absent", label: "Ausente informado", className: "status-absent" };
-      if (event.event_type === "late") return { key: "late", label: "Demora informada", className: "status-late" };
-      if (event.event_type === "present") {
-        if (event.is_inside_site === false) return { key: "outside", label: "Presente fuera de radio", className: "status-outside" };
-        if (event.observed_status === "late") return { key: "late", label: "Presente tarde", className: "status-late" };
-        return { key: "present", label: "Presente", className: "status-present" };
-      }
+    if (entryEvent) {
+      if (entryEvent.is_inside_site === false) return { key: "outside", label: "Entrada fuera de radio", className: "status-outside" };
+      if (entryEvent.observed_status === "late") return { key: "late", label: "Entrada tarde", className: "status-late" };
+      return { key: "present", label: "Entrada registrada", className: "status-present" };
     }
+
+    if (manualEvent?.event_type === "absent") return { key: "absent", label: "Ausente informado", className: "status-absent" };
+    if (manualEvent?.event_type === "late") return { key: "late", label: "Demora informada", className: "status-late" };
 
     const elapsed = diffMinutes(at, start);
     if (elapsed < 0) return { key: "scheduled", label: "Pendiente", className: "status-ok" };
     if (elapsed <= grace) return { key: "on_window", label: "En ventana horaria", className: "status-ok" };
     if (elapsed <= absentAfter) return { key: "late", label: "Demorado", className: "status-late" };
     return { key: "absent", label: "Ausente", className: "status-absent" };
+  }
+
+  function getExitStatus(shift, entryEvent = getEntryEvent(shift), exitEvent = getExitEvent(shift), at = new Date()) {
+    const end = getScheduledDateTime(shift, "scheduled_end");
+    const grace = Number(shift.grace_minutes ?? 10);
+
+    if (exitEvent) {
+      if (exitEvent.is_inside_site === false) return { key: "exit_outside", label: "Salida fuera de radio", className: "status-outside" };
+      if (exitEvent.observed_status === "early_exit") return { key: "early_exit", label: "Salida anticipada", className: "status-late" };
+      return { key: "completed", label: "Salida registrada", className: "status-present" };
+    }
+
+    if (!entryEvent) return { key: "not_started", label: "Sin entrada", className: "status-pending" };
+
+    const minutesAfterEnd = diffMinutes(at, end);
+    if (minutesAfterEnd < 0) return { key: "in_service", label: "En servicio", className: "status-ok" };
+    if (minutesAfterEnd <= grace) return { key: "exit_due", label: "Debe registrar salida", className: "status-late" };
+    return { key: "missing_exit", label: "Salida no registrada", className: "status-absent" };
+  }
+
+  function getShiftStatus(shift, at = new Date()) {
+    const entryEvent = getEntryEvent(shift);
+    const exitEvent = getExitEvent(shift);
+    const manualEvent = getManualEvent(shift);
+    const entryStatus = getEntryStatus(shift, entryEvent, manualEvent, at);
+    const exitStatus = getExitStatus(shift, entryEvent, exitEvent, at);
+
+    if (["completed", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(exitStatus.key)) return exitStatus;
+    if (entryEvent && exitStatus.key === "in_service") return { key: "in_service", label: "En servicio", className: "status-present" };
+    return entryStatus;
+  }
+
+  function eventTypeLabel(type) {
+    const labels = {
+      present: "Entrada",
+      checkout: "Salida",
+      late: "Demora",
+      absent: "Ausencia"
+    };
+    return labels[type] || type || "—";
+  }
+
+  function observedStatusLabel(status) {
+    const labels = {
+      present: "En horario",
+      late: "Tarde",
+      absent: "Ausente",
+      on_time_exit: "Salida correcta",
+      early_exit: "Salida anticipada"
+    };
+    return labels[status] || status || "—";
+  }
+
+  function gpsSummary(event) {
+    if (!event) return "—";
+    const precision = event.gps_accuracy_m ? `Prec. ${Math.round(event.gps_accuracy_m)} m` : "Prec. —";
+    const distance = event.distance_m ? `Dist. ${Math.round(event.distance_m)} m` : "Dist. —";
+    return `${precision} · ${distance}`;
   }
 
   function buildWhatsAppMessage(shift, status) {
@@ -101,14 +177,23 @@
     const base = `Buen día. Les informamos desde ${company} el estado del servicio de hoy en ${site?.name || "el consorcio"}.`;
     const name = operator?.full_name || "el operario asignado";
 
-    if (["present", "outside"].includes(status.key)) {
-      return `${base}\n\nEl operario ${name} ya registró presencia para el horario de ${formatTime(shift.scheduled_start)} a ${formatTime(shift.scheduled_end)}.\n\nCualquier novedad quedamos atentos.`;
+    if (["present", "in_service", "outside"].includes(status.key)) {
+      return `${base}\n\nEl operario ${name} ya registró entrada para el horario de ${formatTime(shift.scheduled_start)} a ${formatTime(shift.scheduled_end)}.\n\nCualquier novedad quedamos atentos.`;
+    }
+    if (status.key === "completed") {
+      return `${base}\n\nEl operario ${name} registró la salida del servicio correspondiente al horario de ${formatTime(shift.scheduled_start)} a ${formatTime(shift.scheduled_end)}.\n\nQuedamos atentos ante cualquier novedad.`;
+    }
+    if (status.key === "early_exit") {
+      return `${base}\n\nDetectamos una salida anticipada del operario ${name} respecto del horario previsto de finalización (${formatTime(shift.scheduled_end)}). Estamos revisando la situación operativa.\n\nDisculpen las molestias.`;
+    }
+    if (status.key === "missing_exit") {
+      return `${base}\n\nEl operario ${name} todavía no registró salida del servicio, cuyo horario de finalización previsto era ${formatTime(shift.scheduled_end)}. Estamos verificando el estado operativo.\n\nCualquier novedad la informamos por este medio.`;
     }
     if (status.key === "late") {
       return `${base}\n\nEl operario ${name} figura demorado para el horario de ingreso previsto (${formatTime(shift.scheduled_start)}). Estamos haciendo seguimiento operativo y les avisaremos cualquier actualización.\n\nDisculpen las molestias.`;
     }
     if (status.key === "absent") {
-      return `${base}\n\nEl operario ${name} aún no registró presencia para el horario previsto (${formatTime(shift.scheduled_start)}). Estamos gestionando la situación de forma prioritaria para resolverlo cuanto antes.\n\nDisculpen las molestias.`;
+      return `${base}\n\nEl operario ${name} aún no registró entrada para el horario previsto (${formatTime(shift.scheduled_start)}). Estamos gestionando la situación de forma prioritaria para resolverlo cuanto antes.\n\nDisculpen las molestias.`;
     }
     return `${base}\n\nEl servicio está programado para las ${formatTime(shift.scheduled_start)}. Ante cualquier novedad, les informamos por este medio.`;
   }
@@ -236,17 +321,30 @@
 
     container.innerHTML = shifts.map(shift => renderOperatorShiftCard(shift)).join("");
     container.querySelectorAll("[data-checkin]").forEach(btn => btn.addEventListener("click", () => handleCheckin(btn.dataset.checkin)));
+    container.querySelectorAll("[data-checkout]").forEach(btn => btn.addEventListener("click", () => handleCheckout(btn.dataset.checkout)));
     container.querySelectorAll("[data-late]").forEach(btn => btn.addEventListener("click", () => handleManualStatus(btn.dataset.late, "late")));
     container.querySelectorAll("[data-absent]").forEach(btn => btn.addEventListener("click", () => handleManualStatus(btn.dataset.absent, "absent")));
   }
 
   function renderOperatorShiftCard(shift) {
     const site = byId(state.sites, shift.site_id);
-    const event = latestEventForShift(shift.id);
-    const status = getShiftStatus(shift, event);
+    const entryEvent = getEntryEvent(shift);
+    const exitEvent = getExitEvent(shift);
+    const manualEvent = getManualEvent(shift);
+    const entryStatus = getEntryStatus(shift, entryEvent, manualEvent);
+    const exitStatus = getExitStatus(shift, entryEvent, exitEvent);
+    const operationalStatus = getShiftStatus(shift);
     const start = formatTime(shift.scheduled_start);
     const end = formatTime(shift.scheduled_end);
-    const last = event ? `Último registro: ${formatDateTime(event.created_at)}` : "Sin marcación registrada";
+    const lastEvent = latestEventForShift(shift.id);
+    const last = lastEvent ? `${eventTypeLabel(lastEvent.event_type)}: ${formatDateTime(lastEvent.created_at)}` : "Sin marcación registrada";
+    const entryDisabled = entryEvent ? "disabled" : "";
+    const exitDisabled = !entryEvent || exitEvent ? "disabled" : "";
+    const exitHelp = !entryEvent
+      ? "Primero registrá la entrada. La salida queda bloqueada hasta que exista ingreso."
+      : exitEvent
+        ? "La salida ya fue registrada para este servicio."
+        : "Al tocar el botón se registra hora de salida, GPS, precisión y distancia contra el punto cargado.";
 
     return `
       <article class="operator-card main-checkin">
@@ -256,33 +354,56 @@
             <h3 class="service-title">${escapeHtml(site?.name || "Servicio sin nombre")}</h3>
             <p class="muted">${escapeHtml(site?.address || "Sin dirección cargada")}</p>
           </div>
-          <span class="status-pill ${status.className}">${status.label}</span>
+          <span class="status-pill ${operationalStatus.className}">${operationalStatus.label}</span>
         </div>
 
         <div class="meta-grid">
           <div class="meta-item"><strong>Radio permitido</strong><span>${site?.gps_radius_m || 0} m</span></div>
-          <div class="meta-item"><strong>Registro</strong><span>${escapeHtml(last)}</span></div>
-          ${event ? `<div class="meta-item"><strong>Precisión GPS</strong><span>${event.gps_accuracy_m ? `${Math.round(event.gps_accuracy_m)} m` : "—"}</span></div>` : ""}
-          ${event ? `<div class="meta-item"><strong>Distancia al servicio</strong><span>${event.distance_m ? `${Math.round(event.distance_m)} m` : "—"}</span></div>` : ""}
+          <div class="meta-item"><strong>Último registro</strong><span>${escapeHtml(last)}</span></div>
+          <div class="meta-item"><strong>Entrada</strong><span class="status-pill ${entryStatus.className}">${entryStatus.label}</span><span class="meta-subline">${entryEvent ? `${formatDateTime(entryEvent.created_at)} · ${gpsSummary(entryEvent)}` : "Sin entrada registrada"}</span></div>
+          <div class="meta-item"><strong>Salida</strong><span class="status-pill ${exitStatus.className}">${exitStatus.label}</span><span class="meta-subline">${exitEvent ? `${formatDateTime(exitEvent.created_at)} · ${gpsSummary(exitEvent)}` : "Sin salida registrada"}</span></div>
         </div>
 
         <div class="checkin-box">
+          <div class="checkpoint-title-row">
+            <strong>Entrada al servicio</strong>
+            <span class="status-pill ${entryStatus.className}">${entryStatus.label}</span>
+          </div>
           <label class="checkbox-row">
-            <input type="checkbox" id="confirm-${escapeHtml(shift.id)}" />
+            <input type="checkbox" id="confirm-in-${escapeHtml(shift.id)}" ${entryDisabled} />
             <span>
               <strong>Confirmo que estoy presente en el servicio</strong><br />
-              <span class="muted small">Al tocar el botón se registra hora, ubicación GPS, precisión y distancia contra el punto cargado.</span>
+              <span class="muted small">Al registrar entrada se guarda hora, ubicación GPS, precisión y distancia contra el punto cargado.</span>
             </span>
           </label>
           <label>
-            <span>Observación opcional</span>
-            <textarea id="notes-${escapeHtml(shift.id)}" placeholder="Ej. Ingreso normal / Demora por transporte / Encargado no abrió..."></textarea>
+            <span>Observación de entrada opcional</span>
+            <textarea id="notes-in-${escapeHtml(shift.id)}" placeholder="Ej. Ingreso normal / Demora por transporte / Encargado no abrió..." ${entryDisabled}></textarea>
           </label>
-          <button class="primary-btn big-action" data-checkin="${escapeHtml(shift.id)}" type="button">Marcar presencia con GPS</button>
+          <button class="primary-btn big-action" data-checkin="${escapeHtml(shift.id)}" type="button" ${entryDisabled}>Registrar entrada con GPS</button>
           <div class="quick-actions">
-            <button class="secondary-btn" data-late="${escapeHtml(shift.id)}" type="button">Informar demora</button>
-            <button class="danger-btn" data-absent="${escapeHtml(shift.id)}" type="button">Informar ausencia</button>
+            <button class="secondary-btn" data-late="${escapeHtml(shift.id)}" type="button" ${entryEvent ? "disabled" : ""}>Informar demora</button>
+            <button class="danger-btn" data-absent="${escapeHtml(shift.id)}" type="button" ${entryEvent ? "disabled" : ""}>Informar ausencia</button>
           </div>
+        </div>
+
+        <div class="checkin-box exit-box">
+          <div class="checkpoint-title-row">
+            <strong>Salida del servicio</strong>
+            <span class="status-pill ${exitStatus.className}">${exitStatus.label}</span>
+          </div>
+          <label class="checkbox-row">
+            <input type="checkbox" id="confirm-out-${escapeHtml(shift.id)}" ${exitDisabled} />
+            <span>
+              <strong>Confirmo que estoy saliendo del servicio</strong><br />
+              <span class="muted small">${escapeHtml(exitHelp)}</span>
+            </span>
+          </label>
+          <label>
+            <span>Observación de salida opcional</span>
+            <textarea id="notes-out-${escapeHtml(shift.id)}" placeholder="Ej. Finalizó normal / Se retira por indicación del supervisor / Edificio cerrado..." ${exitDisabled}></textarea>
+          </label>
+          <button class="secondary-btn big-action" data-checkout="${escapeHtml(shift.id)}" type="button" ${exitDisabled}>Registrar salida con GPS</button>
         </div>
       </article>`;
   }
@@ -301,15 +422,32 @@
     });
   }
 
-  async function handleCheckin(shiftId) {
+  async function handleGpsAttendance(shiftId, mode) {
     const shift = state.shifts.find(s => s.id === shiftId);
     if (!shift) return toast("No se encontró el servicio asignado.");
     const site = byId(state.sites, shift.site_id);
-    const checkbox = document.getElementById(`confirm-${shiftId}`);
-    const notes = document.getElementById(`notes-${shiftId}`)?.value || "";
+    if (!site) return toast("No se encontró el servicio vinculado.");
 
+    const isCheckout = mode === "checkout";
+    const existingEntry = getEntryEvent(shift);
+    const existingExit = getExitEvent(shift);
+    const checkbox = document.getElementById(`${isCheckout ? "confirm-out" : "confirm-in"}-${shiftId}`);
+    const notes = document.getElementById(`${isCheckout ? "notes-out" : "notes-in"}-${shiftId}`)?.value || "";
+
+    if (isCheckout && !existingEntry) {
+      toast("Primero tiene que estar registrada la entrada.");
+      return;
+    }
+    if (!isCheckout && existingEntry) {
+      toast("La entrada ya fue registrada para este servicio.");
+      return;
+    }
+    if (isCheckout && existingExit) {
+      toast("La salida ya fue registrada para este servicio.");
+      return;
+    }
     if (!checkbox?.checked) {
-      toast("Primero marcá el checkbox de confirmación.");
+      toast(isCheckout ? "Primero marcá el checkbox de salida." : "Primero marcá el checkbox de entrada.");
       return;
     }
 
@@ -319,9 +457,20 @@
       const { latitude, longitude, accuracy } = position.coords;
       const distance = haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng));
       const isInside = distance <= Number(site.gps_radius_m || 100);
-      const start = getScheduledDateTime(shift);
-      const elapsed = diffMinutes(new Date(), start);
-      const observedStatus = elapsed > Number(shift.grace_minutes || 10) ? "late" : "present";
+      const now = new Date();
+      const scheduled = getScheduledDateTime(shift, isCheckout ? "scheduled_end" : "scheduled_start");
+      const grace = Number(shift.grace_minutes || 10);
+
+      let eventType = "present";
+      let observedStatus = "present";
+      if (isCheckout) {
+        eventType = "checkout";
+        const minutesBeforeEnd = diffMinutes(scheduled, now);
+        observedStatus = minutesBeforeEnd > grace ? "early_exit" : "on_time_exit";
+      } else {
+        const elapsed = diffMinutes(now, scheduled);
+        observedStatus = elapsed > grace ? "late" : "present";
+      }
 
       await store.createEvent({
         shift_id: shift.id,
@@ -329,7 +478,7 @@
         shift_date: shift.shift_date,
         operator_id: shift.operator_id,
         site_id: shift.site_id,
-        event_type: "present",
+        event_type: eventType,
         observed_status: observedStatus,
         notes,
         lat: latitude,
@@ -340,17 +489,31 @@
         client_time: new Date().toISOString()
       });
 
-      toast(isInside ? "Presencia registrada correctamente." : "Presencia registrada, pero fuera del radio permitido.");
+      if (isCheckout) {
+        if (!isInside) toast("Salida registrada, pero fuera del radio permitido.");
+        else if (observedStatus === "early_exit") toast("Salida registrada como anticipada.");
+        else toast("Salida registrada correctamente.");
+      } else {
+        toast(isInside ? "Entrada registrada correctamente." : "Entrada registrada, pero fuera del radio permitido.");
+      }
       await renderOperatorView();
     } catch (error) {
       toast(error.message || "No se pudo obtener ubicación GPS.");
     }
   }
 
+  async function handleCheckin(shiftId) {
+    return handleGpsAttendance(shiftId, "checkin");
+  }
+
+  async function handleCheckout(shiftId) {
+    return handleGpsAttendance(shiftId, "checkout");
+  }
+
   async function handleManualStatus(shiftId, eventType) {
     const shift = state.shifts.find(s => s.id === shiftId);
     if (!shift) return toast("No se encontró el servicio asignado.");
-    const notes = document.getElementById(`notes-${shiftId}`)?.value || "";
+    const notes = document.getElementById(`notes-in-${shiftId}`)?.value || "";
     const label = eventType === "late" ? "demora" : "ausencia";
     try {
       await store.createEvent({
@@ -391,28 +554,45 @@
     $(`#${tab}Tab`).classList.add("active");
   }
 
+  function statusDetailCell(status, event, emptyText) {
+    const when = event ? formatDateTime(event.created_at) : emptyText;
+    const gps = event ? `<br><span class="muted small">${escapeHtml(gpsSummary(event))}</span>` : "";
+    return `<span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${escapeHtml(when)}</span>${gps}`;
+  }
+
+  function hasOperationalAlert(row) {
+    return ["late", "absent", "outside"].includes(row.entryStatus.key)
+      || ["early_exit", "exit_outside", "missing_exit", "exit_due"].includes(row.exitStatus.key);
+  }
+
   function renderDashboard() {
     const rows = state.shifts.map(shift => {
-      const event = latestEventForShift(shift.id);
-      return { shift, event, status: getShiftStatus(shift, event) };
+      const entryEvent = getEntryEvent(shift);
+      const exitEvent = getExitEvent(shift);
+      const manualEvent = getManualEvent(shift);
+      const entryStatus = getEntryStatus(shift, entryEvent, manualEvent);
+      const exitStatus = getExitStatus(shift, entryEvent, exitEvent);
+      const status = getShiftStatus(shift);
+      const lastEvent = latestEventForShift(shift.id);
+      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent };
     });
     const counts = rows.reduce((acc, row) => {
       acc.total++;
-      if (["present"].includes(row.status.key)) acc.present++;
-      else if (["late", "outside"].includes(row.status.key)) acc.late++;
-      else if (row.status.key === "absent") acc.absent++;
-      else acc.pending++;
+      if (row.entryEvent) acc.entries++;
+      if (row.exitEvent) acc.exits++;
+      if (hasOperationalAlert(row)) acc.alerts++;
       return acc;
-    }, { total: 0, present: 0, late: 0, absent: 0, pending: 0 });
+    }, { total: 0, entries: 0, exits: 0, alerts: 0 });
 
     $("#kpiGrid").innerHTML = `
-      ${kpi("Turnos del día", counts.total)}
-      ${kpi("Presentes", counts.present, "status-present")}
-      ${kpi("Demorados / fuera de radio", counts.late, "status-late")}
-      ${kpi("Ausentes", counts.absent, "status-absent")}
+      ${kpi("Coberturas del día", counts.total)}
+      ${kpi("Entradas registradas", counts.entries, "status-present")}
+      ${kpi("Salidas registradas", counts.exits, "status-ok")}
+      ${kpi("Alertas operativas", counts.alerts, counts.alerts ? "status-late" : "status-present")}
     `;
 
-    const tableRows = rows.map(({ shift, event, status }) => {
+    const tableRows = rows.map(row => {
+      const { shift, entryEvent, exitEvent, entryStatus, exitStatus, status, lastEvent } = row;
       const operator = byId(state.profiles, shift.operator_id);
       const site = byId(state.sites, shift.site_id);
       const message = buildWhatsAppMessage(shift, status);
@@ -422,10 +602,9 @@
           <td><strong>${escapeHtml(operator?.full_name || "—")}</strong><br><span class="muted small">${escapeHtml(operator?.phone || "")}</span></td>
           <td><strong>${escapeHtml(site?.name || "—")}</strong><br><span class="muted small">${escapeHtml(site?.address || "")}</span></td>
           <td>${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}</td>
-          <td><span class="status-pill ${status.className}">${status.label}</span></td>
-          <td>${event ? formatDateTime(event.created_at) : "—"}</td>
-          <td>${event?.gps_accuracy_m ? `${Math.round(event.gps_accuracy_m)} m` : "—"}</td>
-          <td>${event?.distance_m ? `${Math.round(event.distance_m)} m` : "—"}</td>
+          <td>${statusDetailCell(entryStatus, entryEvent, "Sin entrada")}</td>
+          <td>${statusDetailCell(exitStatus, exitEvent, "Sin salida")}</td>
+          <td><span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.created_at)}` : "—"}</span></td>
           <td class="row-actions">
             <a class="wa-btn ${normalizePhone(site?.whatsapp_phone) ? "" : "disabled-link"}" href="${url}" target="_blank" rel="noopener">WhatsApp consorcio</a>
           </td>
@@ -435,9 +614,9 @@
     $("#liveTable").innerHTML = `
       <table>
         <thead>
-          <tr><th>Operario</th><th>Servicio</th><th>Horario</th><th>Estado</th><th>Último registro</th><th>Precisión</th><th>Distancia</th><th>Acción</th></tr>
+          <tr><th>Operario</th><th>Servicio</th><th>Horario</th><th>Entrada</th><th>Salida</th><th>Estado operativo</th><th>Acción</th></tr>
         </thead>
-        <tbody>${tableRows || `<tr><td colspan="8">No hay cobertura programada para esta fecha.</td></tr>`}</tbody>
+        <tbody>${tableRows || `<tr><td colspan="7">No hay cobertura programada para esta fecha.</td></tr>`}</tbody>
       </table>`;
     $("#lastRefreshLabel").textContent = `Actualizado ${new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })}`;
   }
@@ -751,7 +930,7 @@
           <td>${escapeHtml(event.shift_date || "—")}</td>
           <td>${escapeHtml(op?.full_name || event.operator_id || "—")}</td>
           <td>${escapeHtml(site?.name || event.site_id || "—")}</td>
-          <td>${escapeHtml(event.event_type || "—")}</td>
+          <td><strong>${escapeHtml(eventTypeLabel(event.event_type))}</strong><br><span class="muted small">${escapeHtml(observedStatusLabel(event.observed_status))}</span></td>
           <td>${event.lat ? `${Number(event.lat).toFixed(6)}, ${Number(event.lng).toFixed(6)}` : "—"}</td>
           <td>${event.gps_accuracy_m ? `${Math.round(event.gps_accuracy_m)} m` : "—"}</td>
           <td>${event.distance_m ? `${Math.round(event.distance_m)} m` : "—"}</td>
@@ -768,7 +947,7 @@
   }
 
   function exportCsv() {
-    const header = ["fecha_hora", "fecha_servicio", "operario", "servicio", "tipo", "estado", "lat", "lng", "precision_m", "distancia_m", "dentro_radio", "observacion", "assignment_id", "shift_id"];
+    const header = ["fecha_hora", "fecha_servicio", "operario", "servicio", "tipo", "tipo_legible", "estado", "estado_legible", "lat", "lng", "precision_m", "distancia_m", "dentro_radio", "observacion", "assignment_id", "shift_id"];
     const lines = state.events.map(event => {
       const op = byId(state.profiles, event.operator_id);
       const site = byId(state.sites, event.site_id);
@@ -778,7 +957,9 @@
         op?.full_name || event.operator_id || "",
         site?.name || event.site_id || "",
         event.event_type || "",
+        eventTypeLabel(event.event_type),
         event.observed_status || "",
+        observedStatusLabel(event.observed_status),
         event.lat || "",
         event.lng || "",
         event.gps_accuracy_m || "",

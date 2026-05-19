@@ -455,3 +455,28 @@ th { color: var(--muted); font-size: .76rem; text-transform: uppercase; letter-s
   border-radius: 16px;
   background: #f8fafc;
 }
+
+.meta-subline {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: .8rem;
+  line-height: 1.35;
+}
+.checkpoint-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.exit-box {
+  margin-top: 12px;
+  border-color: #cbd5e1;
+}
+button:disabled,
+textarea:disabled,
+input:disabled {
+  opacity: .58;
+  cursor: not-allowed;
+}
+.status-completed { background: #dcfce7; color: var(--success); border-color: #bbf7d0; }

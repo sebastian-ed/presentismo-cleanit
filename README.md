@@ -1,6 +1,6 @@
 # Clean It · Presentismo GPS
 
-App web responsive para control de presentismo con Supabase Auth, GPS y asignaciones semanales fijas.
+App web responsive para control de presentismo con Supabase Auth, GPS, asignaciones semanales fijas y registro de entrada/salida.
 
 ## Qué cambia en esta versión
 
@@ -9,7 +9,9 @@ App web responsive para control de presentismo con Supabase Auth, GPS y asignaci
 - Login normal con email y contraseña de Supabase Auth.
 - Compatible con el esquema donde `public.profiles.id` es el mismo UUID que `auth.users.id`.
 - El panel supervisor administra servicios, usuarios operativos y asignaciones semanales fijas.
-- El operario marca presencia con GPS sobre sus servicios asignados para el día.
+- El operario registra **entrada** con GPS y luego **salida** con GPS sobre el servicio asignado.
+- El panel supervisor muestra entrada, salida, estado operativo, precisión GPS, distancia al punto cargado y alertas por salida anticipada o salida no registrada.
+- El historial y el CSV diferencian `Entrada`, `Salida`, `Demora` y `Ausencia`.
 
 ## Flujo correcto de usuarios
 
@@ -37,20 +39,40 @@ Reemplazando primero el UUID del usuario.
 
 ## Instalación en Supabase
 
-### Si tu base ya tiene el esquema anterior que subiste
+### Si ya tenés instalada la versión anterior con asignaciones
 
 Ejecutá:
+
+```text
+supabase/migration_add_checkout_events.sql
+```
+
+Esto actualiza `attendance_events` para permitir el nuevo evento:
+
+```text
+checkout
+```
+
+También actualiza los estados de salida:
+
+```text
+on_time_exit
+early_exit
+```
+
+### Si tu base todavía tiene el esquema viejo de turnos puntuales
+
+Ejecutá primero:
 
 ```text
 supabase/migration_from_uploaded_schema_to_assignments.sql
 ```
 
-Esto agrega:
+Después ejecutá:
 
-- `assignments` para asignaciones semanales fijas.
-- Campos extra en `sites`: zona, supervisor y tipo de servicio.
-- Compatibilidad de `attendance_events` con turnos materializados desde asignaciones.
-- Políticas RLS ajustadas al modelo `profiles.id = auth.users.id`.
+```text
+supabase/migration_add_checkout_events.sql
+```
 
 ### Si vas a instalar desde cero
 
@@ -93,6 +115,23 @@ Horario: 08:00 a 12:00
 ```
 
 La app genera automáticamente el turno del día según la fecha seleccionada.
+
+## Lógica de entrada y salida
+
+Entrada:
+
+- El operario marca checkbox de entrada.
+- Toca `Registrar entrada con GPS`.
+- Se guarda hora, GPS, precisión, distancia al servicio y si está dentro del radio permitido.
+
+Salida:
+
+- La salida queda bloqueada hasta que exista una entrada registrada.
+- El operario marca checkbox de salida.
+- Toca `Registrar salida con GPS`.
+- Se guarda hora, GPS, precisión, distancia al servicio y si salió antes del horario pactado.
+
+La salida se considera anticipada si se registra antes de la hora de finalización menos la tolerancia configurada en la asignación.
 
 ## Punto crítico
 
