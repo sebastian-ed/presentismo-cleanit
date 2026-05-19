@@ -13,6 +13,10 @@
     return Boolean(CONFIG.SUPABASE_URL && CONFIG.SUPABASE_ANON_KEY && window.supabase);
   }
 
+  function normalizeEmail(email) {
+    return String(email || "").trim().toLowerCase();
+  }
+
   function isAssignmentActiveForDate(assignment, dateString) {
     if (assignment.is_active === false) return false;
     const day = isoDay(dateString);
@@ -55,9 +59,10 @@
       this.mode = "supabase";
       this.client = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {
         auth: {
-          persistSession: false,
-          autoRefreshToken: false,
-          detectSessionInUrl: false
+          persistSession: true,
+          autoRefreshToken: true,
+          detectSessionInUrl: true,
+          storageKey: "cleanit-presentismo-auth"
         }
       });
     }
@@ -71,21 +76,72 @@
       return copy;
     }
 
-    async loginWithPin(pin, desiredRole) {
-      const { data, error } = await this.client
+    async loginWithPassword(email, password) {
+      const normalizedEmail = normalizeEmail(email);
+      const { data, error } = await this.client.auth.signInWithPassword({
+        email: normalizedEmail,
+        password
+      });
+      if (error) throw new Error(error.message || "Email o contraseña incorrectos.");
+      if (!data?.user) throw new Error("No se pudo obtener el usuario autenticado.");
+      const profile = await this.loadProfileForAuthUser(data.user);
+      return { user: data.user, profile };
+    }
+
+    async getCurrentSessionProfile() {
+      const { data, error } = await this.client.auth.getSession();
+      if (error) throw error;
+      const user = data?.session?.user;
+      if (!user) return null;
+      const profile = await this.loadProfileForAuthUser(user);
+      return { user, profile };
+    }
+
+    async loadProfileForAuthUser(authUser) {
+      const email = normalizeEmail(authUser.email);
+
+      let { data, error } = await this.client
         .from("profiles")
         .select("*")
-        .eq("pin", String(pin))
-        .eq("role", desiredRole)
+        .eq("auth_user_id", authUser.id)
         .eq("is_active", true)
         .maybeSingle();
 
       if (error) throw error;
-      if (!data) throw new Error("PIN incorrecto o perfil inactivo.");
-      return { user: data, profile: data };
+
+      if (!data && email) {
+        const response = await this.client
+          .from("profiles")
+          .select("*")
+          .ilike("email", email)
+          .eq("is_active", true)
+          .maybeSingle();
+        if (response.error) throw response.error;
+        data = response.data;
+
+        if (data && !data.auth_user_id) {
+          const linked = await this.client
+            .from("profiles")
+            .update({ auth_user_id: authUser.id })
+            .eq("id", data.id)
+            .select("*")
+            .single();
+          if (linked.error) throw linked.error;
+          data = linked.data;
+        }
+      }
+
+      if (!data) {
+        throw new Error("El usuario existe en Supabase Auth, pero no tiene un perfil activo en la app. Creá o vinculá su perfil desde la tabla profiles.");
+      }
+
+      return data;
     }
 
-    async signOut() { return true; }
+    async signOut() {
+      await this.client.auth.signOut();
+      return true;
+    }
 
     async listProfiles(role) {
       let query = this.client
@@ -195,9 +251,14 @@
     }
 
     async upsertProfile(payload) {
+      const cleanPayload = this.clean({
+        ...payload,
+        email: normalizeEmail(payload.email)
+      });
+
       const { data, error } = await this.client
         .from("profiles")
-        .upsert(this.clean(payload))
+        .upsert(cleanPayload)
         .select("*")
         .single();
 

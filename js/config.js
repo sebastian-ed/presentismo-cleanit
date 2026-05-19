@@ -1,6 +1,5 @@
 window.APP_CONFIG = {
-  // Para producción: completar con datos de Supabase.
-  // Si queda vacío, la app funciona en modo local con localStorage.
+  // Configuración Supabase de producción.
   SUPABASE_URL: "https://ubdtdangxjjaptkhyqlq.supabase.co",
   SUPABASE_ANON_KEY: "sb_publishable_jow6AODdziH6cvUx_Wu9xg_cD3lWxdd",
 

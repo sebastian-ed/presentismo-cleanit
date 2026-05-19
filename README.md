@@ -1,21 +1,21 @@
-# Clean It · Presentismo GPS — Supabase
+# Clean It · Presentismo GPS
 
-App web mobile-first para control de presentismo con GPS, horarios fijos por servicio y panel vivo de supervisión.
-
-Esta versión trabaja **solo con Supabase**. No incluye persistencia local ni fallback con `localStorage`.
+App web responsive para control de presentismo con Supabase Auth, GPS y asignaciones semanales fijas.
 
 ## Qué resuelve
 
-- El operario marca presencia desde el celular con un checkbox y botón único.
-- La app registra hora, ubicación GPS, precisión, distancia al servicio y si está dentro del radio permitido.
-- El supervisor ve el estado operativo en vivo: presente, demorado, ausente, pendiente o fuera de radio.
-- Cada servicio tiene asignaciones semanales fijas: por ejemplo lunes, miércoles y viernes de 08:00 a 12:00.
-- Un operario puede tener varios servicios asignados.
-- Un servicio puede tener más de un operario el mismo día.
-- El supervisor puede crear, editar o eliminar servicios, usuarios y asignaciones desde la app.
-- Cada servicio puede tener WhatsApp precargado para avisar rápido al consorcio.
+- Login normal con Supabase Authentication: email y contraseña.
+- Vista operario para registrar presencia, demora o ausencia.
+- Registro de hora, latitud, longitud, precisión GPS, distancia al servicio y validación contra radio permitido.
+- Vista supervisor con panel en vivo de presentes, demorados, ausentes y pendientes.
+- Servicios con ubicación GPS, zona, supervisor y contacto de WhatsApp del consorcio.
+- Asignaciones fijas semanales: por ejemplo lunes, miércoles y viernes de 08:00 a 12:00.
+- Operarios con uno o varios servicios asignados.
+- Administración de perfiles operativos desde la app: crear, editar, desactivar y asignar rol.
+- Botón de WhatsApp para avisar rápido al consorcio según el estado del servicio.
+- Exportación CSV de registros.
 
-## Archivos importantes
+## Archivos principales
 
 ```text
 index.html
@@ -24,71 +24,108 @@ js/config.js
 js/storage.js
 js/app.js
 supabase/schema.sql
-supabase/migration_v1_to_assignments.sql
+supabase/migration_from_pin_to_supabase_auth.sql
+supabase/bootstrap_supervisor_template.sql
 ```
 
-`js/config.js` ya contiene la configuración Supabase provista para este proyecto.
+## Configuración
 
-## Instalación en Supabase
+El archivo `js/config.js` ya queda con esta estructura:
 
-### Si el proyecto Supabase está vacío
+```js
+window.APP_CONFIG = {
+  SUPABASE_URL: "https://TU-PROYECTO.supabase.co",
+  SUPABASE_ANON_KEY: "TU_ANON_KEY",
+  TIMEZONE: "America/Argentina/Buenos_Aires",
+  COMPANY_NAME: "Clean It"
+};
+```
 
-Ejecutar:
+## Instalación limpia
+
+Usá esta opción si el proyecto Supabase todavía no tiene las tablas de esta app.
+
+1. Ir a Supabase > SQL Editor.
+2. Ejecutar:
 
 ```text
 supabase/schema.sql
 ```
 
-Eso crea las tablas nuevas y un supervisor inicial con PIN `9999`.
-
-### Si ya habías usado la versión anterior de la app
-
-Ejecutar:
+3. Ir a Supabase > Authentication > Users.
+4. Crear el primer usuario supervisor con email y contraseña.
+5. Copiar el `User UID` de ese usuario.
+6. Abrir:
 
 ```text
-supabase/migration_v1_to_assignments.sql
+supabase/bootstrap_supervisor_template.sql
 ```
 
-Ese script:
+7. Reemplazar:
 
-- Agrega `pin` y `notes` a `profiles`.
-- Desacopla `profiles.id` de `auth.users` para que puedas crear usuarios desde la app.
-- Agrega `zone`, `supervisor_name` y `service_type` a `sites`.
-- Crea `assignments` para horarios fijos semanales.
-- Migra turnos puntuales antiguos a asignaciones limitadas a esa fecha.
-- Ajusta `attendance_events` para que funcione con turnos generados desde asignaciones.
-- Reemplaza políticas RLS anteriores por políticas compatibles con este MVP por PIN.
+```text
+PEGAR_AUTH_USER_UID_AQUI
+supervisor@cleanit.com
+Supervisor Clean It
+```
 
-## Acceso
+8. Ejecutar el SQL.
+9. Entrar a la app con ese email y contraseña.
 
-La app usa acceso por PIN operativo guardado en `profiles`.
+## Migración desde la versión con PIN
 
-- Supervisor inicial: `9999`, si corrés el SQL de instalación limpia o la migración y no existe otro PIN.
-- Después conviene entrar como supervisor, crear usuarios reales y cambiar el PIN inicial.
+Usá esta opción si ya habías ejecutado una versión anterior de la app.
+
+1. Ejecutar en Supabase SQL Editor:
+
+```text
+supabase/migration_from_pin_to_supabase_auth.sql
+```
+
+2. Crear o verificar los usuarios en Supabase > Authentication > Users.
+3. Para el primer supervisor, ejecutar `bootstrap_supervisor_template.sql` con el `User UID` real.
+4. Desde el panel supervisor, editar o crear los perfiles operativos con el mismo email que tienen en Supabase Auth.
+
+La lógica es simple: Supabase Auth valida la identidad; la tabla `profiles` define el rol operativo y los datos internos de la app.
+
+## Modelo de login
+
+Ya no se usa PIN.
+
+El flujo correcto es:
+
+1. Usuario existe en Supabase Authentication.
+2. Usuario existe en `public.profiles` con el mismo email.
+3. Al primer login, la app vincula automáticamente `profiles.auth_user_id` con `auth.users.id`.
+4. A partir de ahí, el rol se toma desde `profiles.role`:
+   - `operator`: vista operario.
+   - `supervisor`: vista supervisor.
+
+## Alta de operarios
+
+Desde la app podés crear el perfil operativo, pero la contraseña no se crea desde el front-end. Eso es deliberado.
+
+Para que un operario pueda entrar:
+
+1. Crear el usuario en Supabase Authentication.
+2. Crear el perfil en la app con el mismo email.
+3. Asignarle servicios y horarios.
+
+Crear usuarios de Auth desde el navegador con permisos administrativos sería una mala práctica. Eso requiere una Edge Function con service role o hacerlo desde el panel de Supabase.
 
 ## Publicación
 
-Subí estos archivos a GitHub Pages, Netlify o cualquier hosting estático con HTTPS.
+Podés subir estos archivos a GitHub Pages, Netlify o Vercel.
 
-El GPS en celulares requiere HTTPS. GitHub Pages y Netlify ya lo resuelven.
+Para que el GPS funcione bien en celulares, la app debe correr en HTTPS. `localhost` sirve para desarrollo, pero en producción usá dominio con certificado.
 
-## Uso operativo
+## Seguridad
 
-1. Entrar como supervisor.
-2. Cargar operarios en **Usuarios**.
-3. Cargar servicios/consorcios en **Servicios** con latitud, longitud y radio GPS.
-4. Cargar horarios fijos en **Asignaciones**.
-5. Ver el estado diario en **En vivo**.
-6. Usar el botón de WhatsApp para avisar rápido al consorcio ante demora o ausencia.
+La app usa Row Level Security:
 
-## Criterio GPS recomendado
+- Operarios solo leen sus asignaciones y sus registros.
+- Supervisores administran servicios, perfiles y asignaciones.
+- El acceso anónimo a tablas queda revocado.
+- La identidad se valida con Supabase Auth.
 
-- CABA/consorcios: radio entre 80 y 150 metros.
-- Plantas grandes o predios amplios: radio mayor, pero justificado.
-- No uses radios enormes. Si el radio es demasiado amplio, el dato pierde valor operativo y probatorio.
-
-## Nota crítica de seguridad
-
-Este MVP usa PIN + políticas RLS abiertas para que la operación sea simple desde una app estática. Es práctico para empezar, pero no es el modelo definitivo si el sistema escala.
-
-Para una versión más sólida: Supabase Auth, roles reales, Edge Functions para alta de usuarios y políticas RLS por usuario. No lo mezcles a medias: seguridad improvisada es deuda técnica con intereses.
+No publiques `service_role` en el front-end. Nunca. Eso no es una optimización: es dejar la caja abierta con un cartel de “no tocar”.

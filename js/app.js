@@ -13,7 +13,6 @@
   ];
 
   const state = {
-    loginMode: "operator",
     currentUser: null,
     currentProfile: null,
     sites: [],
@@ -141,18 +140,15 @@
     pill.classList.remove("status-pending");
   }
 
-  function renderLoginMode() {
-    $$("[data-login-mode]").forEach(btn => btn.classList.toggle("active", btn.dataset.loginMode === state.loginMode));
-  }
-
-  async function handlePinLogin(event) {
+  async function handleAuthLogin(event) {
     event.preventDefault();
     try {
-      const pin = $("#loginPin").value.trim();
-      const { user, profile } = await store.loginWithPin(pin, state.loginMode);
+      const email = $("#loginEmail").value.trim();
+      const password = $("#loginPassword").value;
+      const { user, profile } = await store.loginWithPassword(email, password);
       state.currentUser = user;
       state.currentProfile = profile;
-      $("#loginPin").value = "";
+      $("#loginPassword").value = "";
       await afterLogin();
     } catch (error) {
       toast(error.message || "No se pudo ingresar.");
@@ -641,8 +637,8 @@
     list.innerHTML = state.profiles.map(user => `
       <div class="list-item">
         <div class="list-item-title">${escapeHtml(user.full_name)}</div>
-        <div class="muted small">${user.role === "supervisor" ? "Supervisor" : "Operario"} · ${escapeHtml(user.phone || "Sin teléfono")}</div>
-        <div class="muted small">PIN: ${escapeHtml(user.pin || "—")} · ID: ${escapeHtml(user.id)}</div>
+        <div class="muted small">${user.role === "supervisor" ? "Supervisor" : "Operario"} · ${escapeHtml(user.email || "Sin email")} · ${escapeHtml(user.phone || "Sin teléfono")}</div>
+        <div class="muted small">Auth: ${user.auth_user_id ? "vinculado" : "pendiente de vincular por email"} · ID perfil: ${escapeHtml(user.id)}</div>
         ${user.notes ? `<div class="muted small">Notas: ${escapeHtml(user.notes)}</div>` : ""}
         <div class="list-item-actions">
           <button class="secondary-btn small-btn" data-edit-user="${user.id}" type="button">Editar</button>
@@ -659,8 +655,8 @@
     return {
       ...(id ? { id } : {}),
       full_name: $("#userName").value.trim(),
+      email: $("#userEmail").value.trim().toLowerCase(),
       phone: $("#userPhone").value.trim(),
-      pin: $("#userPin").value.trim(),
       role: $("#userRole").value,
       notes: $("#userNotes").value.trim(),
       is_active: true
@@ -681,8 +677,8 @@
     $("#userId").value = user.id;
     $("#userRole").value = user.role || "operator";
     $("#userName").value = user.full_name || "";
+    $("#userEmail").value = user.email || "";
     $("#userPhone").value = user.phone || "";
-    $("#userPin").value = user.pin || "";
     $("#userNotes").value = user.notes || "";
     $("#userFormTitle").textContent = "Editar usuario";
     $("#cancelUserEditBtn").classList.remove("hidden");
@@ -759,11 +755,7 @@
   }
 
   function bindEvents() {
-    $$("[data-login-mode]").forEach(btn => btn.addEventListener("click", () => {
-      state.loginMode = btn.dataset.loginMode;
-      renderLoginMode();
-    }));
-    $("#pinLoginForm").addEventListener("submit", handlePinLogin);
+    $("#authLoginForm").addEventListener("submit", handleAuthLogin);
     $("#operatorLogoutBtn").addEventListener("click", logout);
     $("#supervisorLogoutBtn").addEventListener("click", logout);
     $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => renderTab(btn.dataset.tab)));
@@ -805,13 +797,24 @@
     $("#exportCsvBtn").addEventListener("click", exportCsv);
   }
 
-  function init() {
+  async function init() {
     renderConnectionMode();
-    renderLoginMode();
     renderAssignmentDays();
     $("#dashboardDate").value = todayISO();
     $("#assignmentValidFrom").value = todayISO();
     bindEvents();
+
+    try {
+      const session = await store.getCurrentSessionProfile();
+      if (session?.user && session?.profile) {
+        state.currentUser = session.user;
+        state.currentProfile = session.profile;
+        await afterLogin();
+      }
+    } catch (error) {
+      await store.signOut();
+      setView("#loginView");
+    }
   }
 
   init();

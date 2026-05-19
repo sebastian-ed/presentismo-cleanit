@@ -30,19 +30,18 @@
           </div>
 
           <div class="login-card">
-            <div class="segmented" role="tablist" aria-label="Tipo de acceso">
-              <button class="segmented-btn active" data-login-mode="operator" type="button">Operario</button>
-              <button class="segmented-btn" data-login-mode="supervisor" type="button">Supervisor</button>
-            </div>
-
-            <form id="pinLoginForm" class="form-stack">
+            <form id="authLoginForm" class="form-stack">
               <div class="notice compact">
-                <strong>Acceso conectado a Supabase.</strong>
-                <span>Ingresá con el PIN cargado en la tabla de usuarios. El supervisor puede crear y editar operarios desde la app.</span>
+                <strong>Acceso con Supabase Auth.</strong>
+                <span>Ingresá con el email y la contraseña creados en Authentication. El rol operativo se toma desde el perfil interno de la app.</span>
               </div>
               <label>
-                <span>PIN de acceso</span>
-                <input id="loginPin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="Ej. 1001" required />
+                <span>Email</span>
+                <input id="loginEmail" type="email" autocomplete="username" placeholder="operario@cleanit.com" required />
+              </label>
+              <label>
+                <span>Contraseña</span>
+                <input id="loginPassword" type="password" autocomplete="current-password" placeholder="••••••••" required />
               </label>
               <button class="primary-btn" type="submit">Ingresar</button>
             </form>
@@ -202,11 +201,11 @@
               <input type="hidden" id="userId" />
               <label><span>Rol</span><select id="userRole" required><option value="operator">Operario</option><option value="supervisor">Supervisor</option></select></label>
               <label><span>Nombre completo</span><input id="userName" required placeholder="Nombre y apellido" /></label>
+              <label><span>Email de login</span><input id="userEmail" type="email" required placeholder="usuario@empresa.com" /></label>
               <label><span>Teléfono</span><input id="userPhone" placeholder="+549..." /></label>
-              <label><span>PIN de acceso</span><input id="userPin" inputmode="numeric" required placeholder="Ej. 1004" /></label>
               <label><span>Notas</span><textarea id="userNotes" placeholder="Datos internos, reemplazos, observaciones operativas..."></textarea></label>
-              <button class="primary-btn" type="submit">Guardar usuario</button>
-              <p class="muted small">Desde esta vista podés crear, editar o dar de baja operarios sin tocar Supabase.</p>
+              <button class="primary-btn" type="submit">Guardar perfil</button>
+              <p class="muted small">El usuario debe existir en Supabase Authentication con ese mismo email. Desde acá administrás el perfil operativo, rol y asignaciones; la contraseña se gestiona en Supabase Auth.</p>
             </form>
             <div class="data-card">
               <h3>Usuarios cargados</h3>
