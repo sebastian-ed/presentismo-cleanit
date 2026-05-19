@@ -1,7 +1,6 @@
 -- Clean It · Presentismo GPS con asignaciones semanales fijas
--- Ejecutar en Supabase SQL Editor.
--- Modelo práctico con acceso por PIN desde la app. Para seguridad corporativa estricta,
--- conviene reemplazar PIN por Supabase Auth + Edge Function de administración de usuarios.
+-- Instalación limpia para Supabase.
+-- Ejecutar en SQL Editor si el proyecto todavía no tiene las tablas de esta app.
 
 create extension if not exists pgcrypto;
 
@@ -10,7 +9,7 @@ create table if not exists public.profiles (
   full_name text not null,
   role text not null check (role in ('operator', 'supervisor')),
   phone text,
-  pin text not null unique,
+  pin text unique,
   notes text,
   is_active boolean not null default true,
   created_at timestamptz not null default now(),
@@ -73,8 +72,8 @@ create table if not exists public.attendance_events (
   created_at timestamptz not null default now()
 );
 
+create unique index if not exists idx_profiles_pin_unique on public.profiles(pin) where pin is not null;
 create index if not exists idx_profiles_role on public.profiles(role);
-create index if not exists idx_profiles_pin on public.profiles(pin);
 create index if not exists idx_sites_active on public.sites(is_active);
 create index if not exists idx_assignments_operator on public.assignments(operator_id);
 create index if not exists idx_assignments_site on public.assignments(site_id);
@@ -108,34 +107,66 @@ create trigger trg_assignments_updated_at
 before update on public.assignments
 for each row execute function public.set_updated_at();
 
--- RLS simple para MVP interno. La anon key puede operar la app.
--- Para hardening real: usar Supabase Auth, roles, Edge Functions y políticas por usuario.
 alter table public.profiles enable row level security;
 alter table public.sites enable row level security;
 alter table public.assignments enable row level security;
 alter table public.attendance_events enable row level security;
 
 drop policy if exists "app_read_profiles" on public.profiles;
-create policy "app_read_profiles" on public.profiles for select using (true);
 drop policy if exists "app_write_profiles" on public.profiles;
-create policy "app_write_profiles" on public.profiles for all using (true) with check (true);
-
 drop policy if exists "app_read_sites" on public.sites;
-create policy "app_read_sites" on public.sites for select using (true);
 drop policy if exists "app_write_sites" on public.sites;
-create policy "app_write_sites" on public.sites for all using (true) with check (true);
-
 drop policy if exists "app_read_assignments" on public.assignments;
-create policy "app_read_assignments" on public.assignments for select using (true);
 drop policy if exists "app_write_assignments" on public.assignments;
-create policy "app_write_assignments" on public.assignments for all using (true) with check (true);
-
 drop policy if exists "app_read_attendance" on public.attendance_events;
-create policy "app_read_attendance" on public.attendance_events for select using (true);
 drop policy if exists "app_write_attendance" on public.attendance_events;
+
+create policy "app_read_profiles" on public.profiles for select using (true);
+create policy "app_write_profiles" on public.profiles for all using (true) with check (true);
+create policy "app_read_sites" on public.sites for select using (true);
+create policy "app_write_sites" on public.sites for all using (true) with check (true);
+create policy "app_read_assignments" on public.assignments for select using (true);
+create policy "app_write_assignments" on public.assignments for all using (true) with check (true);
+create policy "app_read_attendance" on public.attendance_events for select using (true);
 create policy "app_write_attendance" on public.attendance_events for insert with check (true);
 
--- Bootstrap opcional para poder entrar por primera vez.
+grant usage on schema public to anon, authenticated;
+grant select, insert, update on public.profiles to anon, authenticated;
+grant select, insert, update on public.sites to anon, authenticated;
+grant select, insert, update on public.assignments to anon, authenticated;
+grant select, insert on public.attendance_events to anon, authenticated;
+
+create or replace view public.attendance_report as
+select
+  ae.id,
+  ae.created_at,
+  ae.client_time,
+  ae.event_type,
+  ae.observed_status,
+  ae.notes,
+  ae.lat,
+  ae.lng,
+  ae.gps_accuracy_m,
+  ae.distance_m,
+  ae.is_inside_site,
+  ae.shift_id,
+  ae.shift_date,
+  a.scheduled_start,
+  a.scheduled_end,
+  a.days_of_week,
+  p.full_name as operator_name,
+  p.phone as operator_phone,
+  si.name as site_name,
+  si.address as site_address,
+  si.zone as site_zone,
+  si.supervisor_name,
+  si.whatsapp_name,
+  si.whatsapp_phone
+from public.attendance_events ae
+left join public.assignments a on a.id = ae.assignment_id
+left join public.profiles p on p.id = ae.operator_id
+left join public.sites si on si.id = ae.site_id;
+
 insert into public.profiles (full_name, role, phone, pin, notes)
-values ('Supervisor Clean It', 'supervisor', '+5491100000000', '9999', 'Usuario inicial')
+values ('Supervisor Clean It', 'supervisor', '+5491100000000', '9999', 'Usuario inicial. Cambiar PIN desde la app.')
 on conflict (pin) do nothing;

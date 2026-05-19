@@ -1,114 +1,94 @@
-# Clean It · Presentismo GPS
+# Clean It · Presentismo GPS — Supabase
 
 App web mobile-first para control de presentismo con GPS, horarios fijos por servicio y panel vivo de supervisión.
 
-## Qué cambió en esta versión
+Esta versión trabaja **solo con Supabase**. No incluye persistencia local ni fallback con `localStorage`.
 
-La app ya no obliga a cargar turno por turno. Ahora trabaja con **asignaciones semanales fijas**:
+## Qué resuelve
 
-- Un servicio puede tener cobertura lunes, miércoles y viernes de 08:00 a 12:00.
-- Un operario puede tener uno o varios servicios asignados.
-- Un servicio puede tener más de un operario en el mismo día y horario.
-- Las asignaciones tienen vigencia desde / hasta para reemplazos, bajas o cambios temporales.
+- El operario marca presencia desde el celular con un checkbox y botón único.
+- La app registra hora, ubicación GPS, precisión, distancia al servicio y si está dentro del radio permitido.
+- El supervisor ve el estado operativo en vivo: presente, demorado, ausente, pendiente o fuera de radio.
+- Cada servicio tiene asignaciones semanales fijas: por ejemplo lunes, miércoles y viernes de 08:00 a 12:00.
+- Un operario puede tener varios servicios asignados.
+- Un servicio puede tener más de un operario el mismo día.
 - El supervisor puede crear, editar o eliminar servicios, usuarios y asignaciones desde la app.
+- Cada servicio puede tener WhatsApp precargado para avisar rápido al consorcio.
 
-## Qué incluye
-
-- Vista operario: marcación con checkbox, GPS de alta precisión, observación opcional, demora y ausencia informada.
-- Vista supervisor: estado en vivo por fecha operativa.
-- Cobertura semanal por servicio, con formato tipo planificador: días, operarios, horarios y “Sin cobertura”.
-- CRUD de servicios/consorcios con zona, supervisor, WhatsApp, dirección, latitud, longitud y radio GPS.
-- CRUD de asignaciones semanales fijas.
-- CRUD de usuarios: operarios y supervisores con PIN de acceso.
-- Botón WhatsApp por servicio/consorcio con mensaje automático según estado.
-- Historial de marcaciones y exportación CSV.
-- Modo local con `localStorage` sin configurar Supabase.
-- SQL listo para Supabase.
-
-## Cómo probar localmente
-
-No abras el archivo directamente con doble click si querés probar GPS. Los navegadores suelen exigir HTTPS o `localhost` para geolocalización.
-
-Desde la carpeta del proyecto:
-
-```bash
-python -m http.server 8080
-```
-
-Después abrir:
+## Archivos importantes
 
 ```text
-http://localhost:8080
+index.html
+styles.css
+js/config.js
+js/storage.js
+js/app.js
+supabase/schema.sql
+supabase/migration_v1_to_assignments.sql
 ```
 
-### Accesos demo
+`js/config.js` ya contiene la configuración Supabase provista para este proyecto.
 
-- Supervisor: PIN `9999`
-- Operarios: PIN `1001`, `1002`, `1003`, `1004`, `1005`
+## Instalación en Supabase
 
-## Cómo conectar con Supabase
+### Si el proyecto Supabase está vacío
 
-1. Crear un proyecto en Supabase.
-2. Ir a SQL Editor y ejecutar `supabase/schema.sql`.
-3. Completar `js/config.js`:
-
-```js
-window.APP_CONFIG = {
-  SUPABASE_URL: "https://TU-PROYECTO.supabase.co",
-  SUPABASE_ANON_KEY: "TU_ANON_KEY",
-  TIMEZONE: "America/Argentina/Buenos_Aires",
-  COMPANY_NAME: "Clean It"
-};
-```
-
-Cuando esos valores estén completos, la app cambia automáticamente de modo local a Supabase.
-
-El SQL crea un supervisor inicial:
+Ejecutar:
 
 ```text
-PIN supervisor: 9999
+supabase/schema.sql
 ```
 
-Después, desde la propia app, podés crear operarios, servicios y asignaciones.
+Eso crea las tablas nuevas y un supervisor inicial con PIN `9999`.
 
-## Modelo operativo
+### Si ya habías usado la versión anterior de la app
 
-### Servicios
+Ejecutar:
 
-Representan consorcios o clientes. Cada servicio tiene:
+```text
+supabase/migration_v1_to_assignments.sql
+```
 
-- Nombre.
-- Dirección.
-- Zona o barrio.
-- Supervisor.
-- Tipo de cobertura.
-- Latitud y longitud.
-- Radio GPS permitido.
-- Contacto de WhatsApp.
+Ese script:
 
-### Asignaciones
+- Agrega `pin` y `notes` a `profiles`.
+- Desacopla `profiles.id` de `auth.users` para que puedas crear usuarios desde la app.
+- Agrega `zone`, `supervisor_name` y `service_type` a `sites`.
+- Crea `assignments` para horarios fijos semanales.
+- Migra turnos puntuales antiguos a asignaciones limitadas a esa fecha.
+- Ajusta `attendance_events` para que funcione con turnos generados desde asignaciones.
+- Reemplaza políticas RLS anteriores por políticas compatibles con este MVP por PIN.
 
-Representan la cobertura fija. Cada asignación tiene:
+## Acceso
 
-- Operario.
-- Servicio.
-- Días de la semana.
-- Hora de ingreso y salida.
-- Tolerancia de demora.
-- Minutos desde los cuales se considera ausente.
-- Vigencia desde / hasta.
+La app usa acceso por PIN operativo guardado en `profiles`.
 
-La app genera automáticamente los turnos del día según esas asignaciones.
+- Supervisor inicial: `9999`, si corrés el SQL de instalación limpia o la migración y no existe otro PIN.
+- Después conviene entrar como supervisor, crear usuarios reales y cambiar el PIN inicial.
 
-## Recomendación operativa crítica
+## Publicación
 
-Para que el control sea defendible frente a un cliente o consorcio:
+Subí estos archivos a GitHub Pages, Netlify o cualquier hosting estático con HTTPS.
 
-- Cargar la ubicación exacta del punto de ingreso al edificio.
-- Usar radios razonables: 80 a 150 metros suele ser práctico en CABA; más puede servir para plantas grandes.
-- No usar radios enormes porque destruyen el valor probatorio del sistema.
-- Informar formalmente a los operarios que la marcación registra hora, ubicación GPS, precisión y distancia al servicio.
+El GPS en celulares requiere HTTPS. GitHub Pages y Netlify ya lo resuelven.
 
-## Nota de seguridad
+## Uso operativo
 
-Esta versión usa acceso por PIN para simplificar la operación y permitir crear usuarios desde la app sin entrar a Supabase. Para una implementación corporativa más estricta, conviene migrar el acceso a Supabase Auth y crear usuarios con una Edge Function protegida por service role.
+1. Entrar como supervisor.
+2. Cargar operarios en **Usuarios**.
+3. Cargar servicios/consorcios en **Servicios** con latitud, longitud y radio GPS.
+4. Cargar horarios fijos en **Asignaciones**.
+5. Ver el estado diario en **En vivo**.
+6. Usar el botón de WhatsApp para avisar rápido al consorcio ante demora o ausencia.
+
+## Criterio GPS recomendado
+
+- CABA/consorcios: radio entre 80 y 150 metros.
+- Plantas grandes o predios amplios: radio mayor, pero justificado.
+- No uses radios enormes. Si el radio es demasiado amplio, el dato pierde valor operativo y probatorio.
+
+## Nota crítica de seguridad
+
+Este MVP usa PIN + políticas RLS abiertas para que la operación sea simple desde una app estática. Es práctico para empezar, pero no es el modelo definitivo si el sistema escala.
+
+Para una versión más sólida: Supabase Auth, roles reales, Edge Functions para alta de usuarios y políticas RLS por usuario. No lo mezcles a medias: seguridad improvisada es deuda técnica con intereses.

@@ -136,10 +136,9 @@
 
   function renderConnectionMode() {
     const pill = $("#connectionPill");
-    const isSupabase = store.mode === "supabase";
-    pill.textContent = isSupabase ? "Supabase conectado" : "Modo local";
-    pill.classList.toggle("status-present", isSupabase);
-    pill.classList.toggle("status-pending", !isSupabase);
+    pill.textContent = "Supabase conectado";
+    pill.classList.add("status-present");
+    pill.classList.remove("status-pending");
   }
 
   function renderLoginMode() {
