@@ -445,3 +445,13 @@ th { color: var(--muted); font-size: .76rem; text-transform: uppercase; letter-s
 @media (min-width: 1120px) {
   .coverage-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+.login-mode-copy {
+  display: grid;
+  gap: 4px;
+  margin: 2px 0 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #f8fafc;
+}

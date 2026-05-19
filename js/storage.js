@@ -98,41 +98,17 @@
     }
 
     async loadProfileForAuthUser(authUser) {
-      const email = normalizeEmail(authUser.email);
-
-      let { data, error } = await this.client
+      const { data, error } = await this.client
         .from("profiles")
         .select("*")
-        .eq("auth_user_id", authUser.id)
+        .eq("id", authUser.id)
         .eq("is_active", true)
         .maybeSingle();
 
       if (error) throw error;
 
-      if (!data && email) {
-        const response = await this.client
-          .from("profiles")
-          .select("*")
-          .ilike("email", email)
-          .eq("is_active", true)
-          .maybeSingle();
-        if (response.error) throw response.error;
-        data = response.data;
-
-        if (data && !data.auth_user_id) {
-          const linked = await this.client
-            .from("profiles")
-            .update({ auth_user_id: authUser.id })
-            .eq("id", data.id)
-            .select("*")
-            .single();
-          if (linked.error) throw linked.error;
-          data = linked.data;
-        }
-      }
-
       if (!data) {
-        throw new Error("El usuario existe en Supabase Auth, pero no tiene un perfil activo en la app. Creá o vinculá su perfil desde la tabla profiles.");
+        throw new Error("El usuario existe en Supabase Authentication, pero no tiene un perfil activo en public.profiles con el mismo UUID. Creá el perfil con id = User UID.");
       }
 
       return data;
@@ -251,10 +227,8 @@
     }
 
     async upsertProfile(payload) {
-      const cleanPayload = this.clean({
-        ...payload,
-        email: normalizeEmail(payload.email)
-      });
+      const cleanPayload = this.clean(payload);
+      if (!cleanPayload.id) throw new Error("Falta el UUID del usuario de Supabase Auth.");
 
       const { data, error } = await this.client
         .from("profiles")

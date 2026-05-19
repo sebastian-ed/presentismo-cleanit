@@ -2,20 +2,67 @@
 
 App web responsive para control de presentismo con Supabase Auth, GPS y asignaciones semanales fijas.
 
-## Qué resuelve
+## Qué cambia en esta versión
 
-- Login normal con Supabase Authentication: email y contraseña, separado por acceso de operario y acceso de supervisor.
-- Vista operario para registrar presencia, demora o ausencia.
-- Registro de hora, latitud, longitud, precisión GPS, distancia al servicio y validación contra radio permitido.
-- Vista supervisor con panel en vivo de presentes, demorados, ausentes y pendientes.
-- Servicios con ubicación GPS, zona, supervisor y contacto de WhatsApp del consorcio.
-- Asignaciones fijas semanales: por ejemplo lunes, miércoles y viernes de 08:00 a 12:00.
-- Operarios con uno o varios servicios asignados.
-- Administración de perfiles operativos desde la app: crear, editar, desactivar y asignar rol.
-- Botón de WhatsApp para avisar rápido al consorcio según el estado del servicio.
-- Exportación CSV de registros.
+- Login con la estructura operario / supervisor en una sola pantalla.
+- Sin PIN y sin modo local.
+- Login normal con email y contraseña de Supabase Auth.
+- Compatible con el esquema donde `public.profiles.id` es el mismo UUID que `auth.users.id`.
+- El panel supervisor administra servicios, usuarios operativos y asignaciones semanales fijas.
+- El operario marca presencia con GPS sobre sus servicios asignados para el día.
 
-## Archivos principales
+## Flujo correcto de usuarios
+
+1. Crear el usuario en Supabase > Authentication > Users.
+2. Copiar el `User UID`.
+3. Crear el perfil en `public.profiles` usando ese mismo UUID en la columna `id`.
+4. Asignar el rol:
+   - `operator` para operario.
+   - `supervisor` para supervisor.
+
+Ejemplo:
+
+```sql
+insert into public.profiles (id, full_name, role, phone, is_active)
+values ('UUID_DEL_USUARIO_AUTH', 'Nombre Apellido', 'supervisor', '+5491100000000', true);
+```
+
+Si tu usuario ya existe en Auth pero no podés ingresar, ejecutá:
+
+```text
+supabase/bootstrap_current_user_profile.sql
+```
+
+Reemplazando primero el UUID del usuario.
+
+## Instalación en Supabase
+
+### Si tu base ya tiene el esquema anterior que subiste
+
+Ejecutá:
+
+```text
+supabase/migration_from_uploaded_schema_to_assignments.sql
+```
+
+Esto agrega:
+
+- `assignments` para asignaciones semanales fijas.
+- Campos extra en `sites`: zona, supervisor y tipo de servicio.
+- Compatibilidad de `attendance_events` con turnos materializados desde asignaciones.
+- Políticas RLS ajustadas al modelo `profiles.id = auth.users.id`.
+
+### Si vas a instalar desde cero
+
+Ejecutá:
+
+```text
+supabase/schema.sql
+```
+
+## Publicación
+
+Subí estos archivos al repo o hosting:
 
 ```text
 index.html
@@ -23,115 +70,30 @@ styles.css
 js/config.js
 js/storage.js
 js/app.js
-supabase/schema.sql
-supabase/migration_from_pin_to_supabase_auth.sql
-supabase/bootstrap_supervisor_template.sql
 ```
 
-## Configuración
+El archivo `js/config.js` ya está configurado con tu proyecto Supabase.
 
-El archivo `js/config.js` ya queda con esta estructura:
+## Uso operativo
 
-```js
-window.APP_CONFIG = {
-  SUPABASE_URL: "https://TU-PROYECTO.supabase.co",
-  SUPABASE_ANON_KEY: "TU_ANON_KEY",
-  TIMEZONE: "America/Argentina/Buenos_Aires",
-  COMPANY_NAME: "Clean It"
-};
-```
+El supervisor carga:
 
-## Instalación limpia
+- Usuarios operativos vinculados a Supabase Auth.
+- Servicios / consorcios con ubicación GPS.
+- Contacto WhatsApp del consorcio.
+- Asignaciones fijas por día y horario.
 
-Usá esta opción si el proyecto Supabase todavía no tiene las tablas de esta app.
-
-1. Ir a Supabase > SQL Editor.
-2. Ejecutar:
+Ejemplo de asignación:
 
 ```text
-supabase/schema.sql
+Operario: Ana Pérez
+Servicio: Alvarez Thomas 550
+Días: lunes, miércoles y viernes
+Horario: 08:00 a 12:00
 ```
 
-3. Ir a Supabase > Authentication > Users.
-4. Crear el primer usuario supervisor con email y contraseña.
-5. Copiar el `User UID` de ese usuario.
-6. Abrir:
+La app genera automáticamente el turno del día según la fecha seleccionada.
 
-```text
-supabase/bootstrap_supervisor_template.sql
-```
+## Punto crítico
 
-7. Reemplazar:
-
-```text
-PEGAR_AUTH_USER_UID_AQUI
-supervisor@cleanit.com
-Supervisor Clean It
-```
-
-8. Ejecutar el SQL.
-9. Entrar a la app con ese email y contraseña.
-
-## Migración desde la versión con PIN
-
-Usá esta opción si ya habías ejecutado una versión anterior de la app.
-
-1. Ejecutar en Supabase SQL Editor:
-
-```text
-supabase/migration_from_pin_to_supabase_auth.sql
-```
-
-2. Crear o verificar los usuarios en Supabase > Authentication > Users.
-3. Para el primer supervisor, ejecutar `bootstrap_supervisor_template.sql` con el `User UID` real.
-4. Desde el panel supervisor, editar o crear los perfiles operativos con el mismo email que tienen en Supabase Auth.
-
-La lógica es simple: Supabase Auth valida la identidad; la tabla `profiles` define el rol operativo y los datos internos de la app.
-
-## Modelo de login
-
-Ya no se usa PIN. La pantalla inicial tiene dos accesos separados:
-
-- **Operario:** valida email/contraseña y solo permite perfiles con `profiles.role = operator`.
-- **Supervisor:** valida email/contraseña y solo permite perfiles con `profiles.role = supervisor` o `admin`.
-
-Si un operario intenta entrar por el acceso supervisor, la app cierra la sesión y bloquea el ingreso a ese panel. Mismo criterio para el caso inverso.
-
-El flujo correcto es:
-
-1. Usuario existe en Supabase Authentication.
-2. Usuario existe en `public.profiles` con el mismo email.
-3. Al primer login, la app vincula automáticamente `profiles.auth_user_id` con `auth.users.id`.
-4. A partir de ahí, el rol se toma desde `profiles.role`:
-   - `operator`: vista operario.
-   - `supervisor`: vista supervisor.
-   - `admin`: habilitado como acceso supervisor si decidís usar ese rol.
-
-## Alta de operarios
-
-Desde la app podés crear el perfil operativo, pero la contraseña no se crea desde el front-end. Eso es deliberado.
-
-Para que un operario pueda entrar:
-
-1. Crear el usuario en Supabase Authentication.
-2. Crear el perfil en la app con el mismo email.
-3. Asignarle servicios y horarios.
-
-Crear usuarios de Auth desde el navegador con permisos administrativos sería una mala práctica. Eso requiere una Edge Function con service role o hacerlo desde el panel de Supabase.
-
-## Publicación
-
-Podés subir estos archivos a GitHub Pages, Netlify o Vercel.
-
-Para que el GPS funcione bien en celulares, la app debe correr en HTTPS. `localhost` sirve para desarrollo, pero en producción usá dominio con certificado.
-
-## Seguridad
-
-La app usa Row Level Security:
-
-- Operarios solo leen sus asignaciones y sus registros.
-- Supervisores administran servicios, perfiles y asignaciones.
-- El acceso anónimo a tablas queda revocado.
-- La identidad se valida con Supabase Auth.
-
-No publiques `service_role` en el front-end. Nunca. Eso no es una optimización: es dejar la caja abierta con un cartel de “no tocar”.
+Si el usuario existe en Supabase Auth pero no existe en `public.profiles` con el mismo UUID, el login va a fallar. Eso no es un bug: es control de acceso. Auth valida la contraseña; `profiles` define qué puede hacer esa persona dentro de la app.

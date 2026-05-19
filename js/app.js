@@ -13,6 +13,7 @@
   ];
 
   const state = {
+    loginMode: "operator",
     currentUser: null,
     currentProfile: null,
     sites: [],
@@ -143,7 +144,7 @@
   function profileMatchesLoginType(profile, expectedRole) {
     const role = String(profile?.role || "").toLowerCase();
     if (expectedRole === "operator") return role === "operator";
-    if (expectedRole === "supervisor") return ["supervisor", "admin"].includes(role);
+    if (expectedRole === "supervisor") return role === "supervisor";
     return true;
   }
 
@@ -151,12 +152,29 @@
     return role === "operator" ? "operario" : "supervisor";
   }
 
-  async function handleRoleLogin(event, expectedRole) {
+  function renderLoginMode() {
+    $$('[data-login-mode]').forEach(btn => btn.classList.toggle('active', btn.dataset.loginMode === state.loginMode));
+    const isSupervisor = state.loginMode === "supervisor";
+    const copy = $("#loginModeCopy");
+    const emailLabel = $("#loginEmailLabel");
+    const email = $("#email");
+    const submit = $("#loginSubmitBtn");
+    if (!copy || !emailLabel || !email || !submit) return;
+
+    copy.innerHTML = isSupervisor
+      ? `<p class="eyebrow">Acceso supervisor</p><h3>Panel de control</h3><p class="muted small no-margin">Permite ver estado en vivo y administrar servicios, usuarios y asignaciones.</p>`
+      : `<p class="eyebrow">Acceso operario</p><h3>Marcar presencia</h3><p class="muted small no-margin">Muestra solo los servicios asignados al usuario autenticado.</p>`;
+    emailLabel.textContent = isSupervisor ? "Email del supervisor" : "Email del operario";
+    email.placeholder = isSupervisor ? "supervisor@cleanit.com" : "operario@cleanit.com";
+    submit.textContent = isSupervisor ? "Ingresar como supervisor" : "Ingresar como operario";
+    submit.className = isSupervisor ? "secondary-btn" : "primary-btn";
+  }
+
+  async function handleSupabaseLogin(event) {
     event.preventDefault();
-    const form = event.currentTarget;
-    const emailInput = form.querySelector('input[type="email"]');
-    const passwordInput = form.querySelector('input[type="password"]');
-    const submitButton = form.querySelector('button[type="submit"]');
+    const emailInput = $("#email");
+    const passwordInput = $("#password");
+    const submitButton = $("#loginSubmitBtn");
 
     try {
       submitButton.disabled = true;
@@ -164,9 +182,9 @@
       const password = passwordInput.value;
       const { user, profile } = await store.loginWithPassword(email, password);
 
-      if (!profileMatchesLoginType(profile, expectedRole)) {
+      if (!profileMatchesLoginType(profile, state.loginMode)) {
         await store.signOut();
-        throw new Error(`Este acceso es para ${roleLabel(expectedRole)}s. El usuario ingresado tiene rol ${roleLabel(profile.role)}.`);
+        throw new Error(`Este acceso es para ${roleLabel(state.loginMode)}s. El usuario ingresado tiene rol ${roleLabel(profile.role)}.`);
       }
 
       state.currentUser = user;
@@ -663,8 +681,8 @@
     list.innerHTML = state.profiles.map(user => `
       <div class="list-item">
         <div class="list-item-title">${escapeHtml(user.full_name)}</div>
-        <div class="muted small">${user.role === "supervisor" ? "Supervisor" : "Operario"} · ${escapeHtml(user.email || "Sin email")} · ${escapeHtml(user.phone || "Sin teléfono")}</div>
-        <div class="muted small">Auth: ${user.auth_user_id ? "vinculado" : "pendiente de vincular por email"} · ID perfil: ${escapeHtml(user.id)}</div>
+        <div class="muted small">${user.role === "supervisor" ? "Supervisor" : "Operario"} · ${escapeHtml(user.phone || "Sin teléfono")}</div>
+        <div class="muted small">UUID Auth / ID perfil: ${escapeHtml(user.id)}</div>
         ${user.notes ? `<div class="muted small">Notas: ${escapeHtml(user.notes)}</div>` : ""}
         <div class="list-item-actions">
           <button class="secondary-btn small-btn" data-edit-user="${user.id}" type="button">Editar</button>
@@ -677,11 +695,11 @@
   }
 
   function userPayloadFromForm() {
-    const id = $("#userId").value || undefined;
+    const id = $("#userId").value || $("#userAuthId").value.trim();
+    if (!id) throw new Error("Tenés que cargar el UUID real del usuario creado en Supabase Authentication.");
     return {
-      ...(id ? { id } : {}),
+      id,
       full_name: $("#userName").value.trim(),
-      email: $("#userEmail").value.trim().toLowerCase(),
       phone: $("#userPhone").value.trim(),
       role: $("#userRole").value,
       notes: $("#userNotes").value.trim(),
@@ -692,6 +710,7 @@
   function resetUserForm() {
     $("#userForm").reset();
     $("#userId").value = "";
+    $("#userAuthId").value = "";
     $("#userRole").value = "operator";
     $("#userFormTitle").textContent = "Nuevo usuario";
     $("#cancelUserEditBtn").classList.add("hidden");
@@ -702,8 +721,8 @@
     if (!user) return;
     $("#userId").value = user.id;
     $("#userRole").value = user.role || "operator";
+    $("#userAuthId").value = user.id || "";
     $("#userName").value = user.full_name || "";
-    $("#userEmail").value = user.email || "";
     $("#userPhone").value = user.phone || "";
     $("#userNotes").value = user.notes || "";
     $("#userFormTitle").textContent = "Editar usuario";
@@ -781,8 +800,11 @@
   }
 
   function bindEvents() {
-    $("#operatorLoginForm").addEventListener("submit", (event) => handleRoleLogin(event, "operator"));
-    $("#supervisorLoginForm").addEventListener("submit", (event) => handleRoleLogin(event, "supervisor"));
+    $$('[data-login-mode]').forEach(btn => btn.addEventListener('click', () => {
+      state.loginMode = btn.dataset.loginMode;
+      renderLoginMode();
+    }));
+    $("#supabaseLoginForm").addEventListener("submit", handleSupabaseLogin);
     $("#operatorLogoutBtn").addEventListener("click", logout);
     $("#supervisorLogoutBtn").addEventListener("click", logout);
     $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => renderTab(btn.dataset.tab)));
@@ -815,10 +837,14 @@
 
     $("#userForm").addEventListener("submit", async (event) => {
       event.preventDefault();
-      await store.upsertProfile(userPayloadFromForm());
-      resetUserForm();
-      toast("Usuario guardado.");
-      await renderSupervisorView();
+      try {
+        await store.upsertProfile(userPayloadFromForm());
+        resetUserForm();
+        toast("Usuario guardado.");
+        await renderSupervisorView();
+      } catch (error) {
+        toast(error.message || "No se pudo guardar el usuario.");
+      }
     });
     $("#cancelUserEditBtn").addEventListener("click", resetUserForm);
     $("#exportCsvBtn").addEventListener("click", exportCsv);
@@ -826,6 +852,7 @@
 
   async function init() {
     renderConnectionMode();
+    renderLoginMode();
     renderAssignmentDays();
     $("#dashboardDate").value = todayISO();
     $("#assignmentValidFrom").value = todayISO();

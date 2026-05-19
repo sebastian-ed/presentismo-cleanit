@@ -26,53 +26,36 @@
           <div class="hero-copy">
             <p class="eyebrow">Control operativo en vivo</p>
             <h2>Servicios fijos, marcación simple y supervisión en tiempo real.</h2>
-            <p class="muted">El operario solo marca presencia. Supervisión administra servicios, usuarios y asignaciones semanales sin cargar turno por turno.</p>
+            <p class="muted">El ingreso mantiene la estructura operario / supervisor, pero ahora funciona exclusivamente con Supabase Auth.</p>
           </div>
 
-          <div class="login-panel-stack">
-            <form id="operatorLoginForm" class="login-card form-stack" data-expected-role="operator">
-              <div class="login-role-head">
-                <div class="role-icon">OP</div>
-                <div>
-                  <p class="eyebrow">Acceso operario</p>
-                  <h3>Marcar presencia</h3>
-                  <p class="muted small no-margin">Solo muestra los servicios asignados al operario autenticado.</p>
-                </div>
-              </div>
-              <label>
-                <span>Email del operario</span>
-                <input id="operatorLoginEmail" type="email" autocomplete="username" placeholder="operario@cleanit.com" required />
-              </label>
-              <label>
-                <span>Contraseña</span>
-                <input id="operatorLoginPassword" type="password" autocomplete="current-password" placeholder="••••••••" required />
-              </label>
-              <button class="primary-btn" type="submit">Ingresar como operario</button>
-            </form>
+          <div class="login-card">
+            <div class="segmented" role="tablist" aria-label="Tipo de acceso">
+              <button class="segmented-btn active" data-login-mode="operator" type="button">Operario</button>
+              <button class="segmented-btn" data-login-mode="supervisor" type="button">Supervisor</button>
+            </div>
 
-            <form id="supervisorLoginForm" class="login-card form-stack supervisor-login-card" data-expected-role="supervisor">
-              <div class="login-role-head">
-                <div class="role-icon supervisor">SV</div>
-                <div>
-                  <p class="eyebrow">Acceso supervisor</p>
-                  <h3>Panel de control</h3>
-                  <p class="muted small no-margin">Permite ver estado en vivo y administrar servicios, usuarios y asignaciones.</p>
-                </div>
-              </div>
+            <div class="login-mode-copy" id="loginModeCopy">
+              <p class="eyebrow">Acceso operario</p>
+              <h3>Marcar presencia</h3>
+              <p class="muted small no-margin">Muestra solo los servicios asignados al usuario autenticado.</p>
+            </div>
+
+            <form id="supabaseLoginForm" class="form-stack">
               <label>
-                <span>Email del supervisor</span>
-                <input id="supervisorLoginEmail" type="email" autocomplete="username" placeholder="supervisor@cleanit.com" required />
+                <span id="loginEmailLabel">Email del operario</span>
+                <input id="email" type="email" autocomplete="username" placeholder="operario@cleanit.com" required />
               </label>
               <label>
                 <span>Contraseña</span>
-                <input id="supervisorLoginPassword" type="password" autocomplete="current-password" placeholder="••••••••" required />
+                <input id="password" type="password" autocomplete="current-password" placeholder="••••••••" required />
               </label>
-              <button class="secondary-btn" type="submit">Ingresar como supervisor</button>
+              <button id="loginSubmitBtn" class="primary-btn" type="submit">Ingresar como operario</button>
             </form>
 
             <div class="notice compact">
-              <strong>Acceso con Supabase Auth.</strong>
-              <span>Cada usuario entra con email y contraseña. La vista se habilita según el rol guardado en <code>profiles.role</code>.</span>
+              <strong>Supabase Auth conectado.</strong>
+              <span>El usuario debe existir en Authentication y también en <code>profiles</code> con el mismo UUID en la columna <code>id</code>.</span>
             </div>
           </div>
         </div>
@@ -230,11 +213,11 @@
               <input type="hidden" id="userId" />
               <label><span>Rol</span><select id="userRole" required><option value="operator">Operario</option><option value="supervisor">Supervisor</option></select></label>
               <label><span>Nombre completo</span><input id="userName" required placeholder="Nombre y apellido" /></label>
-              <label><span>Email de login</span><input id="userEmail" type="email" required placeholder="usuario@empresa.com" /></label>
+              <label><span>UUID del usuario en Supabase Auth</span><input id="userAuthId" required placeholder="Ej. 00000000-0000-0000-0000-000000000000" /></label>
               <label><span>Teléfono</span><input id="userPhone" placeholder="+549..." /></label>
               <label><span>Notas</span><textarea id="userNotes" placeholder="Datos internos, reemplazos, observaciones operativas..."></textarea></label>
               <button class="primary-btn" type="submit">Guardar perfil</button>
-              <p class="muted small">El usuario debe existir en Supabase Authentication con ese mismo email. Desde acá administrás el perfil operativo, rol y asignaciones; la contraseña se gestiona en Supabase Auth.</p>
+              <p class="muted small">El usuario debe existir en Supabase Authentication. Desde acá vinculás el perfil operativo usando el UUID real del usuario Auth; la contraseña se gestiona en Supabase Auth.</p>
             </form>
             <div class="data-card">
               <h3>Usuarios cargados</h3>

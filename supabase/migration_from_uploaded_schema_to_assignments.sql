@@ -1,38 +1,19 @@
 -- Clean It · Presentismo GPS
--- Instalación limpia compatible con tu esquema de Auth actual.
--- Regla central: public.profiles.id = auth.users.id.
+-- Migración para el esquema que ya tenés creado.
+-- Compatible con profiles.id = auth.users.id.
+-- Ejecutar una sola vez en Supabase SQL Editor antes de subir esta versión.
 
 create extension if not exists pgcrypto;
 
 drop view if exists public.attendance_report;
 
-create table if not exists public.profiles (
-  id uuid primary key references auth.users(id) on delete cascade,
-  full_name text not null,
-  role text not null check (role in ('operator', 'supervisor')),
-  phone text,
-  notes text,
-  is_active boolean not null default true,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
+alter table public.profiles
+  add column if not exists notes text;
 
-create table if not exists public.sites (
-  id uuid primary key default gen_random_uuid(),
-  name text not null,
-  address text not null,
-  zone text,
-  supervisor_name text,
-  service_type text default 'fixed',
-  lat double precision not null,
-  lng double precision not null,
-  gps_radius_m integer not null default 120 check (gps_radius_m between 10 and 1000),
-  whatsapp_name text,
-  whatsapp_phone text,
-  is_active boolean not null default true,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
+alter table public.sites
+  add column if not exists zone text,
+  add column if not exists supervisor_name text,
+  add column if not exists service_type text default 'fixed';
 
 create table if not exists public.assignments (
   id uuid primary key default gen_random_uuid(),
@@ -54,24 +35,28 @@ create table if not exists public.assignments (
   constraint assignments_days_valid check (days_of_week <@ array[1,2,3,4,5,6,7])
 );
 
-create table if not exists public.attendance_events (
-  id uuid primary key default gen_random_uuid(),
-  shift_id text not null,
-  assignment_id uuid references public.assignments(id) on delete set null,
-  shift_date date not null,
-  operator_id uuid not null references public.profiles(id) on delete restrict,
-  site_id uuid not null references public.sites(id) on delete restrict,
-  event_type text not null check (event_type in ('present', 'late', 'absent')),
-  observed_status text check (observed_status in ('present', 'late', 'absent')),
-  notes text,
-  lat double precision,
-  lng double precision,
-  gps_accuracy_m double precision,
-  distance_m double precision,
-  is_inside_site boolean,
-  client_time timestamptz,
-  created_at timestamptz not null default now()
-);
+alter table public.attendance_events
+  drop constraint if exists attendance_events_shift_id_fkey;
+
+alter table public.attendance_events
+  add column if not exists assignment_id uuid references public.assignments(id) on delete set null,
+  add column if not exists shift_date date;
+
+alter table public.attendance_events
+  alter column shift_id type text using shift_id::text;
+
+update public.attendance_events ae
+set shift_date = s.shift_date
+from public.shifts s
+where ae.shift_date is null
+  and ae.shift_id = s.id::text;
+
+update public.attendance_events
+set shift_date = current_date
+where shift_date is null;
+
+alter table public.attendance_events
+  alter column shift_date set not null;
 
 create index if not exists idx_profiles_role on public.profiles(role);
 create index if not exists idx_sites_active on public.sites(is_active);
@@ -144,6 +129,8 @@ drop policy if exists "profiles_link_own_auth" on public.profiles;
 drop policy if exists "sites_select_authenticated" on public.sites;
 drop policy if exists "sites_select_auth" on public.sites;
 drop policy if exists "sites_write_supervisor" on public.sites;
+drop policy if exists "shifts_select_own_or_supervisor" on public.shifts;
+drop policy if exists "shifts_write_supervisor" on public.shifts;
 drop policy if exists "assignments_select_relevant" on public.assignments;
 drop policy if exists "assignments_write_supervisor" on public.assignments;
 drop policy if exists "attendance_select_own_or_supervisor" on public.attendance_events;
