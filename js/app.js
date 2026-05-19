@@ -2,12 +2,23 @@
   const CONFIG = window.APP_CONFIG || {};
   const store = window.StoreFactory.create();
 
+  const DAYS = [
+    { id: 1, short: "Lun", long: "Lunes" },
+    { id: 2, short: "Mar", long: "Martes" },
+    { id: 3, short: "Mié", long: "Miércoles" },
+    { id: 4, short: "Jue", long: "Jueves" },
+    { id: 5, short: "Vie", long: "Viernes" },
+    { id: 6, short: "Sáb", long: "Sábado" },
+    { id: 7, short: "Dom", long: "Domingo" }
+  ];
+
   const state = {
     loginMode: "operator",
     currentUser: null,
     currentProfile: null,
     sites: [],
     profiles: [],
+    assignments: [],
     shifts: [],
     events: [],
     activeTab: "live"
@@ -22,6 +33,7 @@
   const toNumber = (value) => Number.parseFloat(value || 0);
   const normalizePhone = (raw) => String(raw || "").replace(/[^0-9]/g, "");
   const escapeHtml = (str) => String(str ?? "").replace(/[&<>'"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c]));
+  const dayLabel = (id, variant = "short") => DAYS.find(d => d.id === Number(id))?.[variant] || id;
 
   function toast(message, type = "default") {
     const el = $("#toast");
@@ -90,7 +102,7 @@
     const name = operator?.full_name || "el operario asignado";
 
     if (["present", "outside"].includes(status.key)) {
-      return `${base}\n\nEl operario ${name} ya registró presencia para el horario de ${formatTime(shift.scheduled_start)}.\n\nCualquier novedad quedamos atentos.`;
+      return `${base}\n\nEl operario ${name} ya registró presencia para el horario de ${formatTime(shift.scheduled_start)} a ${formatTime(shift.scheduled_end)}.\n\nCualquier novedad quedamos atentos.`;
     }
     if (status.key === "late") {
       return `${base}\n\nEl operario ${name} figura demorado para el horario de ingreso previsto (${formatTime(shift.scheduled_start)}). Estamos haciendo seguimiento operativo y les avisaremos cualquier actualización.\n\nDisculpen las molestias.`;
@@ -108,14 +120,16 @@
   }
 
   async function refreshBaseData(date = $("#dashboardDate")?.value || todayISO()) {
-    const [profiles, sites, shifts, events] = await Promise.all([
+    const [profiles, sites, assignments, shifts, events] = await Promise.all([
       store.listProfiles(),
       store.listSites(),
+      store.listAssignments(),
       store.listShifts(date),
       store.listEvents()
     ]);
     state.profiles = profiles;
     state.sites = sites;
+    state.assignments = assignments;
     state.shifts = shifts;
     state.events = events;
   }
@@ -126,38 +140,23 @@
     pill.textContent = isSupabase ? "Supabase conectado" : "Modo local";
     pill.classList.toggle("status-present", isSupabase);
     pill.classList.toggle("status-pending", !isSupabase);
-    $("#localLoginForm").classList.toggle("hidden", isSupabase);
-    $("#supabaseLoginForm").classList.toggle("hidden", !isSupabase);
   }
 
   function renderLoginMode() {
     $$("[data-login-mode]").forEach(btn => btn.classList.toggle("active", btn.dataset.loginMode === state.loginMode));
   }
 
-  async function handleLocalLogin(event) {
+  async function handlePinLogin(event) {
     event.preventDefault();
     try {
-      const pin = $("#localPin").value.trim();
+      const pin = $("#loginPin").value.trim();
       const { user, profile } = await store.loginWithPin(pin, state.loginMode);
       state.currentUser = user;
       state.currentProfile = profile;
+      $("#loginPin").value = "";
       await afterLogin();
     } catch (error) {
       toast(error.message || "No se pudo ingresar.");
-    }
-  }
-
-  async function handleSupabaseLogin(event) {
-    event.preventDefault();
-    try {
-      const email = $("#email").value.trim();
-      const password = $("#password").value;
-      const { user, profile } = await store.loginWithEmail(email, password, state.loginMode);
-      state.currentUser = user;
-      state.currentProfile = profile;
-      await afterLogin();
-    } catch (error) {
-      toast(error.message || "No se pudo ingresar con Supabase.");
     }
   }
 
@@ -168,7 +167,7 @@
     } else {
       setView("#supervisorView");
       $("#dashboardDate").value = todayISO();
-      $("#shiftDate").value = todayISO();
+      $("#assignmentValidFrom").value = todayISO();
       await renderSupervisorView();
     }
   }
@@ -197,7 +196,6 @@
     }
 
     container.innerHTML = shifts.map(shift => renderOperatorShiftCard(shift)).join("");
-
     container.querySelectorAll("[data-checkin]").forEach(btn => btn.addEventListener("click", () => handleCheckin(btn.dataset.checkin)));
     container.querySelectorAll("[data-late]").forEach(btn => btn.addEventListener("click", () => handleManualStatus(btn.dataset.late, "late")));
     container.querySelectorAll("[data-absent]").forEach(btn => btn.addEventListener("click", () => handleManualStatus(btn.dataset.absent, "absent")));
@@ -231,7 +229,7 @@
 
         <div class="checkin-box">
           <label class="checkbox-row">
-            <input type="checkbox" id="confirm-${shift.id}" />
+            <input type="checkbox" id="confirm-${escapeHtml(shift.id)}" />
             <span>
               <strong>Confirmo que estoy presente en el servicio</strong><br />
               <span class="muted small">Al tocar el botón se registra hora, ubicación GPS, precisión y distancia contra el punto cargado.</span>
@@ -239,12 +237,12 @@
           </label>
           <label>
             <span>Observación opcional</span>
-            <textarea id="notes-${shift.id}" placeholder="Ej. Ingreso normal / Demora por transporte / Encargado no abrió..."></textarea>
+            <textarea id="notes-${escapeHtml(shift.id)}" placeholder="Ej. Ingreso normal / Demora por transporte / Encargado no abrió..."></textarea>
           </label>
-          <button class="primary-btn big-action" data-checkin="${shift.id}" type="button">Marcar presencia con GPS</button>
+          <button class="primary-btn big-action" data-checkin="${escapeHtml(shift.id)}" type="button">Marcar presencia con GPS</button>
           <div class="quick-actions">
-            <button class="secondary-btn" data-late="${shift.id}" type="button">Informar demora</button>
-            <button class="danger-btn" data-absent="${shift.id}" type="button">Informar ausencia</button>
+            <button class="secondary-btn" data-late="${escapeHtml(shift.id)}" type="button">Informar demora</button>
+            <button class="danger-btn" data-absent="${escapeHtml(shift.id)}" type="button">Informar ausencia</button>
           </div>
         </div>
       </article>`;
@@ -266,9 +264,10 @@
 
   async function handleCheckin(shiftId) {
     const shift = state.shifts.find(s => s.id === shiftId);
+    if (!shift) return toast("No se encontró el servicio asignado.");
     const site = byId(state.sites, shift.site_id);
-    const checkbox = $(`#confirm-${CSS.escape(shiftId)}`);
-    const notes = $(`#notes-${CSS.escape(shiftId)}`)?.value || "";
+    const checkbox = document.getElementById(`confirm-${shiftId}`);
+    const notes = document.getElementById(`notes-${shiftId}`)?.value || "";
 
     if (!checkbox?.checked) {
       toast("Primero marcá el checkbox de confirmación.");
@@ -287,6 +286,8 @@
 
       await store.createEvent({
         shift_id: shift.id,
+        assignment_id: shift.assignment_id,
+        shift_date: shift.shift_date,
         operator_id: shift.operator_id,
         site_id: shift.site_id,
         event_type: "present",
@@ -309,11 +310,14 @@
 
   async function handleManualStatus(shiftId, eventType) {
     const shift = state.shifts.find(s => s.id === shiftId);
-    const notes = $(`#notes-${CSS.escape(shiftId)}`)?.value || "";
+    if (!shift) return toast("No se encontró el servicio asignado.");
+    const notes = document.getElementById(`notes-${shiftId}`)?.value || "";
     const label = eventType === "late" ? "demora" : "ausencia";
     try {
       await store.createEvent({
         shift_id: shift.id,
+        assignment_id: shift.assignment_id,
+        shift_date: shift.shift_date,
         operator_id: shift.operator_id,
         site_id: shift.site_id,
         event_type: eventType,
@@ -333,10 +337,11 @@
     await refreshBaseData(date);
     renderTab(state.activeTab);
     renderDashboard();
+    renderCoverage();
     renderSites();
-    renderShiftSelectors();
-    renderShifts();
-    renderOperators();
+    renderAssignmentSelectors();
+    renderAssignments();
+    renderUsers();
     renderRecords();
   }
 
@@ -362,7 +367,7 @@
     }, { total: 0, present: 0, late: 0, absent: 0, pending: 0 });
 
     $("#kpiGrid").innerHTML = `
-      ${kpi("Turnos", counts.total)}
+      ${kpi("Turnos del día", counts.total)}
       ${kpi("Presentes", counts.present, "status-present")}
       ${kpi("Demorados / fuera de radio", counts.late, "status-late")}
       ${kpi("Ausentes", counts.absent, "status-absent")}
@@ -383,7 +388,7 @@
           <td>${event?.gps_accuracy_m ? `${Math.round(event.gps_accuracy_m)} m` : "—"}</td>
           <td>${event?.distance_m ? `${Math.round(event.distance_m)} m` : "—"}</td>
           <td class="row-actions">
-            <a class="wa-btn" href="${url}" target="_blank" rel="noopener">WhatsApp consorcio</a>
+            <a class="wa-btn ${normalizePhone(site?.whatsapp_phone) ? "" : "disabled-link"}" href="${url}" target="_blank" rel="noopener">WhatsApp consorcio</a>
           </td>
         </tr>`;
     }).join("");
@@ -393,13 +398,57 @@
         <thead>
           <tr><th>Operario</th><th>Servicio</th><th>Horario</th><th>Estado</th><th>Último registro</th><th>Precisión</th><th>Distancia</th><th>Acción</th></tr>
         </thead>
-        <tbody>${tableRows || `<tr><td colspan="8">No hay turnos cargados para esta fecha.</td></tr>`}</tbody>
+        <tbody>${tableRows || `<tr><td colspan="8">No hay cobertura programada para esta fecha.</td></tr>`}</tbody>
       </table>`;
     $("#lastRefreshLabel").textContent = `Actualizado ${new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })}`;
   }
 
   function kpi(label, value, className = "") {
     return `<div class="summary-card ${className}"><div class="kpi-value">${value}</div><div class="kpi-label">${label}</div></div>`;
+  }
+
+  function assignmentMatchesSearch(site, assignments, term) {
+    if (!term) return true;
+    const haystack = [
+      site.name, site.address, site.zone, site.supervisor_name, site.service_type,
+      ...assignments.map(a => byId(state.profiles, a.operator_id)?.full_name || "")
+    ].join(" ").toLowerCase();
+    return haystack.includes(term.toLowerCase());
+  }
+
+  function renderCoverage() {
+    const term = $("#coverageSearch")?.value?.trim() || "";
+    const grid = $("#coverageGrid");
+    const html = state.sites
+      .map(site => ({ site, assignments: state.assignments.filter(a => a.site_id === site.id) }))
+      .filter(group => assignmentMatchesSearch(group.site, group.assignments, term))
+      .map(({ site, assignments }) => {
+        const dayCards = DAYS.map(day => {
+          const dayAssignments = assignments.filter(a => (a.days_of_week || []).map(Number).includes(day.id));
+          const chips = dayAssignments.map(a => {
+            const op = byId(state.profiles, a.operator_id);
+            return `<div class="coverage-assignment"><strong>${escapeHtml(op?.full_name || "—")}</strong><span>${formatTime(a.scheduled_start)}-${formatTime(a.scheduled_end)}</span></div>`;
+          }).join("");
+          return `<div class="coverage-day"><div class="coverage-day-title">${day.short}</div>${chips || `<div class="no-coverage">Sin cobertura</div>`}</div>`;
+        }).join("");
+
+        return `
+          <article class="service-card">
+            <div class="service-card-head">
+              <div>
+                <h3>${escapeHtml(site.name)}</h3>
+                <p class="muted">${escapeHtml(site.address || "")}</p>
+              </div>
+              <div class="tag-row">
+                ${site.service_type ? `<span class="mini-tag">${escapeHtml(site.service_type)}</span>` : ""}
+                ${site.zone ? `<span class="mini-tag">${escapeHtml(site.zone)}</span>` : ""}
+                ${site.supervisor_name ? `<span class="mini-tag">${escapeHtml(site.supervisor_name)}</span>` : ""}
+              </div>
+            </div>
+            <div class="coverage-days">${dayCards}</div>
+          </article>`;
+      }).join("");
+    grid.innerHTML = html || `<p class="muted">No hay servicios que coincidan con la búsqueda.</p>`;
   }
 
   function renderSites() {
@@ -410,6 +459,7 @@
           <div>
             <div class="list-item-title">${escapeHtml(site.name)}</div>
             <div class="muted small">${escapeHtml(site.address)}</div>
+            <div class="muted small">${escapeHtml(site.zone || "Sin zona")} · ${escapeHtml(site.supervisor_name || "Sin supervisor")} · ${escapeHtml(site.service_type || "Sin tipo")}</div>
             <div class="muted small">GPS: ${site.lat}, ${site.lng} · Radio ${site.gps_radius_m} m</div>
             <div class="muted small">WhatsApp: ${escapeHtml(site.whatsapp_name || "—")} · ${escapeHtml(site.whatsapp_phone || "—")}</div>
           </div>
@@ -430,6 +480,9 @@
       ...(id ? { id } : {}),
       name: $("#siteName").value.trim(),
       address: $("#siteAddress").value.trim(),
+      zone: $("#siteZone").value.trim(),
+      supervisor_name: $("#siteSupervisor").value.trim(),
+      service_type: $("#siteType").value.trim(),
       lat: toNumber($("#siteLat").value),
       lng: toNumber($("#siteLng").value),
       gps_radius_m: Number($("#siteRadius").value || 120),
@@ -453,6 +506,9 @@
     $("#siteId").value = site.id;
     $("#siteName").value = site.name || "";
     $("#siteAddress").value = site.address || "";
+    $("#siteZone").value = site.zone || "";
+    $("#siteSupervisor").value = site.supervisor_name || "";
+    $("#siteType").value = site.service_type || "";
     $("#siteLat").value = site.lat || "";
     $("#siteLng").value = site.lng || "";
     $("#siteRadius").value = site.gps_radius_m || 120;
@@ -460,144 +516,188 @@
     $("#siteWhatsapp").value = site.whatsapp_phone || "";
     $("#siteFormTitle").textContent = "Editar servicio / consorcio";
     $("#cancelSiteEditBtn").classList.remove("hidden");
+    renderTab("sites");
   }
 
   async function deleteSite(id) {
-    if (!window.confirm("¿Eliminar este servicio?")) return;
+    if (!window.confirm("¿Eliminar este servicio? También se darán de baja sus asignaciones activas.")) return;
     await store.deleteSite(id);
     toast("Servicio eliminado.");
     await renderSupervisorView();
   }
 
-  function renderShiftSelectors() {
+  function renderAssignmentSelectors() {
     const operators = state.profiles.filter(p => p.role === "operator");
-    $("#shiftOperator").innerHTML = operators.map(op => `<option value="${op.id}">${escapeHtml(op.full_name)}</option>`).join("");
-    $("#shiftSite").innerHTML = state.sites.map(site => `<option value="${site.id}">${escapeHtml(site.name)}</option>`).join("");
+    $("#assignmentOperator").innerHTML = operators.map(op => `<option value="${op.id}">${escapeHtml(op.full_name)}</option>`).join("");
+    $("#assignmentSite").innerHTML = state.sites.map(site => `<option value="${site.id}">${escapeHtml(site.name)}</option>`).join("");
   }
 
-  function renderShifts() {
-    const list = $("#shiftsList");
-    const allVisibleShifts = state.shifts.slice().sort((a, b) => `${a.shift_date} ${a.scheduled_start}`.localeCompare(`${b.shift_date} ${b.scheduled_start}`));
-    list.innerHTML = allVisibleShifts.map(shift => {
-      const op = byId(state.profiles, shift.operator_id);
-      const site = byId(state.sites, shift.site_id);
+  function renderAssignmentDays() {
+    $("#assignmentDays").innerHTML = DAYS.map(day => `
+      <label class="day-check">
+        <input type="checkbox" value="${day.id}" />
+        <span>${day.long}</span>
+      </label>`).join("");
+  }
+
+  function getSelectedAssignmentDays() {
+    return $$("#assignmentDays input:checked").map(input => Number(input.value));
+  }
+
+  function setSelectedAssignmentDays(days = []) {
+    const selected = days.map(Number);
+    $$("#assignmentDays input").forEach(input => { input.checked = selected.includes(Number(input.value)); });
+  }
+
+  function renderAssignments() {
+    const list = $("#assignmentsList");
+    const sorted = [...state.assignments].sort((a, b) => {
+      const siteA = byId(state.sites, a.site_id)?.name || "";
+      const siteB = byId(state.sites, b.site_id)?.name || "";
+      return `${siteA} ${a.scheduled_start}`.localeCompare(`${siteB} ${b.scheduled_start}`);
+    });
+
+    list.innerHTML = sorted.map(assignment => {
+      const op = byId(state.profiles, assignment.operator_id);
+      const site = byId(state.sites, assignment.site_id);
+      const days = (assignment.days_of_week || []).map(d => dayLabel(d)).join(", ");
+      const vigencia = `${assignment.valid_from || "—"}${assignment.valid_to ? ` a ${assignment.valid_to}` : " en adelante"}`;
       return `
         <div class="list-item">
-          <div class="list-item-title">${escapeHtml(op?.full_name || "—")}</div>
-          <div class="muted small">${escapeHtml(site?.name || "—")} · ${shift.shift_date} · ${formatTime(shift.scheduled_start)} a ${formatTime(shift.scheduled_end)}</div>
-          <div class="muted small">Tolerancia: ${shift.grace_minutes} min · Ausente desde: ${shift.absence_after_minutes} min</div>
+          <div class="list-item-title">${escapeHtml(site?.name || "—")}</div>
+          <div class="muted small"><strong>${escapeHtml(op?.full_name || "—")}</strong> · ${formatTime(assignment.scheduled_start)} a ${formatTime(assignment.scheduled_end)}</div>
+          <div class="muted small">Días: ${escapeHtml(days || "—")} · Vigencia: ${escapeHtml(vigencia)}</div>
+          <div class="muted small">Tolerancia: ${assignment.grace_minutes} min · Ausente desde: ${assignment.absence_after_minutes} min</div>
+          ${assignment.notes ? `<div class="muted small">Notas: ${escapeHtml(assignment.notes)}</div>` : ""}
           <div class="list-item-actions">
-            <button class="secondary-btn small-btn" data-edit-shift="${shift.id}" type="button">Editar</button>
-            <button class="danger-btn small-btn" data-delete-shift="${shift.id}" type="button">Eliminar</button>
+            <button class="secondary-btn small-btn" data-edit-assignment="${assignment.id}" type="button">Editar</button>
+            <button class="danger-btn small-btn" data-delete-assignment="${assignment.id}" type="button">Eliminar</button>
           </div>
         </div>`;
-    }).join("") || `<p class="muted">No hay turnos para la fecha seleccionada.</p>`;
+    }).join("") || `<p class="muted">No hay asignaciones cargadas.</p>`;
 
-    list.querySelectorAll("[data-edit-shift]").forEach(btn => btn.addEventListener("click", () => editShift(btn.dataset.editShift)));
-    list.querySelectorAll("[data-delete-shift]").forEach(btn => btn.addEventListener("click", () => deleteShift(btn.dataset.deleteShift)));
+    list.querySelectorAll("[data-edit-assignment]").forEach(btn => btn.addEventListener("click", () => editAssignment(btn.dataset.editAssignment)));
+    list.querySelectorAll("[data-delete-assignment]").forEach(btn => btn.addEventListener("click", () => deleteAssignment(btn.dataset.deleteAssignment)));
   }
 
-  function shiftPayloadFromForm() {
-    const id = $("#shiftId").value || undefined;
+  function assignmentPayloadFromForm() {
+    const id = $("#assignmentId").value || undefined;
+    const days = getSelectedAssignmentDays();
+    if (!days.length) throw new Error("Seleccioná al menos un día de cobertura.");
     return {
       ...(id ? { id } : {}),
-      shift_date: $("#shiftDate").value,
-      operator_id: $("#shiftOperator").value,
-      site_id: $("#shiftSite").value,
-      scheduled_start: $("#shiftStart").value,
-      scheduled_end: $("#shiftEnd").value,
-      grace_minutes: Number($("#shiftGrace").value || 10),
-      absence_after_minutes: Number($("#shiftAbsentAfter").value || 30),
+      operator_id: $("#assignmentOperator").value,
+      site_id: $("#assignmentSite").value,
+      days_of_week: days,
+      scheduled_start: $("#assignmentStart").value,
+      scheduled_end: $("#assignmentEnd").value,
+      grace_minutes: Number($("#assignmentGrace").value || 10),
+      absence_after_minutes: Number($("#assignmentAbsentAfter").value || 30),
+      valid_from: $("#assignmentValidFrom").value || todayISO(),
+      valid_to: $("#assignmentValidTo").value || null,
+      notes: $("#assignmentNotes").value.trim(),
       is_active: true
     };
   }
 
-  function resetShiftForm() {
-    $("#shiftForm").reset();
-    $("#shiftId").value = "";
-    $("#shiftDate").value = $("#dashboardDate").value || todayISO();
-    $("#shiftGrace").value = 10;
-    $("#shiftAbsentAfter").value = 30;
-    $("#shiftFormTitle").textContent = "Nuevo turno";
-    $("#cancelShiftEditBtn").classList.add("hidden");
+  function resetAssignmentForm() {
+    $("#assignmentForm").reset();
+    $("#assignmentId").value = "";
+    $("#assignmentGrace").value = 10;
+    $("#assignmentAbsentAfter").value = 30;
+    $("#assignmentValidFrom").value = todayISO();
+    setSelectedAssignmentDays([]);
+    $("#assignmentFormTitle").textContent = "Nueva asignación fija";
+    $("#cancelAssignmentEditBtn").classList.add("hidden");
   }
 
-  function editShift(id) {
-    const shift = byId(state.shifts, id);
-    if (!shift) return;
-    $("#shiftId").value = shift.id;
-    $("#shiftDate").value = shift.shift_date || todayISO();
-    $("#shiftOperator").value = shift.operator_id;
-    $("#shiftSite").value = shift.site_id;
-    $("#shiftStart").value = formatTime(shift.scheduled_start);
-    $("#shiftEnd").value = formatTime(shift.scheduled_end);
-    $("#shiftGrace").value = shift.grace_minutes || 10;
-    $("#shiftAbsentAfter").value = shift.absence_after_minutes || 30;
-    $("#shiftFormTitle").textContent = "Editar turno";
-    $("#cancelShiftEditBtn").classList.remove("hidden");
+  function editAssignment(id) {
+    const assignment = byId(state.assignments, id);
+    if (!assignment) return;
+    $("#assignmentId").value = assignment.id;
+    $("#assignmentOperator").value = assignment.operator_id;
+    $("#assignmentSite").value = assignment.site_id;
+    $("#assignmentStart").value = formatTime(assignment.scheduled_start);
+    $("#assignmentEnd").value = formatTime(assignment.scheduled_end);
+    $("#assignmentGrace").value = assignment.grace_minutes || 10;
+    $("#assignmentAbsentAfter").value = assignment.absence_after_minutes || 30;
+    $("#assignmentValidFrom").value = assignment.valid_from || todayISO();
+    $("#assignmentValidTo").value = assignment.valid_to || "";
+    $("#assignmentNotes").value = assignment.notes || "";
+    setSelectedAssignmentDays(assignment.days_of_week || []);
+    $("#assignmentFormTitle").textContent = "Editar asignación fija";
+    $("#cancelAssignmentEditBtn").classList.remove("hidden");
+    renderTab("assignments");
   }
 
-  async function deleteShift(id) {
-    if (!window.confirm("¿Eliminar este turno?")) return;
-    await store.deleteShift(id);
-    toast("Turno eliminado.");
+  async function deleteAssignment(id) {
+    if (!window.confirm("¿Eliminar esta asignación fija? Las marcaciones históricas quedan guardadas.")) return;
+    await store.deleteAssignment(id);
+    toast("Asignación eliminada.");
     await renderSupervisorView();
   }
 
-  function renderOperators() {
-    const list = $("#operatorsList");
-    const operators = state.profiles.filter(p => p.role === "operator");
-    list.innerHTML = operators.map(op => `
+  function renderUsers() {
+    const list = $("#usersList");
+    list.innerHTML = state.profiles.map(user => `
       <div class="list-item">
-        <div class="list-item-title">${escapeHtml(op.full_name)}</div>
-        <div class="muted small">${escapeHtml(op.phone || "Sin teléfono")}</div>
-        <div class="muted small">ID: ${escapeHtml(op.id)}</div>
+        <div class="list-item-title">${escapeHtml(user.full_name)}</div>
+        <div class="muted small">${user.role === "supervisor" ? "Supervisor" : "Operario"} · ${escapeHtml(user.phone || "Sin teléfono")}</div>
+        <div class="muted small">PIN: ${escapeHtml(user.pin || "—")} · ID: ${escapeHtml(user.id)}</div>
+        ${user.notes ? `<div class="muted small">Notas: ${escapeHtml(user.notes)}</div>` : ""}
         <div class="list-item-actions">
-          <button class="secondary-btn small-btn" data-edit-operator="${op.id}" type="button">Editar</button>
-          <button class="danger-btn small-btn" data-delete-operator="${op.id}" type="button">Eliminar</button>
+          <button class="secondary-btn small-btn" data-edit-user="${user.id}" type="button">Editar</button>
+          <button class="danger-btn small-btn" data-delete-user="${user.id}" type="button">Eliminar</button>
         </div>
-      </div>`).join("") || `<p class="muted">No hay operarios cargados.</p>`;
+      </div>`).join("") || `<p class="muted">No hay usuarios cargados.</p>`;
 
-    list.querySelectorAll("[data-edit-operator]").forEach(btn => btn.addEventListener("click", () => editOperator(btn.dataset.editOperator)));
-    list.querySelectorAll("[data-delete-operator]").forEach(btn => btn.addEventListener("click", () => deleteOperator(btn.dataset.deleteOperator)));
+    list.querySelectorAll("[data-edit-user]").forEach(btn => btn.addEventListener("click", () => editUser(btn.dataset.editUser)));
+    list.querySelectorAll("[data-delete-user]").forEach(btn => btn.addEventListener("click", () => deleteUser(btn.dataset.deleteUser)));
   }
 
-  function operatorPayloadFromForm() {
-    const id = $("#operatorId").value || $("#operatorAuthId").value.trim() || undefined;
+  function userPayloadFromForm() {
+    const id = $("#userId").value || undefined;
     return {
       ...(id ? { id } : {}),
-      full_name: $("#operatorName").value.trim(),
-      phone: $("#operatorPhone").value.trim(),
-      pin: $("#operatorPin").value.trim(),
-      role: "operator",
+      full_name: $("#userName").value.trim(),
+      phone: $("#userPhone").value.trim(),
+      pin: $("#userPin").value.trim(),
+      role: $("#userRole").value,
+      notes: $("#userNotes").value.trim(),
       is_active: true
     };
   }
 
-  function resetOperatorForm() {
-    $("#operatorForm").reset();
-    $("#operatorId").value = "";
-    $("#operatorAuthId").value = "";
-    $("#operatorFormTitle").textContent = "Operario demo/local";
-    $("#cancelOperatorEditBtn").classList.add("hidden");
+  function resetUserForm() {
+    $("#userForm").reset();
+    $("#userId").value = "";
+    $("#userRole").value = "operator";
+    $("#userFormTitle").textContent = "Nuevo usuario";
+    $("#cancelUserEditBtn").classList.add("hidden");
   }
 
-  function editOperator(id) {
-    const op = byId(state.profiles, id);
-    if (!op) return;
-    $("#operatorId").value = op.id;
-    $("#operatorAuthId").value = op.id || "";
-    $("#operatorName").value = op.full_name || "";
-    $("#operatorPhone").value = op.phone || "";
-    $("#operatorPin").value = op.pin || "";
-    $("#operatorFormTitle").textContent = "Editar operario";
-    $("#cancelOperatorEditBtn").classList.remove("hidden");
+  function editUser(id) {
+    const user = byId(state.profiles, id);
+    if (!user) return;
+    $("#userId").value = user.id;
+    $("#userRole").value = user.role || "operator";
+    $("#userName").value = user.full_name || "";
+    $("#userPhone").value = user.phone || "";
+    $("#userPin").value = user.pin || "";
+    $("#userNotes").value = user.notes || "";
+    $("#userFormTitle").textContent = "Editar usuario";
+    $("#cancelUserEditBtn").classList.remove("hidden");
+    renderTab("users");
   }
 
-  async function deleteOperator(id) {
-    if (!window.confirm("¿Eliminar este operario?")) return;
+  async function deleteUser(id) {
+    if (id === state.currentProfile?.id) {
+      toast("No conviene eliminar tu propio usuario mientras estás logueado.");
+      return;
+    }
+    if (!window.confirm("¿Eliminar este usuario? También se darán de baja sus asignaciones activas.")) return;
     await store.deleteProfile(id);
-    toast("Operario eliminado.");
+    toast("Usuario eliminado.");
     await renderSupervisorView();
   }
 
@@ -605,10 +705,10 @@
     const rows = state.events.map(event => {
       const op = byId(state.profiles, event.operator_id);
       const site = byId(state.sites, event.site_id);
-      const shift = byId(state.shifts, event.shift_id) || {};
       return `
         <tr>
           <td>${formatDateTime(event.created_at)}</td>
+          <td>${escapeHtml(event.shift_date || "—")}</td>
           <td>${escapeHtml(op?.full_name || event.operator_id || "—")}</td>
           <td>${escapeHtml(site?.name || event.site_id || "—")}</td>
           <td>${escapeHtml(event.event_type || "—")}</td>
@@ -622,18 +722,19 @@
 
     $("#recordsTable").innerHTML = `
       <table>
-        <thead><tr><th>Hora</th><th>Operario</th><th>Servicio</th><th>Tipo</th><th>GPS</th><th>Precisión</th><th>Distancia</th><th>Dentro radio</th><th>Obs.</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="9">Todavía no hay marcaciones.</td></tr>`}</tbody>
+        <thead><tr><th>Hora registro</th><th>Fecha servicio</th><th>Operario</th><th>Servicio</th><th>Tipo</th><th>GPS</th><th>Precisión</th><th>Distancia</th><th>Dentro radio</th><th>Obs.</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="10">Todavía no hay marcaciones.</td></tr>`}</tbody>
       </table>`;
   }
 
   function exportCsv() {
-    const header = ["fecha_hora", "operario", "servicio", "tipo", "estado", "lat", "lng", "precision_m", "distancia_m", "dentro_radio", "observacion"];
+    const header = ["fecha_hora", "fecha_servicio", "operario", "servicio", "tipo", "estado", "lat", "lng", "precision_m", "distancia_m", "dentro_radio", "observacion", "assignment_id", "shift_id"];
     const lines = state.events.map(event => {
       const op = byId(state.profiles, event.operator_id);
       const site = byId(state.sites, event.site_id);
       const values = [
         event.created_at,
+        event.shift_date || "",
         op?.full_name || event.operator_id || "",
         site?.name || event.site_id || "",
         event.event_type || "",
@@ -643,7 +744,9 @@
         event.gps_accuracy_m || "",
         event.distance_m || "",
         event.is_inside_site === true ? "si" : event.is_inside_site === false ? "no" : "",
-        event.notes || ""
+        event.notes || "",
+        event.assignment_id || "",
+        event.shift_id || ""
       ];
       return values.map(value => `"${String(value).replace(/"/g, '""')}"`).join(",");
     });
@@ -661,13 +764,14 @@
       state.loginMode = btn.dataset.loginMode;
       renderLoginMode();
     }));
-    $("#localLoginForm").addEventListener("submit", handleLocalLogin);
-    $("#supabaseLoginForm").addEventListener("submit", handleSupabaseLogin);
+    $("#pinLoginForm").addEventListener("submit", handlePinLogin);
     $("#operatorLogoutBtn").addEventListener("click", logout);
     $("#supervisorLogoutBtn").addEventListener("click", logout);
     $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => renderTab(btn.dataset.tab)));
     $("#refreshDashboardBtn").addEventListener("click", renderSupervisorView);
     $("#dashboardDate").addEventListener("change", renderSupervisorView);
+    $("#coverageSearch").addEventListener("input", renderCoverage);
+    $("#clearCoverageSearchBtn").addEventListener("click", () => { $("#coverageSearch").value = ""; renderCoverage(); });
 
     $("#siteForm").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -678,31 +782,36 @@
     });
     $("#cancelSiteEditBtn").addEventListener("click", resetSiteForm);
 
-    $("#shiftForm").addEventListener("submit", async (event) => {
+    $("#assignmentForm").addEventListener("submit", async (event) => {
       event.preventDefault();
-      await store.upsertShift(shiftPayloadFromForm());
-      resetShiftForm();
-      toast("Turno guardado.");
-      await renderSupervisorView();
+      try {
+        await store.upsertAssignment(assignmentPayloadFromForm());
+        resetAssignmentForm();
+        toast("Asignación guardada.");
+        await renderSupervisorView();
+      } catch (error) {
+        toast(error.message || "No se pudo guardar la asignación.");
+      }
     });
-    $("#cancelShiftEditBtn").addEventListener("click", resetShiftForm);
+    $("#cancelAssignmentEditBtn").addEventListener("click", resetAssignmentForm);
 
-    $("#operatorForm").addEventListener("submit", async (event) => {
+    $("#userForm").addEventListener("submit", async (event) => {
       event.preventDefault();
-      await store.upsertProfile(operatorPayloadFromForm());
-      resetOperatorForm();
-      toast("Operario guardado.");
+      await store.upsertProfile(userPayloadFromForm());
+      resetUserForm();
+      toast("Usuario guardado.");
       await renderSupervisorView();
     });
-    $("#cancelOperatorEditBtn").addEventListener("click", resetOperatorForm);
+    $("#cancelUserEditBtn").addEventListener("click", resetUserForm);
     $("#exportCsvBtn").addEventListener("click", exportCsv);
   }
 
   function init() {
     renderConnectionMode();
     renderLoginMode();
+    renderAssignmentDays();
     $("#dashboardDate").value = todayISO();
-    $("#shiftDate").value = todayISO();
+    $("#assignmentValidFrom").value = todayISO();
     bindEvents();
   }
 

@@ -291,3 +291,115 @@ th { color: var(--muted); font-size: .76rem; text-transform: uppercase; letter-s
 @media (min-width: 1024px) {
   .operator-grid { grid-template-columns: .82fr 1.18fr; align-items: start; }
 }
+
+.field-title {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: .82rem;
+  font-weight: 800;
+}
+.no-margin { margin: 0; }
+.compact-toolbar { grid-template-columns: 1fr; }
+.day-checkbox-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+.day-check {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff;
+}
+.day-check input { width: 20px; height: 20px; }
+.coverage-grid {
+  display: grid;
+  gap: 14px;
+}
+.service-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: #fff;
+  padding: 14px;
+  overflow: hidden;
+}
+.service-card-head {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.service-card h3 { margin-bottom: 4px; font-size: 1.2rem; letter-spacing: -.03em; }
+.tag-row { display: flex; flex-wrap: wrap; gap: 7px; align-items: flex-start; }
+.mini-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  font-size: .75rem;
+  font-weight: 900;
+}
+.coverage-days {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+.coverage-day {
+  min-height: 94px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #f8fafc;
+  padding: 10px;
+}
+.coverage-day-title {
+  color: var(--muted);
+  font-weight: 900;
+  font-size: .78rem;
+  margin-bottom: 8px;
+}
+.coverage-assignment {
+  display: grid;
+  gap: 2px;
+  padding: 10px;
+  border-radius: 13px;
+  background: #fff;
+  border: 1px solid var(--line);
+  margin-bottom: 7px;
+}
+.coverage-assignment strong { font-size: .84rem; }
+.coverage-assignment span { color: var(--muted); font-size: .82rem; }
+.no-coverage {
+  display: grid;
+  place-items: center;
+  min-height: 48px;
+  color: var(--muted);
+  font-size: .82rem;
+}
+.disabled-link {
+  opacity: .55;
+  pointer-events: none;
+}
+
+@media (min-width: 520px) {
+  .day-checkbox-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .coverage-days { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (min-width: 720px) {
+  .compact-toolbar { grid-template-columns: 1fr auto; align-items: end; }
+  .day-checkbox-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .service-card-head { grid-template-columns: 1fr auto; align-items: start; }
+  .coverage-days { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+@media (min-width: 1120px) {
+  .coverage-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

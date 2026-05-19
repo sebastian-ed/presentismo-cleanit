@@ -25,37 +25,26 @@
         <div class="hero-card">
           <div class="hero-copy">
             <p class="eyebrow">Control operativo en vivo</p>
-            <h2>Marcación simple para operarios. Visibilidad real para supervisión.</h2>
-            <p class="muted">Registro de hora, GPS, precisión, distancia al servicio y estado operativo: presente, demorado o ausente.</p>
+            <h2>Servicios fijos, marcación simple y supervisión en tiempo real.</h2>
+            <p class="muted">El operario solo marca presencia. Supervisión administra servicios, usuarios y asignaciones semanales sin cargar turno por turno.</p>
           </div>
+
           <div class="login-card">
             <div class="segmented" role="tablist" aria-label="Tipo de acceso">
               <button class="segmented-btn active" data-login-mode="operator" type="button">Operario</button>
               <button class="segmented-btn" data-login-mode="supervisor" type="button">Supervisor</button>
             </div>
 
-            <form id="localLoginForm" class="form-stack">
+            <form id="pinLoginForm" class="form-stack">
               <div class="notice compact">
                 <strong>Demo local activa.</strong>
-                <span>PIN supervisor: <code>9999</code> · PIN operario: <code>1001</code> o <code>1002</code></span>
+                <span>PIN supervisor: <code>9999</code> · PIN operarios: <code>1001</code>, <code>1002</code>, <code>1003</code></span>
               </div>
               <label>
                 <span>PIN de acceso</span>
-                <input id="localPin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="Ej. 1001" required />
+                <input id="loginPin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="Ej. 1001" required />
               </label>
               <button class="primary-btn" type="submit">Ingresar</button>
-            </form>
-
-            <form id="supabaseLoginForm" class="form-stack hidden">
-              <label>
-                <span>Email</span>
-                <input id="email" type="email" autocomplete="email" placeholder="usuario@cleanit.com" />
-              </label>
-              <label>
-                <span>Contraseña</span>
-                <input id="password" type="password" autocomplete="current-password" placeholder="Contraseña" />
-              </label>
-              <button class="primary-btn" type="submit">Ingresar con Supabase</button>
             </form>
           </div>
         </div>
@@ -84,9 +73,10 @@
 
         <nav class="tabbar" aria-label="Panel supervisor">
           <button class="tab-btn active" data-tab="live" type="button">En vivo</button>
+          <button class="tab-btn" data-tab="coverage" type="button">Cobertura</button>
+          <button class="tab-btn" data-tab="assignments" type="button">Asignaciones</button>
           <button class="tab-btn" data-tab="sites" type="button">Servicios</button>
-          <button class="tab-btn" data-tab="shifts" type="button">Turnos</button>
-          <button class="tab-btn" data-tab="operators" type="button">Operarios</button>
+          <button class="tab-btn" data-tab="users" type="button">Usuarios</button>
           <button class="tab-btn" data-tab="records" type="button">Registros</button>
         </nav>
 
@@ -109,6 +99,63 @@
           </div>
         </section>
 
+        <section id="coverageTab" class="tab-panel">
+          <div class="toolbar-card compact-toolbar">
+            <label>
+              <span>Buscar servicio, zona u operario</span>
+              <input id="coverageSearch" placeholder="Ej. Colegiales, Chaves, Alvarez Thomas" />
+            </label>
+            <button class="secondary-btn" id="clearCoverageSearchBtn" type="button">Limpiar</button>
+          </div>
+          <div class="data-card">
+            <div class="card-title-row">
+              <div>
+                <h3>Cobertura semanal por servicio</h3>
+                <p class="muted small no-margin">Formato similar al planificador: servicio, etiquetas y cobertura por día.</p>
+              </div>
+            </div>
+            <div id="coverageGrid" class="coverage-grid"></div>
+          </div>
+        </section>
+
+        <section id="assignmentsTab" class="tab-panel">
+          <div class="split-layout">
+            <form id="assignmentForm" class="data-card form-stack">
+              <div class="card-title-row">
+                <h3 id="assignmentFormTitle">Nueva asignación fija</h3>
+                <button class="ghost-btn small-btn hidden" id="cancelAssignmentEditBtn" type="button">Cancelar edición</button>
+              </div>
+              <input type="hidden" id="assignmentId" />
+              <label><span>Operario</span><select id="assignmentOperator" required></select></label>
+              <label><span>Servicio</span><select id="assignmentSite" required></select></label>
+              <div class="two-cols">
+                <label><span>Hora ingreso</span><input id="assignmentStart" type="time" required /></label>
+                <label><span>Hora salida</span><input id="assignmentEnd" type="time" required /></label>
+              </div>
+              <div>
+                <span class="field-title">Días de cobertura</span>
+                <div class="day-checkbox-grid" id="assignmentDays"></div>
+              </div>
+              <div class="two-cols">
+                <label><span>Vigente desde</span><input id="assignmentValidFrom" type="date" required /></label>
+                <label><span>Vigente hasta <small class="muted">(opcional)</small></span><input id="assignmentValidTo" type="date" /></label>
+              </div>
+              <div class="two-cols">
+                <label><span>Tolerancia demora min.</span><input id="assignmentGrace" type="number" min="0" max="120" value="10" /></label>
+                <label><span>Ausente desde min.</span><input id="assignmentAbsentAfter" type="number" min="1" max="240" value="30" /></label>
+              </div>
+              <label><span>Notas internas</span><textarea id="assignmentNotes" placeholder="Ej. Cubre solo mientras dure reemplazo / ingreso por puerta lateral..."></textarea></label>
+              <button class="primary-btn" type="submit">Guardar asignación</button>
+              <p class="muted small">Una asignación puede tener varios días. Ejemplo: lunes, miércoles y viernes de 08:00 a 12:00. Ese turno se genera solo para cada fecha correspondiente.</p>
+            </form>
+
+            <div class="data-card">
+              <h3>Asignaciones cargadas</h3>
+              <div id="assignmentsList" class="list-stack"></div>
+            </div>
+          </div>
+        </section>
+
         <section id="sitesTab" class="tab-panel">
           <div class="split-layout">
             <form id="siteForm" class="data-card form-stack">
@@ -117,19 +164,26 @@
                 <button class="ghost-btn small-btn hidden" id="cancelSiteEditBtn" type="button">Cancelar edición</button>
               </div>
               <input type="hidden" id="siteId" />
-              <label><span>Nombre del servicio</span><input id="siteName" required placeholder="Ej. Consorcio Av. Santa Fe 1234" /></label>
+              <label><span>Nombre del servicio</span><input id="siteName" required placeholder="Ej. Alvarez Thomas 550 - Colegiales" /></label>
               <label><span>Dirección</span><input id="siteAddress" required placeholder="Dirección completa" /></label>
+              <div class="two-cols">
+                <label><span>Zona / barrio</span><input id="siteZone" placeholder="Ej. Colegiales" /></label>
+                <label><span>Supervisor</span><input id="siteSupervisor" placeholder="Ej. Sup. José" /></label>
+              </div>
+              <div class="two-cols">
+                <label><span>Tipo de cobertura</span><input id="siteType" placeholder="Ej. fixed" /></label>
+                <label><span>Radio GPS aceptado en metros</span><input id="siteRadius" required type="number" min="10" max="1000" value="120" /></label>
+              </div>
               <div class="two-cols">
                 <label><span>Latitud</span><input id="siteLat" required type="number" step="any" placeholder="-34.6037" /></label>
                 <label><span>Longitud</span><input id="siteLng" required type="number" step="any" placeholder="-58.3816" /></label>
               </div>
-              <label><span>Radio GPS aceptado en metros</span><input id="siteRadius" required type="number" min="10" max="1000" value="120" /></label>
               <div class="two-cols">
-                <label><span>Contacto consorcio</span><input id="siteContactName" placeholder="Ej. Encargado / Administración" /></label>
+                <label><span>Contacto consorcio</span><input id="siteContactName" placeholder="Ej. Administración / Encargado" /></label>
                 <label><span>WhatsApp</span><input id="siteWhatsapp" placeholder="+5491123456789" /></label>
               </div>
               <button class="primary-btn" type="submit">Guardar servicio</button>
-              <p class="muted small">Tip operativo: cargá la latitud/longitud del punto exacto de ingreso al servicio, no solo la dirección postal. GPS no es magia; si le das un punto flojo, te devuelve una auditoría floja.</p>
+              <p class="muted small">Cargá la latitud/longitud del punto real de ingreso. Un radio enorme convierte el GPS en decoración corporativa.</p>
             </form>
             <div class="data-card">
               <h3>Servicios cargados</h3>
@@ -138,52 +192,25 @@
           </div>
         </section>
 
-        <section id="shiftsTab" class="tab-panel">
+        <section id="usersTab" class="tab-panel">
           <div class="split-layout">
-            <form id="shiftForm" class="data-card form-stack">
+            <form id="userForm" class="data-card form-stack">
               <div class="card-title-row">
-                <h3 id="shiftFormTitle">Nuevo turno</h3>
-                <button class="ghost-btn small-btn hidden" id="cancelShiftEditBtn" type="button">Cancelar edición</button>
+                <h3 id="userFormTitle">Nuevo usuario</h3>
+                <button class="ghost-btn small-btn hidden" id="cancelUserEditBtn" type="button">Cancelar edición</button>
               </div>
-              <input type="hidden" id="shiftId" />
-              <label><span>Fecha</span><input id="shiftDate" type="date" required /></label>
-              <label><span>Operario</span><select id="shiftOperator" required></select></label>
-              <label><span>Servicio</span><select id="shiftSite" required></select></label>
-              <div class="two-cols">
-                <label><span>Hora ingreso</span><input id="shiftStart" type="time" required /></label>
-                <label><span>Hora salida</span><input id="shiftEnd" type="time" required /></label>
-              </div>
-              <div class="two-cols">
-                <label><span>Tolerancia demora min.</span><input id="shiftGrace" type="number" min="0" max="120" value="10" /></label>
-                <label><span>Ausente desde min.</span><input id="shiftAbsentAfter" type="number" min="1" max="240" value="30" /></label>
-              </div>
-              <button class="primary-btn" type="submit">Guardar turno</button>
+              <input type="hidden" id="userId" />
+              <label><span>Rol</span><select id="userRole" required><option value="operator">Operario</option><option value="supervisor">Supervisor</option></select></label>
+              <label><span>Nombre completo</span><input id="userName" required placeholder="Nombre y apellido" /></label>
+              <label><span>Teléfono</span><input id="userPhone" placeholder="+549..." /></label>
+              <label><span>PIN de acceso</span><input id="userPin" inputmode="numeric" required placeholder="Ej. 1004" /></label>
+              <label><span>Notas</span><textarea id="userNotes" placeholder="Datos internos, reemplazos, observaciones operativas..."></textarea></label>
+              <button class="primary-btn" type="submit">Guardar usuario</button>
+              <p class="muted small">Desde esta vista podés crear, editar o dar de baja operarios sin tocar Supabase.</p>
             </form>
             <div class="data-card">
-              <h3>Turnos cargados</h3>
-              <div id="shiftsList" class="list-stack"></div>
-            </div>
-          </div>
-        </section>
-
-        <section id="operatorsTab" class="tab-panel">
-          <div class="split-layout">
-            <form id="operatorForm" class="data-card form-stack">
-              <div class="card-title-row">
-                <h3 id="operatorFormTitle">Operario demo/local</h3>
-                <button class="ghost-btn small-btn hidden" id="cancelOperatorEditBtn" type="button">Cancelar edición</button>
-              </div>
-              <input type="hidden" id="operatorId" />
-              <label><span>UUID Auth de Supabase <small class="muted">(solo producción)</small></span><input id="operatorAuthId" placeholder="UUID del usuario creado en Authentication" /></label>
-              <label><span>Nombre completo</span><input id="operatorName" required placeholder="Nombre del operario" /></label>
-              <label><span>Teléfono</span><input id="operatorPhone" placeholder="+549..." /></label>
-              <label><span>PIN local</span><input id="operatorPin" inputmode="numeric" placeholder="Ej. 1003" /></label>
-              <button class="primary-btn" type="submit">Guardar operario</button>
-              <p class="muted small">En Supabase productivo, los usuarios se crean desde Authentication y se vinculan en <code>profiles</code>. Este formulario gestiona operarios en modo local.</p>
-            </form>
-            <div class="data-card">
-              <h3>Operarios</h3>
-              <div id="operatorsList" class="list-stack"></div>
+              <h3>Usuarios cargados</h3>
+              <div id="usersList" class="list-stack"></div>
             </div>
           </div>
         </section>
