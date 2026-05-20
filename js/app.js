@@ -750,21 +750,132 @@
     $("#assignmentSite").innerHTML = state.sites.map(site => `<option value="${site.id}">${escapeHtml(site.name)}</option>`).join("");
   }
 
-  function renderAssignmentDays() {
-    $("#assignmentDays").innerHTML = DAYS.map(day => `
-      <label class="day-check">
-        <input type="checkbox" value="${day.id}" />
-        <span>${day.long}</span>
-      </label>`).join("");
+  function defaultScheduleStart() { return "08:00"; }
+  function defaultScheduleEnd() { return "12:00"; }
+
+  function scheduleInputId(prefix, dayId) {
+    return `${prefix}-${dayId}`;
   }
 
-  function getSelectedAssignmentDays() {
-    return $$("#assignmentDays input:checked").map(input => Number(input.value));
+  function renderAssignmentSchedule() {
+    const grid = $("#assignmentScheduleGrid");
+    grid.innerHTML = DAYS.map(day => `
+      <div class="schedule-day-row" data-schedule-row="${day.id}">
+        <label class="schedule-day-toggle">
+          <input id="${scheduleInputId("assignmentDayEnabled", day.id)}" type="checkbox" value="${day.id}" />
+          <span>${day.long}</span>
+        </label>
+        <label class="schedule-time-field">
+          <span>Entrada</span>
+          <input id="${scheduleInputId("assignmentDayStart", day.id)}" type="time" value="${defaultScheduleStart()}" disabled />
+        </label>
+        <label class="schedule-time-field">
+          <span>Salida</span>
+          <input id="${scheduleInputId("assignmentDayEnd", day.id)}" type="time" value="${defaultScheduleEnd()}" disabled />
+        </label>
+      </div>`).join("");
+
+    DAYS.forEach(day => {
+      const enabled = document.getElementById(scheduleInputId("assignmentDayEnabled", day.id));
+      const start = document.getElementById(scheduleInputId("assignmentDayStart", day.id));
+      const end = document.getElementById(scheduleInputId("assignmentDayEnd", day.id));
+      enabled.addEventListener("change", () => {
+        start.disabled = !enabled.checked;
+        end.disabled = !enabled.checked;
+        if (enabled.checked) {
+          if (!start.value) start.value = defaultScheduleStart();
+          if (!end.value) end.value = defaultScheduleEnd();
+        }
+      });
+    });
   }
 
-  function setSelectedAssignmentDays(days = []) {
-    const selected = days.map(Number);
-    $$("#assignmentDays input").forEach(input => { input.checked = selected.includes(Number(input.value)); });
+  function setScheduleDay(dayId, enabled, start = defaultScheduleStart(), end = defaultScheduleEnd()) {
+    const checkbox = document.getElementById(scheduleInputId("assignmentDayEnabled", dayId));
+    const startInput = document.getElementById(scheduleInputId("assignmentDayStart", dayId));
+    const endInput = document.getElementById(scheduleInputId("assignmentDayEnd", dayId));
+    if (!checkbox || !startInput || !endInput) return;
+    checkbox.checked = Boolean(enabled);
+    startInput.disabled = !checkbox.checked;
+    endInput.disabled = !checkbox.checked;
+    startInput.value = start || defaultScheduleStart();
+    endInput.value = end || defaultScheduleEnd();
+  }
+
+  function clearAssignmentSchedule() {
+    DAYS.forEach(day => setScheduleDay(day.id, false));
+  }
+
+  function setAssignmentScheduleRows(rows = []) {
+    clearAssignmentSchedule();
+    rows.forEach(row => {
+      const dayId = Number(row.day_id ?? row.day ?? row.id);
+      if (!dayId) return;
+      setScheduleDay(dayId, true, formatTime(row.scheduled_start || row.start || defaultScheduleStart()), formatTime(row.scheduled_end || row.end || defaultScheduleEnd()));
+    });
+  }
+
+  function applyWeekdaysPreset() {
+    DAYS.forEach(day => {
+      if (day.id <= 5) {
+        const start = document.getElementById(scheduleInputId("assignmentDayStart", day.id))?.value || defaultScheduleStart();
+        const end = document.getElementById(scheduleInputId("assignmentDayEnd", day.id))?.value || defaultScheduleEnd();
+        setScheduleDay(day.id, true, start, end);
+      }
+    });
+  }
+
+  function applyAllDaysPreset() {
+    DAYS.forEach(day => {
+      const start = document.getElementById(scheduleInputId("assignmentDayStart", day.id))?.value || defaultScheduleStart();
+      const end = document.getElementById(scheduleInputId("assignmentDayEnd", day.id))?.value || defaultScheduleEnd();
+      setScheduleDay(day.id, true, start, end);
+    });
+  }
+
+  function copyFirstScheduleToActiveDays() {
+    const active = getAssignmentScheduleRows(false);
+    if (!active.length) {
+      toast("Activá al menos un día para copiar el horario.");
+      return;
+    }
+    const first = active[0];
+    active.forEach(row => setScheduleDay(row.day_id, true, first.scheduled_start, first.scheduled_end));
+  }
+
+  function getAssignmentScheduleRows(validate = true) {
+    const rows = [];
+    for (const day of DAYS) {
+      const checkbox = document.getElementById(scheduleInputId("assignmentDayEnabled", day.id));
+      if (!checkbox?.checked) continue;
+      const start = document.getElementById(scheduleInputId("assignmentDayStart", day.id))?.value;
+      const end = document.getElementById(scheduleInputId("assignmentDayEnd", day.id))?.value;
+      if (validate) {
+        if (!start || !end) throw new Error(`Cargá horario de entrada y salida para ${day.long}.`);
+        if (end <= start) throw new Error(`En ${day.long}, la hora de salida debe ser posterior a la entrada.`);
+      }
+      rows.push({ day_id: day.id, scheduled_start: start || defaultScheduleStart(), scheduled_end: end || defaultScheduleEnd() });
+    }
+    return rows;
+  }
+
+  function groupScheduleRows(rows) {
+    const groups = new Map();
+    rows.forEach(row => {
+      const key = `${row.scheduled_start}|${row.scheduled_end}`;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          scheduled_start: row.scheduled_start,
+          scheduled_end: row.scheduled_end,
+          days_of_week: []
+        });
+      }
+      groups.get(key).days_of_week.push(row.day_id);
+    });
+    return Array.from(groups.values()).map(group => ({
+      ...group,
+      days_of_week: group.days_of_week.sort((a, b) => a - b)
+    }));
   }
 
   function renderAssignments() {
@@ -798,17 +909,15 @@
     list.querySelectorAll("[data-delete-assignment]").forEach(btn => btn.addEventListener("click", () => deleteAssignment(btn.dataset.deleteAssignment)));
   }
 
-  function assignmentPayloadFromForm() {
+  function assignmentPayloadsFromForm() {
     const id = $("#assignmentId").value || undefined;
-    const days = getSelectedAssignmentDays();
-    if (!days.length) throw new Error("Seleccioná al menos un día de cobertura.");
-    return {
-      ...(id ? { id } : {}),
+    const rows = getAssignmentScheduleRows(true);
+    if (!rows.length) throw new Error("Activá al menos un día de cobertura.");
+
+    const groups = groupScheduleRows(rows);
+    const base = {
       operator_id: $("#assignmentOperator").value,
       site_id: $("#assignmentSite").value,
-      days_of_week: days,
-      scheduled_start: $("#assignmentStart").value,
-      scheduled_end: $("#assignmentEnd").value,
       grace_minutes: Number($("#assignmentGrace").value || 10),
       absence_after_minutes: Number($("#assignmentAbsentAfter").value || 30),
       valid_from: $("#assignmentValidFrom").value || todayISO(),
@@ -816,6 +925,14 @@
       notes: $("#assignmentNotes").value.trim(),
       is_active: true
     };
+
+    return groups.map((group, index) => ({
+      ...(id && index === 0 ? { id } : {}),
+      ...base,
+      days_of_week: group.days_of_week,
+      scheduled_start: group.scheduled_start,
+      scheduled_end: group.scheduled_end
+    }));
   }
 
   function resetAssignmentForm() {
@@ -824,7 +941,7 @@
     $("#assignmentGrace").value = 10;
     $("#assignmentAbsentAfter").value = 30;
     $("#assignmentValidFrom").value = todayISO();
-    setSelectedAssignmentDays([]);
+    clearAssignmentSchedule();
     $("#assignmentFormTitle").textContent = "Nueva asignación fija";
     $("#cancelAssignmentEditBtn").classList.add("hidden");
   }
@@ -835,14 +952,16 @@
     $("#assignmentId").value = assignment.id;
     $("#assignmentOperator").value = assignment.operator_id;
     $("#assignmentSite").value = assignment.site_id;
-    $("#assignmentStart").value = formatTime(assignment.scheduled_start);
-    $("#assignmentEnd").value = formatTime(assignment.scheduled_end);
     $("#assignmentGrace").value = assignment.grace_minutes || 10;
     $("#assignmentAbsentAfter").value = assignment.absence_after_minutes || 30;
     $("#assignmentValidFrom").value = assignment.valid_from || todayISO();
     $("#assignmentValidTo").value = assignment.valid_to || "";
     $("#assignmentNotes").value = assignment.notes || "";
-    setSelectedAssignmentDays(assignment.days_of_week || []);
+    setAssignmentScheduleRows((assignment.days_of_week || []).map(day => ({
+      day_id: Number(day),
+      scheduled_start: formatTime(assignment.scheduled_start),
+      scheduled_end: formatTime(assignment.scheduled_end)
+    })));
     $("#assignmentFormTitle").textContent = "Editar asignación fija";
     $("#cancelAssignmentEditBtn").classList.remove("hidden");
     renderTab("assignments");
@@ -1006,15 +1125,22 @@
     $("#assignmentForm").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
-        await store.upsertAssignment(assignmentPayloadFromForm());
+        const payloads = assignmentPayloadsFromForm();
+        for (const payload of payloads) {
+          await store.upsertAssignment(payload);
+        }
         resetAssignmentForm();
-        toast("Asignación guardada.");
+        toast(payloads.length === 1 ? "Asignación guardada." : `${payloads.length} asignaciones guardadas según horarios distintos.`);
         await renderSupervisorView();
       } catch (error) {
         toast(error.message || "No se pudo guardar la asignación.");
       }
     });
     $("#cancelAssignmentEditBtn").addEventListener("click", resetAssignmentForm);
+    $("#presetWeekdaysBtn").addEventListener("click", applyWeekdaysPreset);
+    $("#presetAllDaysBtn").addEventListener("click", applyAllDaysPreset);
+    $("#copyFirstScheduleBtn").addEventListener("click", copyFirstScheduleToActiveDays);
+    $("#clearScheduleBtn").addEventListener("click", clearAssignmentSchedule);
 
     $("#userForm").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -1034,7 +1160,7 @@
   async function init() {
     renderConnectionMode();
     renderLoginMode();
-    renderAssignmentDays();
+    renderAssignmentSchedule();
     $("#dashboardDate").value = todayISO();
     $("#assignmentValidFrom").value = todayISO();
     bindEvents();
