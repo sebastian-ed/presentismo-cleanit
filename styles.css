@@ -480,3 +480,50 @@ input:disabled {
   cursor: not-allowed;
 }
 .status-completed { background: #dcfce7; color: var(--success); border-color: #bbf7d0; }
+
+.weekly-schedule-block {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: #f8fafc;
+}
+.compact-row { align-items: flex-start; margin-bottom: 0; }
+.schedule-toolbar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.schedule-grid {
+  display: grid;
+  gap: 8px;
+}
+.schedule-day-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fff;
+}
+.schedule-day-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink);
+  font-size: .9rem;
+}
+.schedule-day-toggle input {
+  width: 20px;
+  height: 20px;
+}
+.schedule-time-field span { font-size: .74rem; }
+
+@media (min-width: 580px) {
+  .schedule-day-row {
+    grid-template-columns: 1.1fr .8fr .8fr;
+    align-items: end;
+  }
+}

@@ -139,13 +139,20 @@
               <input type="hidden" id="assignmentId" />
               <label><span>Operario</span><select id="assignmentOperator" required></select></label>
               <label><span>Servicio</span><select id="assignmentSite" required></select></label>
-              <div class="two-cols">
-                <label><span>Hora ingreso</span><input id="assignmentStart" type="time" required /></label>
-                <label><span>Hora salida</span><input id="assignmentEnd" type="time" required /></label>
-              </div>
-              <div>
-                <span class="field-title">Días de cobertura</span>
-                <div class="day-checkbox-grid" id="assignmentDays"></div>
+              <div class="weekly-schedule-block">
+                <div class="card-title-row compact-row">
+                  <div>
+                    <span class="field-title">Detalle semanal por día</span>
+                    <p class="muted small no-margin">Activá cada día y cargá su horario real. Sirve para casos como lunes a viernes 08:00-12:00 y sábado 08:00-10:00.</p>
+                  </div>
+                </div>
+                <div class="schedule-toolbar" aria-label="Atajos de carga semanal">
+                  <button class="secondary-btn small-btn" id="presetWeekdaysBtn" type="button">Lun a Vie</button>
+                  <button class="secondary-btn small-btn" id="presetAllDaysBtn" type="button">Todos los días</button>
+                  <button class="secondary-btn small-btn" id="copyFirstScheduleBtn" type="button">Copiar horario activo</button>
+                  <button class="ghost-btn small-btn" id="clearScheduleBtn" type="button">Limpiar</button>
+                </div>
+                <div id="assignmentScheduleGrid" class="schedule-grid"></div>
               </div>
               <div class="two-cols">
                 <label><span>Vigente desde</span><input id="assignmentValidFrom" type="date" required /></label>
@@ -157,7 +164,7 @@
               </div>
               <label><span>Notas internas</span><textarea id="assignmentNotes" placeholder="Ej. Cubre solo mientras dure reemplazo / ingreso por puerta lateral..."></textarea></label>
               <button class="primary-btn" type="submit">Guardar asignación</button>
-              <p class="muted small">Una asignación puede tener varios días. Ejemplo: lunes, miércoles y viernes de 08:00 a 12:00. Ese turno se genera solo para cada fecha correspondiente.</p>
+              <p class="muted small">La app agrupa automáticamente los días con el mismo horario. Si un día tiene horario distinto, se guarda como una asignación separada en Supabase, pero queda visible en la cobertura semanal como corresponde.</p>
             </form>
 
             <div class="data-card">

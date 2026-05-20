@@ -102,14 +102,31 @@
       return { key: "present", label: "Entrada registrada", className: "status-present" };
     }
 
-    if (manualEvent?.event_type === "absent") return { key: "absent", label: "Ausente informado", className: "status-absent" };
-    if (manualEvent?.event_type === "late") return { key: "late", label: "Demora informada", className: "status-late" };
+    if (manualEvent?.event_type === "absent") return { key: "absent", label: "Ausente registrado", className: "status-absent" };
 
     const elapsed = diffMinutes(at, start);
     if (elapsed < 0) return { key: "scheduled", label: "Pendiente", className: "status-ok" };
     if (elapsed <= grace) return { key: "on_window", label: "En ventana horaria", className: "status-ok" };
-    if (elapsed <= absentAfter) return { key: "late", label: "Demorado", className: "status-late" };
-    return { key: "absent", label: "Ausente", className: "status-absent" };
+    if (elapsed > absentAfter) {
+      return {
+        key: "absent",
+        label: manualEvent?.event_type === "late" ? "Ausente tras demora" : "Ausente",
+        className: "status-absent"
+      };
+    }
+    if (manualEvent?.event_type === "late") return { key: "late", label: "Demora informada", className: "status-late" };
+    return { key: "late", label: "Demorado", className: "status-late" };
+  }
+
+  function getAutomaticAbsenceTime(shift) {
+    const start = getScheduledDateTime(shift, "scheduled_start");
+    return new Date(start.getTime() + Number(shift.absence_after_minutes ?? 30) * 60000);
+  }
+
+  function shouldCreateAutomaticAbsence(shift, at = new Date()) {
+    if (getEntryEvent(shift)) return false;
+    if (latestEventForShift(shift.id, "absent")) return false;
+    return at.getTime() > getAutomaticAbsenceTime(shift).getTime();
   }
 
   function getExitStatus(shift, entryEvent = getEntryEvent(shift), exitEvent = getExitEvent(shift), at = new Date()) {
@@ -534,9 +551,49 @@
     }
   }
 
+  async function syncAutomaticAbsenceEvents(date) {
+    if (state.currentProfile?.role !== "supervisor") return 0;
+
+    const now = new Date();
+    const dueShifts = state.shifts.filter(shift => shouldCreateAutomaticAbsence(shift, now));
+    let created = 0;
+
+    for (const shift of dueShifts) {
+      const autoTime = getAutomaticAbsenceTime(shift);
+      const operator = byId(state.profiles, shift.operator_id);
+      const site = byId(state.sites, shift.site_id);
+      const payload = {
+        shift_id: shift.id,
+        assignment_id: shift.assignment_id,
+        shift_date: shift.shift_date,
+        operator_id: shift.operator_id,
+        site_id: shift.site_id,
+        event_type: "absent",
+        observed_status: "absent",
+        notes: `Ausencia automática: ${operator?.full_name || "el operario"} no registró entrada en ${site?.name || "el servicio"} antes de las ${formatTime(`${autoTime.getHours().toString().padStart(2, "0")}:${autoTime.getMinutes().toString().padStart(2, "0")}`)}.`,
+        client_time: autoTime.toISOString()
+      };
+
+      try {
+        const inserted = await store.createEvent(payload);
+        state.events.unshift(inserted);
+        created++;
+      } catch (error) {
+        console.warn("No se pudo crear ausencia automática", shift.id, error);
+      }
+    }
+
+    return created;
+  }
+
   async function renderSupervisorView() {
     const date = $("#dashboardDate").value || todayISO();
     await refreshBaseData(date);
+    const createdAbsences = await syncAutomaticAbsenceEvents(date);
+    if (createdAbsences) {
+      await refreshBaseData(date);
+      toast(`${createdAbsences} ausencia${createdAbsences === 1 ? "" : "s"} automática${createdAbsences === 1 ? "" : "s"} registrada${createdAbsences === 1 ? "" : "s"}.`);
+    }
     renderTab(state.activeTab);
     renderDashboard();
     renderCoverage();
@@ -750,21 +807,132 @@
     $("#assignmentSite").innerHTML = state.sites.map(site => `<option value="${site.id}">${escapeHtml(site.name)}</option>`).join("");
   }
 
-  function renderAssignmentDays() {
-    $("#assignmentDays").innerHTML = DAYS.map(day => `
-      <label class="day-check">
-        <input type="checkbox" value="${day.id}" />
-        <span>${day.long}</span>
-      </label>`).join("");
+  function defaultScheduleStart() { return "08:00"; }
+  function defaultScheduleEnd() { return "12:00"; }
+
+  function scheduleInputId(prefix, dayId) {
+    return `${prefix}-${dayId}`;
   }
 
-  function getSelectedAssignmentDays() {
-    return $$("#assignmentDays input:checked").map(input => Number(input.value));
+  function renderAssignmentSchedule() {
+    const grid = $("#assignmentScheduleGrid");
+    grid.innerHTML = DAYS.map(day => `
+      <div class="schedule-day-row" data-schedule-row="${day.id}">
+        <label class="schedule-day-toggle">
+          <input id="${scheduleInputId("assignmentDayEnabled", day.id)}" type="checkbox" value="${day.id}" />
+          <span>${day.long}</span>
+        </label>
+        <label class="schedule-time-field">
+          <span>Entrada</span>
+          <input id="${scheduleInputId("assignmentDayStart", day.id)}" type="time" value="${defaultScheduleStart()}" disabled />
+        </label>
+        <label class="schedule-time-field">
+          <span>Salida</span>
+          <input id="${scheduleInputId("assignmentDayEnd", day.id)}" type="time" value="${defaultScheduleEnd()}" disabled />
+        </label>
+      </div>`).join("");
+
+    DAYS.forEach(day => {
+      const enabled = document.getElementById(scheduleInputId("assignmentDayEnabled", day.id));
+      const start = document.getElementById(scheduleInputId("assignmentDayStart", day.id));
+      const end = document.getElementById(scheduleInputId("assignmentDayEnd", day.id));
+      enabled.addEventListener("change", () => {
+        start.disabled = !enabled.checked;
+        end.disabled = !enabled.checked;
+        if (enabled.checked) {
+          if (!start.value) start.value = defaultScheduleStart();
+          if (!end.value) end.value = defaultScheduleEnd();
+        }
+      });
+    });
   }
 
-  function setSelectedAssignmentDays(days = []) {
-    const selected = days.map(Number);
-    $$("#assignmentDays input").forEach(input => { input.checked = selected.includes(Number(input.value)); });
+  function setScheduleDay(dayId, enabled, start = defaultScheduleStart(), end = defaultScheduleEnd()) {
+    const checkbox = document.getElementById(scheduleInputId("assignmentDayEnabled", dayId));
+    const startInput = document.getElementById(scheduleInputId("assignmentDayStart", dayId));
+    const endInput = document.getElementById(scheduleInputId("assignmentDayEnd", dayId));
+    if (!checkbox || !startInput || !endInput) return;
+    checkbox.checked = Boolean(enabled);
+    startInput.disabled = !checkbox.checked;
+    endInput.disabled = !checkbox.checked;
+    startInput.value = start || defaultScheduleStart();
+    endInput.value = end || defaultScheduleEnd();
+  }
+
+  function clearAssignmentSchedule() {
+    DAYS.forEach(day => setScheduleDay(day.id, false));
+  }
+
+  function setAssignmentScheduleRows(rows = []) {
+    clearAssignmentSchedule();
+    rows.forEach(row => {
+      const dayId = Number(row.day_id ?? row.day ?? row.id);
+      if (!dayId) return;
+      setScheduleDay(dayId, true, formatTime(row.scheduled_start || row.start || defaultScheduleStart()), formatTime(row.scheduled_end || row.end || defaultScheduleEnd()));
+    });
+  }
+
+  function applyWeekdaysPreset() {
+    DAYS.forEach(day => {
+      if (day.id <= 5) {
+        const start = document.getElementById(scheduleInputId("assignmentDayStart", day.id))?.value || defaultScheduleStart();
+        const end = document.getElementById(scheduleInputId("assignmentDayEnd", day.id))?.value || defaultScheduleEnd();
+        setScheduleDay(day.id, true, start, end);
+      }
+    });
+  }
+
+  function applyAllDaysPreset() {
+    DAYS.forEach(day => {
+      const start = document.getElementById(scheduleInputId("assignmentDayStart", day.id))?.value || defaultScheduleStart();
+      const end = document.getElementById(scheduleInputId("assignmentDayEnd", day.id))?.value || defaultScheduleEnd();
+      setScheduleDay(day.id, true, start, end);
+    });
+  }
+
+  function copyFirstScheduleToActiveDays() {
+    const active = getAssignmentScheduleRows(false);
+    if (!active.length) {
+      toast("Activá al menos un día para copiar el horario.");
+      return;
+    }
+    const first = active[0];
+    active.forEach(row => setScheduleDay(row.day_id, true, first.scheduled_start, first.scheduled_end));
+  }
+
+  function getAssignmentScheduleRows(validate = true) {
+    const rows = [];
+    for (const day of DAYS) {
+      const checkbox = document.getElementById(scheduleInputId("assignmentDayEnabled", day.id));
+      if (!checkbox?.checked) continue;
+      const start = document.getElementById(scheduleInputId("assignmentDayStart", day.id))?.value;
+      const end = document.getElementById(scheduleInputId("assignmentDayEnd", day.id))?.value;
+      if (validate) {
+        if (!start || !end) throw new Error(`Cargá horario de entrada y salida para ${day.long}.`);
+        if (end <= start) throw new Error(`En ${day.long}, la hora de salida debe ser posterior a la entrada.`);
+      }
+      rows.push({ day_id: day.id, scheduled_start: start || defaultScheduleStart(), scheduled_end: end || defaultScheduleEnd() });
+    }
+    return rows;
+  }
+
+  function groupScheduleRows(rows) {
+    const groups = new Map();
+    rows.forEach(row => {
+      const key = `${row.scheduled_start}|${row.scheduled_end}`;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          scheduled_start: row.scheduled_start,
+          scheduled_end: row.scheduled_end,
+          days_of_week: []
+        });
+      }
+      groups.get(key).days_of_week.push(row.day_id);
+    });
+    return Array.from(groups.values()).map(group => ({
+      ...group,
+      days_of_week: group.days_of_week.sort((a, b) => a - b)
+    }));
   }
 
   function renderAssignments() {
@@ -798,17 +966,15 @@
     list.querySelectorAll("[data-delete-assignment]").forEach(btn => btn.addEventListener("click", () => deleteAssignment(btn.dataset.deleteAssignment)));
   }
 
-  function assignmentPayloadFromForm() {
+  function assignmentPayloadsFromForm() {
     const id = $("#assignmentId").value || undefined;
-    const days = getSelectedAssignmentDays();
-    if (!days.length) throw new Error("Seleccioná al menos un día de cobertura.");
-    return {
-      ...(id ? { id } : {}),
+    const rows = getAssignmentScheduleRows(true);
+    if (!rows.length) throw new Error("Activá al menos un día de cobertura.");
+
+    const groups = groupScheduleRows(rows);
+    const base = {
       operator_id: $("#assignmentOperator").value,
       site_id: $("#assignmentSite").value,
-      days_of_week: days,
-      scheduled_start: $("#assignmentStart").value,
-      scheduled_end: $("#assignmentEnd").value,
       grace_minutes: Number($("#assignmentGrace").value || 10),
       absence_after_minutes: Number($("#assignmentAbsentAfter").value || 30),
       valid_from: $("#assignmentValidFrom").value || todayISO(),
@@ -816,6 +982,14 @@
       notes: $("#assignmentNotes").value.trim(),
       is_active: true
     };
+
+    return groups.map((group, index) => ({
+      ...(id && index === 0 ? { id } : {}),
+      ...base,
+      days_of_week: group.days_of_week,
+      scheduled_start: group.scheduled_start,
+      scheduled_end: group.scheduled_end
+    }));
   }
 
   function resetAssignmentForm() {
@@ -824,7 +998,7 @@
     $("#assignmentGrace").value = 10;
     $("#assignmentAbsentAfter").value = 30;
     $("#assignmentValidFrom").value = todayISO();
-    setSelectedAssignmentDays([]);
+    clearAssignmentSchedule();
     $("#assignmentFormTitle").textContent = "Nueva asignación fija";
     $("#cancelAssignmentEditBtn").classList.add("hidden");
   }
@@ -835,14 +1009,16 @@
     $("#assignmentId").value = assignment.id;
     $("#assignmentOperator").value = assignment.operator_id;
     $("#assignmentSite").value = assignment.site_id;
-    $("#assignmentStart").value = formatTime(assignment.scheduled_start);
-    $("#assignmentEnd").value = formatTime(assignment.scheduled_end);
     $("#assignmentGrace").value = assignment.grace_minutes || 10;
     $("#assignmentAbsentAfter").value = assignment.absence_after_minutes || 30;
     $("#assignmentValidFrom").value = assignment.valid_from || todayISO();
     $("#assignmentValidTo").value = assignment.valid_to || "";
     $("#assignmentNotes").value = assignment.notes || "";
-    setSelectedAssignmentDays(assignment.days_of_week || []);
+    setAssignmentScheduleRows((assignment.days_of_week || []).map(day => ({
+      day_id: Number(day),
+      scheduled_start: formatTime(assignment.scheduled_start),
+      scheduled_end: formatTime(assignment.scheduled_end)
+    })));
     $("#assignmentFormTitle").textContent = "Editar asignación fija";
     $("#cancelAssignmentEditBtn").classList.remove("hidden");
     renderTab("assignments");
@@ -1006,15 +1182,22 @@
     $("#assignmentForm").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
-        await store.upsertAssignment(assignmentPayloadFromForm());
+        const payloads = assignmentPayloadsFromForm();
+        for (const payload of payloads) {
+          await store.upsertAssignment(payload);
+        }
         resetAssignmentForm();
-        toast("Asignación guardada.");
+        toast(payloads.length === 1 ? "Asignación guardada." : `${payloads.length} asignaciones guardadas según horarios distintos.`);
         await renderSupervisorView();
       } catch (error) {
         toast(error.message || "No se pudo guardar la asignación.");
       }
     });
     $("#cancelAssignmentEditBtn").addEventListener("click", resetAssignmentForm);
+    $("#presetWeekdaysBtn").addEventListener("click", applyWeekdaysPreset);
+    $("#presetAllDaysBtn").addEventListener("click", applyAllDaysPreset);
+    $("#copyFirstScheduleBtn").addEventListener("click", copyFirstScheduleToActiveDays);
+    $("#clearScheduleBtn").addEventListener("click", clearAssignmentSchedule);
 
     $("#userForm").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -1034,7 +1217,7 @@
   async function init() {
     renderConnectionMode();
     renderLoginMode();
-    renderAssignmentDays();
+    renderAssignmentSchedule();
     $("#dashboardDate").value = todayISO();
     $("#assignmentValidFrom").value = todayISO();
     bindEvents();
