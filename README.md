@@ -181,3 +181,61 @@ Sáb -> 08:00 a 10:00
 ```
 
 Eso evita sobrediseñar la base. El negocio necesita flexibilidad, no una catedral SQL para prender una luz.
+
+## Alta de usuarios desde el front
+
+Esta versión suma alta completa de usuarios desde la pestaña **Usuarios** del panel supervisor.
+
+Antes el flujo era:
+
+1. Crear usuario en Supabase Authentication.
+2. Copiar el UUID.
+3. Pegar el UUID en la app.
+4. Crear el perfil operativo.
+
+Ahora el supervisor carga nombre, rol, email y contraseña inicial desde el front. La app llama a una Supabase Edge Function (`create-user`) que crea el usuario en Auth y luego genera `public.profiles.id` con el mismo UUID del usuario Auth.
+
+### Punto de seguridad
+
+No se usa `service_role` en el navegador. Esa clave vive únicamente dentro de la Edge Function. El front solo envía la solicitud autenticada del supervisor.
+
+### Deploy requerido
+
+Ejecutá:
+
+```bash
+supabase functions deploy create-user --no-verify-jwt
+```
+
+Ver instrucciones completas en:
+
+```text
+supabase/deploy_create_user.md
+```
+
+## Alta de usuarios desde el panel supervisor
+
+Esta versión permite crear usuarios desde la pestaña **Usuarios** con:
+
+- Rol
+- Nombre completo
+- Email de acceso
+- Contraseña inicial
+- Teléfono
+- Notas
+
+El front llama a la Edge Function `create-user`. Esa función crea el usuario en Supabase Auth y luego crea el perfil operativo en `public.profiles` usando el mismo UUID.
+
+Antes de usarlo, ejecutar la migración:
+
+```text
+supabase/migrations/20260602_add_profiles_email.sql
+```
+
+Después, desplegar:
+
+```bash
+supabase functions deploy create-user --no-verify-jwt
+```
+
+El primer supervisor se crea manualmente una sola vez. A partir de ahí, el supervisor puede dar de alta operarios y otros supervisores desde el panel.

@@ -1,0 +1,7 @@
+Para saber si subiste la versión correcta:
+1) Entrá al panel Supervisor > Usuarios.
+2) El formulario debe decir: "Nuevo usuario Auth + perfil".
+3) Deben aparecer los campos "Email de acceso" y "Contraseña inicial".
+4) No debe aparecer el campo visible "UUID del usuario en Supabase Auth".
+
+Si seguís viendo UUID, el sitio está cargando archivos viejos o no subiste index.html + carpeta js completa.
