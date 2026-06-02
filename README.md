@@ -143,6 +143,20 @@ Salida:
 
 La salida se considera anticipada si se registra antes de la hora de finalización menos la tolerancia configurada en la asignación.
 
+
+## Registro automático de ausencias
+
+La vista supervisor no solo calcula que una cobertura está ausente: ahora también crea un registro en `attendance_events` cuando se supera el margen `absence_after_minutes` y no existe entrada registrada.
+
+Ese registro queda como:
+
+- `event_type = absent`
+- `observed_status = absent`
+- sin GPS, porque no hubo marcación del operario
+- con observación automática indicando que no registró entrada dentro del margen configurado
+
+Esto permite que la pestaña **Registros** y el CSV reflejen también las ausencias detectadas por sistema. Sin este registro, el panel podía mostrar “Ausente”, pero el historial quedaba incompleto.
+
 ## Punto crítico
 
 Si el usuario existe en Supabase Auth pero no existe en `public.profiles` con el mismo UUID, el login va a fallar. Eso no es un bug: es control de acceso. Auth valida la contraseña; `profiles` define qué puede hacer esa persona dentro de la app.

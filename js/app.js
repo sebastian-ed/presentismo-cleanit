@@ -102,14 +102,31 @@
       return { key: "present", label: "Entrada registrada", className: "status-present" };
     }
 
-    if (manualEvent?.event_type === "absent") return { key: "absent", label: "Ausente informado", className: "status-absent" };
-    if (manualEvent?.event_type === "late") return { key: "late", label: "Demora informada", className: "status-late" };
+    if (manualEvent?.event_type === "absent") return { key: "absent", label: "Ausente registrado", className: "status-absent" };
 
     const elapsed = diffMinutes(at, start);
     if (elapsed < 0) return { key: "scheduled", label: "Pendiente", className: "status-ok" };
     if (elapsed <= grace) return { key: "on_window", label: "En ventana horaria", className: "status-ok" };
-    if (elapsed <= absentAfter) return { key: "late", label: "Demorado", className: "status-late" };
-    return { key: "absent", label: "Ausente", className: "status-absent" };
+    if (elapsed > absentAfter) {
+      return {
+        key: "absent",
+        label: manualEvent?.event_type === "late" ? "Ausente tras demora" : "Ausente",
+        className: "status-absent"
+      };
+    }
+    if (manualEvent?.event_type === "late") return { key: "late", label: "Demora informada", className: "status-late" };
+    return { key: "late", label: "Demorado", className: "status-late" };
+  }
+
+  function getAutomaticAbsenceTime(shift) {
+    const start = getScheduledDateTime(shift, "scheduled_start");
+    return new Date(start.getTime() + Number(shift.absence_after_minutes ?? 30) * 60000);
+  }
+
+  function shouldCreateAutomaticAbsence(shift, at = new Date()) {
+    if (getEntryEvent(shift)) return false;
+    if (latestEventForShift(shift.id, "absent")) return false;
+    return at.getTime() > getAutomaticAbsenceTime(shift).getTime();
   }
 
   function getExitStatus(shift, entryEvent = getEntryEvent(shift), exitEvent = getExitEvent(shift), at = new Date()) {
@@ -534,9 +551,49 @@
     }
   }
 
+  async function syncAutomaticAbsenceEvents(date) {
+    if (state.currentProfile?.role !== "supervisor") return 0;
+
+    const now = new Date();
+    const dueShifts = state.shifts.filter(shift => shouldCreateAutomaticAbsence(shift, now));
+    let created = 0;
+
+    for (const shift of dueShifts) {
+      const autoTime = getAutomaticAbsenceTime(shift);
+      const operator = byId(state.profiles, shift.operator_id);
+      const site = byId(state.sites, shift.site_id);
+      const payload = {
+        shift_id: shift.id,
+        assignment_id: shift.assignment_id,
+        shift_date: shift.shift_date,
+        operator_id: shift.operator_id,
+        site_id: shift.site_id,
+        event_type: "absent",
+        observed_status: "absent",
+        notes: `Ausencia automática: ${operator?.full_name || "el operario"} no registró entrada en ${site?.name || "el servicio"} antes de las ${formatTime(`${autoTime.getHours().toString().padStart(2, "0")}:${autoTime.getMinutes().toString().padStart(2, "0")}`)}.`,
+        client_time: autoTime.toISOString()
+      };
+
+      try {
+        const inserted = await store.createEvent(payload);
+        state.events.unshift(inserted);
+        created++;
+      } catch (error) {
+        console.warn("No se pudo crear ausencia automática", shift.id, error);
+      }
+    }
+
+    return created;
+  }
+
   async function renderSupervisorView() {
     const date = $("#dashboardDate").value || todayISO();
     await refreshBaseData(date);
+    const createdAbsences = await syncAutomaticAbsenceEvents(date);
+    if (createdAbsences) {
+      await refreshBaseData(date);
+      toast(`${createdAbsences} ausencia${createdAbsences === 1 ? "" : "s"} automática${createdAbsences === 1 ? "" : "s"} registrada${createdAbsences === 1 ? "" : "s"}.`);
+    }
     renderTab(state.activeTab);
     renderDashboard();
     renderCoverage();
