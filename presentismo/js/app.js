@@ -27,7 +27,6 @@
   const $ = (selector) => document.querySelector(selector);
   const $$ = (selector) => Array.from(document.querySelectorAll(selector));
   const todayISO = () => new Date().toISOString().slice(0, 10);
-  const todayDayId = () => { const d = new Date().getDay(); return d === 0 ? 7 : d; };
   const byId = (items, id) => items.find(item => item.id === id);
   const formatDateTime = (value) => value ? new Date(value).toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" }) : "—";
   const formatTime = (value) => value ? String(value).slice(0, 5) : "—";
@@ -323,10 +322,9 @@
 
   async function renderOperatorView() {
     const today = todayISO();
-    const [sites, events, assignments] = await Promise.all([store.listSites(), store.listEvents(), store.listAssignments()]);
+    const [sites, events] = await Promise.all([store.listSites(), store.listEvents()]);
     state.sites = sites;
     state.events = events;
-    state.assignments = assignments;
 
     $("#operatorTitle").textContent = `Hola, ${state.currentProfile.full_name}`;
 
@@ -334,25 +332,16 @@
     const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
     const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
 
-    const todayId = todayDayId();
-    const assignment = state.assignments.find(a =>
-      a.operator_id === state.currentProfile.id &&
-      a.is_active !== false &&
-      (a.days_of_week || []).map(Number).includes(todayId)
-    );
-    const assignedSite = assignment ? byId(state.sites, assignment.site_id) : null;
-
     const container = $("#operatorShiftContainer");
-    container.innerHTML = renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite);
-    container.querySelector("[data-gps-checkin]")?.addEventListener("click", () => handleGpsCheckin(shiftId, assignment));
+    container.innerHTML = renderGpsOnlyCard(shiftId, entryEvent, exitEvent);
+    container.querySelector("[data-gps-checkin]")?.addEventListener("click", () => handleGpsCheckin(shiftId));
     container.querySelector("[data-gps-checkout]")?.addEventListener("click", () => handleGpsCheckout(shiftId));
   }
 
-  function renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite = null) {
+  function renderGpsOnlyCard(shiftId, entryEvent, exitEvent) {
     const checkedIn = Boolean(entryEvent);
     const checkedOut = Boolean(exitEvent);
     const detectedSite = entryEvent ? byId(state.sites, entryEvent.site_id) : null;
-    const displaySite = detectedSite || assignedSite;
 
     const entryDisabled = checkedIn ? "disabled" : "";
     const exitDisabled = !checkedIn || checkedOut ? "disabled" : "";
@@ -376,8 +365,8 @@
         <div class="card-title-row">
           <div>
             <p class="eyebrow">Hoy · ${escapeHtml(dateLabel)}</p>
-            <h3 class="service-title">${displaySite ? escapeHtml(displaySite.name) : "Sin servicio asignado para hoy"}</h3>
-            <p class="muted">${displaySite ? escapeHtml(displaySite.address || "") : "Contactá al supervisor si creés que hay un error."}</p>
+            <h3 class="service-title">${detectedSite ? escapeHtml(detectedSite.name) : "Detectando servicio por GPS..."}</h3>
+            <p class="muted">${detectedSite ? escapeHtml(detectedSite.address || "") : "El servicio se detecta automáticamente al registrar entrada."}</p>
           </div>
           <span class="status-pill ${statusClass}">${statusLabel}</span>
         </div>
@@ -441,7 +430,7 @@
     });
   }
 
-  async function handleGpsCheckin(shiftId, assignment = null) {
+  async function handleGpsCheckin(shiftId) {
     const today = todayISO();
     const existingEntry = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
     const checkbox = document.getElementById(`confirm-in-${shiftId}`);
@@ -455,54 +444,49 @@
       const position = await getPosition();
       const { latitude, longitude, accuracy } = position.coords;
 
-      const assignedSite = assignment ? byId(state.sites, assignment.site_id) : null;
+      // Find nearest site (within radius) and absolute nearest (for outside-radius recording)
+      let nearestInside = null;
+      let nearestInsideDist = Infinity;
+      let absoluteNearest = null;
+      let absoluteNearestDist = Infinity;
 
-      if (!assignedSite) {
-        await store.createEvent({
-          shift_id: shiftId,
-          assignment_id: null,
-          shift_date: today,
-          operator_id: state.currentProfile.id,
-          site_id: null,
-          event_type: "present",
-          observed_status: "present",
-          notes: `Sin asignación para hoy. ${notes}`.trim(),
-          lat: latitude,
-          lng: longitude,
-          gps_accuracy_m: accuracy,
-          distance_m: null,
-          is_inside_site: null,
-          client_time: new Date().toISOString()
-        });
-        toast("Entrada registrada. No tenés servicio asignado para hoy. Avisá al supervisor.");
-        await renderOperatorView();
-        return;
+      for (const site of state.sites) {
+        const dist = haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng));
+        if (dist < absoluteNearestDist) {
+          absoluteNearest = site;
+          absoluteNearestDist = dist;
+        }
+        if (dist <= Number(site.gps_radius_m || 120) && dist < nearestInsideDist) {
+          nearestInside = site;
+          nearestInsideDist = dist;
+        }
       }
 
-      const distance = haversineMeters(latitude, longitude, Number(assignedSite.lat), Number(assignedSite.lng));
-      const isInside = distance <= Number(assignedSite.gps_radius_m || 120);
+      const isInside = Boolean(nearestInside);
+      const usedSite = nearestInside || absoluteNearest;
+      const usedDistance = nearestInside ? nearestInsideDist : absoluteNearestDist;
 
       await store.createEvent({
         shift_id: shiftId,
-        assignment_id: assignment.id,
+        assignment_id: null,
         shift_date: today,
         operator_id: state.currentProfile.id,
-        site_id: assignedSite.id,
+        site_id: usedSite?.id || null,
         event_type: "present",
-        observed_status: "present",
+        observed_status: isInside ? "present" : "present",
         notes: isInside ? notes : `Fuera de radio. ${notes}`.trim(),
         lat: latitude,
         lng: longitude,
         gps_accuracy_m: accuracy,
-        distance_m: distance,
+        distance_m: usedDistance,
         is_inside_site: isInside,
         client_time: new Date().toISOString()
       });
 
       if (isInside) {
-        toast(`Entrada registrada en ${assignedSite.name} (${Math.round(distance)} m del punto de ingreso).`);
+        toast(`Entrada registrada en ${usedSite.name} (${Math.round(usedDistance)} m).`);
       } else {
-        toast(`Entrada registrada. Estás a ${Math.round(distance)} m de ${assignedSite.name} (fuera del radio). Avisá al supervisor.`);
+        toast(`Entrada registrada fuera de radio. Servicio más cercano: ${usedSite?.name || "—"} (${Math.round(usedDistance)} m). Avisá al supervisor.`);
       }
       await renderOperatorView();
     } catch (error) {
