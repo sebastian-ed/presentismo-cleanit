@@ -8,7 +8,6 @@ drop view if exists public.attendance_report;
 
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
-  email text,
   full_name text not null,
   role text not null check (role in ('operator', 'supervisor')),
   phone text,
@@ -75,7 +74,6 @@ create table if not exists public.attendance_events (
 );
 
 create index if not exists idx_profiles_role on public.profiles(role);
-create unique index if not exists idx_profiles_email_unique_lower on public.profiles(lower(email)) where email is not null;
 create index if not exists idx_sites_active on public.sites(is_active);
 create index if not exists idx_assignments_operator on public.assignments(operator_id);
 create index if not exists idx_assignments_site on public.assignments(site_id);

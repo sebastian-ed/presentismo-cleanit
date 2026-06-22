@@ -226,30 +226,6 @@
       if (error) throw error;
     }
 
-    async createAuthUserWithProfile(payload) {
-      const cleanPayload = this.clean(payload);
-      const { data: sessionData, error: sessionError } = await this.client.auth.getSession();
-      if (sessionError) throw sessionError;
-      const accessToken = sessionData?.session?.access_token;
-      if (!accessToken) throw new Error("Sesión inválida. Volvé a ingresar como supervisor.");
-
-      const response = await fetch(`${CONFIG.SUPABASE_URL}/functions/v1/create-user`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${accessToken}`,
-          "apikey": CONFIG.SUPABASE_ANON_KEY
-        },
-        body: JSON.stringify(cleanPayload)
-      });
-
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(result.error || "No se pudo crear el usuario en Supabase Auth.");
-      }
-      return result;
-    }
-
     async upsertProfile(payload) {
       const cleanPayload = this.clean(payload);
       if (!cleanPayload.id) throw new Error("Falta el UUID del usuario de Supabase Auth.");
