@@ -12,7 +12,7 @@ App web responsive para control de presentismo con Supabase Auth, GPS, asignacio
 - El operario registra **entrada** con GPS y luego **salida** con GPS sobre el servicio asignado.
 - El panel supervisor muestra entrada, salida, estado operativo, precisión GPS, distancia al punto cargado y alertas por salida anticipada o salida no registrada.
 - El historial y el CSV diferencian `Entrada`, `Salida`, `Demora` y `Ausencia`.
-- Las asignaciones permiten cargar particularidades reales: por ejemplo lunes a viernes 08:00-12:00 y sábado 08:00-10:00 en una sola carga operativa.
+- Las asignaciones permiten cargar particularidades reales, incluidos turnos nocturnos como 22:00-06:00 del día siguiente.
 
 ## Flujo correcto de usuarios
 
@@ -82,6 +82,28 @@ Ejecutá:
 ```text
 supabase/schema.sql
 ```
+
+
+## Horarios nocturnos
+
+Esta versión admite turnos que cruzan la medianoche, por ejemplo:
+
+```text
+Entrada: 22:00
+Salida: 06:00 del día siguiente
+```
+
+Al guardar, la app muestra una confirmación indicando que la salida corresponde al día siguiente. La asignación, la marcación de salida, el tablero y el cálculo de salida anticipada conservan como fecha operativa el día en que comenzó el turno.
+
+### Paso obligatorio para una base ya instalada
+
+Además de subir los archivos a GitHub, ejecutá una sola vez en **Supabase > SQL Editor** el contenido de:
+
+```text
+EJECUTAR_EN_SUPABASE_HORARIOS_NOCTURNOS.sql
+```
+
+Ese script elimina la restricción anterior que obligaba a que la hora de salida fuera mayor que la hora de entrada. Sin este paso, Supabase rechazará el horario aunque el frontend ya esté corregido.
 
 ## Publicación
 

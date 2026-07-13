@@ -1,0 +1,10 @@
+VERIFICACIÓN DE LA VERSIÓN CON HORARIOS NOCTURNOS
+
+1) Subí index.html, styles.css y la carpeta js completa al repositorio.
+2) En Supervisor > Asignaciones, cargá Entrada 22:00 y Salida 06:00.
+3) Debe aparecer una confirmación indicando que el turno termina al día siguiente.
+4) La asignación guardada debe mostrar "06:00 (día siguiente)".
+5) Ejecutá una sola vez en Supabase > SQL Editor:
+   EJECUTAR_EN_SUPABASE_HORARIOS_NOCTURNOS.sql
+
+Si Supabase rechaza el guardado, el paso 5 todavía no fue aplicado o se ejecutó en otro proyecto.

@@ -32,7 +32,7 @@ create table if not exists public.assignments (
   is_active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  constraint assignments_end_after_start check (scheduled_end > scheduled_start),
+  constraint assignments_start_end_different check (scheduled_end <> scheduled_start),
   constraint assignments_valid_range check (valid_to is null or valid_to >= valid_from),
   constraint assignments_days_valid check (days_of_week <@ array[1,2,3,4,5,6,7])
 );

@@ -1,0 +1,14 @@
+CAMBIO APLICADO: TURNOS NOCTURNOS
+
+1. Subir el contenido del ZIP al repositorio de GitHub Pages.
+2. En Supabase > SQL Editor, ejecutar una sola vez:
+   EJECUTAR_EN_SUPABASE_HORARIOS_NOCTURNOS.sql
+3. Probar una asignación 22:00 a 06:00. La app debe confirmar que termina al día siguiente.
+
+Mejoras incluidas:
+- Admite salida menor que entrada como cruce de medianoche.
+- Impide entrada y salida exactamente iguales.
+- Mantiene abierto el turno para registrar la salida después de las 00:00.
+- Calcula correctamente la hora de fin y la salida anticipada.
+- El tablero incluye los turnos nocturnos iniciados el día anterior.
+- Usa la fecha local del dispositivo, evitando el cambio de día anticipado por UTC.
