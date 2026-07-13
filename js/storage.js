@@ -253,6 +253,34 @@
         .eq("operator_id", id);
       if (assignmentError) throw assignmentError;
     }
+
+    async functionErrorMessage(error, fallback) {
+      // supabase-js pone el JSON de error de la función en error.context (Response),
+      // no en error.message — hay que leerlo aparte para mostrar algo útil.
+      try {
+        const body = await error?.context?.json?.();
+        if (body?.error) return body.error;
+      } catch (_) { /* noop */ }
+      return error?.message || fallback;
+    }
+
+    async createOperator({ username, dni, full_name, phone }) {
+      const { data, error } = await this.client.functions.invoke("create-operator", {
+        body: { action: "create", username, dni, full_name, phone }
+      });
+      if (error) throw new Error(await this.functionErrorMessage(error, "No se pudo crear el usuario."));
+      if (data?.error) throw new Error(data.error);
+      return data.profile;
+    }
+
+    async resetOperatorPassword(profileId, dni) {
+      const { data, error } = await this.client.functions.invoke("create-operator", {
+        body: { action: "reset_password", profile_id: profileId, dni }
+      });
+      if (error) throw new Error(await this.functionErrorMessage(error, "No se pudo restablecer la contraseña."));
+      if (data?.error) throw new Error(data.error);
+      return true;
+    }
   }
 
   window.StoreFactory = {

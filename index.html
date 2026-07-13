@@ -241,11 +241,18 @@
               <input type="hidden" id="userId" />
               <label><span>Rol</span><select id="userRole" required><option value="operator">Operario</option><option value="supervisor">Supervisor</option></select></label>
               <label><span>Nombre completo</span><input id="userName" required placeholder="Nombre y apellido" /></label>
-              <label><span>UUID del usuario en Supabase Auth</span><input id="userAuthId" required placeholder="Ej. 00000000-0000-0000-0000-000000000000" /></label>
+              <div id="userOperatorFields">
+                <label><span>Nombre de usuario (login)</span><input id="userUsername" placeholder="ej: arielacevedo" /></label>
+                <label><span>DNI (contraseña)</span><input id="userDni" placeholder="ej: 30111222" /></label>
+                <p class="muted small">El operario va a ingresar con este nombre de usuario y el DNI como contraseña.</p>
+              </div>
+              <div id="userSupervisorFields" class="hidden">
+                <label><span>UUID del usuario en Supabase Auth</span><input id="userAuthId" placeholder="Ej. 00000000-0000-0000-0000-000000000000" /></label>
+                <p class="muted small">Los supervisores se crean primero en Supabase Authentication (alta manual) y se vinculan acá con ese UUID.</p>
+              </div>
               <label><span>Teléfono</span><input id="userPhone" placeholder="+549..." /></label>
               <label><span>Notas</span><textarea id="userNotes" placeholder="Datos internos, reemplazos, observaciones operativas..."></textarea></label>
               <button class="primary-btn" type="submit">Guardar perfil</button>
-              <p class="muted small">El usuario debe existir en Supabase Authentication. Desde acá vinculás el perfil operativo usando el UUID real del usuario Auth; la contraseña se gestiona en Supabase Auth.</p>
             </form>
             <div class="data-card">
               <h3>Usuarios cargados</h3>

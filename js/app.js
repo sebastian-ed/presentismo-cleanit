@@ -769,6 +769,7 @@
     renderAssignmentSelectors();
     renderAssignments();
     renderUsers();
+    syncUserFormFields();
     renderRecords();
   }
 
@@ -1209,12 +1210,27 @@
         ${user.notes ? `<div class="muted small">Notas: ${escapeHtml(user.notes)}</div>` : ""}
         <div class="list-item-actions">
           <button class="secondary-btn small-btn" data-edit-user="${user.id}" type="button">Editar</button>
+          ${user.role === "operator" ? `<button class="secondary-btn small-btn" data-reset-password="${user.id}" type="button">Restablecer contraseña</button>` : ""}
           <button class="danger-btn small-btn" data-delete-user="${user.id}" type="button">Eliminar</button>
         </div>
       </div>`).join("") || `<p class="muted">No hay usuarios cargados.</p>`;
 
     list.querySelectorAll("[data-edit-user]").forEach(btn => btn.addEventListener("click", () => editUser(btn.dataset.editUser)));
     list.querySelectorAll("[data-delete-user]").forEach(btn => btn.addEventListener("click", () => deleteUser(btn.dataset.deleteUser)));
+    list.querySelectorAll("[data-reset-password]").forEach(btn => btn.addEventListener("click", () => resetOperatorPasswordPrompt(btn.dataset.resetPassword)));
+  }
+
+  function syncUserFormFields() {
+    const isEditing = Boolean($("#userId").value);
+    const role = $("#userRole").value;
+    const showOperatorFields = !isEditing && role === "operator";
+    const showSupervisorFields = !isEditing && role === "supervisor";
+
+    $("#userOperatorFields").classList.toggle("hidden", !showOperatorFields);
+    $("#userSupervisorFields").classList.toggle("hidden", !showSupervisorFields);
+    $("#userUsername").required = showOperatorFields;
+    $("#userDni").required = showOperatorFields;
+    $("#userAuthId").required = showSupervisorFields;
   }
 
   function userPayloadFromForm() {
@@ -1234,9 +1250,12 @@
     $("#userForm").reset();
     $("#userId").value = "";
     $("#userAuthId").value = "";
+    $("#userUsername").value = "";
+    $("#userDni").value = "";
     $("#userRole").value = "operator";
     $("#userFormTitle").textContent = "Nuevo usuario";
     $("#cancelUserEditBtn").classList.add("hidden");
+    syncUserFormFields();
   }
 
   function editUser(id) {
@@ -1245,11 +1264,14 @@
     $("#userId").value = user.id;
     $("#userRole").value = user.role || "operator";
     $("#userAuthId").value = user.id || "";
+    $("#userUsername").value = "";
+    $("#userDni").value = "";
     $("#userName").value = user.full_name || "";
     $("#userPhone").value = user.phone || "";
     $("#userNotes").value = user.notes || "";
     $("#userFormTitle").textContent = "Editar usuario";
     $("#cancelUserEditBtn").classList.remove("hidden");
+    syncUserFormFields();
     renderTab("users");
   }
 
@@ -1262,6 +1284,19 @@
     await store.deleteProfile(id);
     toast("Usuario eliminado.");
     await renderSupervisorView();
+  }
+
+  async function resetOperatorPasswordPrompt(id) {
+    const user = byId(state.profiles, id);
+    if (!user) return;
+    const dni = window.prompt(`Nuevo DNI (contraseña) para ${user.full_name}:`);
+    if (!dni) return;
+    try {
+      await store.resetOperatorPassword(id, dni.trim());
+      toast("Contraseña restablecida.");
+    } catch (error) {
+      toast(error.message || "No se pudo restablecer la contraseña.");
+    }
   }
 
   function renderRecords() {
@@ -1370,7 +1405,17 @@
     $("#userForm").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
-        await store.upsertProfile(userPayloadFromForm());
+        const isEditing = Boolean($("#userId").value);
+        if (!isEditing && $("#userRole").value === "operator") {
+          await store.createOperator({
+            username: $("#userUsername").value.trim(),
+            dni: $("#userDni").value.trim(),
+            full_name: $("#userName").value.trim(),
+            phone: $("#userPhone").value.trim()
+          });
+        } else {
+          await store.upsertProfile(userPayloadFromForm());
+        }
         resetUserForm();
         toast("Usuario guardado.");
         await renderSupervisorView();
@@ -1378,6 +1423,7 @@
         toast(error.message || "No se pudo guardar el usuario.");
       }
     });
+    $("#userRole").addEventListener("change", syncUserFormFields);
     $("#cancelUserEditBtn").addEventListener("click", resetUserForm);
     $("#exportCsvBtn").addEventListener("click", exportCsv);
 
