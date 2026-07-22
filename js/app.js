@@ -330,22 +330,42 @@
 
     $("#operatorTitle").textContent = `Hola, ${state.currentProfile.full_name}`;
 
-    const shiftId = `${state.currentProfile.id}__${today}`;
-    const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
-    const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
-
     const todayId = todayDayId();
-    const assignment = state.assignments.find(a =>
-      a.operator_id === state.currentProfile.id &&
-      a.is_active !== false &&
-      (a.days_of_week || []).map(Number).includes(todayId)
-    );
-    const assignedSite = assignment ? byId(state.sites, assignment.site_id) : null;
+    const todaysAssignments = state.assignments
+      .filter(a =>
+        a.operator_id === state.currentProfile.id &&
+        a.is_active !== false &&
+        (a.days_of_week || []).map(Number).includes(todayId)
+      )
+      .sort((a, b) => String(a.scheduled_start).localeCompare(String(b.scheduled_start)));
 
     const container = $("#operatorShiftContainer");
-    container.innerHTML = renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite);
-    container.querySelector("[data-gps-checkin]")?.addEventListener("click", () => handleGpsCheckin(shiftId, assignment));
-    container.querySelector("[data-gps-checkout]")?.addEventListener("click", () => handleGpsCheckout(shiftId));
+
+    if (todaysAssignments.length === 0) {
+      const shiftId = `${state.currentProfile.id}__${today}`;
+      const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
+      const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
+      container.innerHTML = renderGpsOnlyCard(shiftId, entryEvent, exitEvent, null);
+      container.querySelector("[data-gps-checkin]")?.addEventListener("click", () => handleGpsCheckin(shiftId, null));
+      container.querySelector("[data-gps-checkout]")?.addEventListener("click", () => handleGpsCheckout(shiftId));
+      return;
+    }
+
+    container.innerHTML = todaysAssignments
+      .map(assignment => {
+        const shiftId = `${assignment.id}__${today}`;
+        const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
+        const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
+        const assignedSite = byId(state.sites, assignment.site_id);
+        return renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite);
+      })
+      .join("");
+
+    todaysAssignments.forEach(assignment => {
+      const shiftId = `${assignment.id}__${today}`;
+      container.querySelector(`[data-gps-checkin="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckin(shiftId, assignment));
+      container.querySelector(`[data-gps-checkout="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckout(shiftId));
+    });
   }
 
   function renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite = null) {
@@ -365,7 +385,7 @@
       : "Sin salida registrada";
 
     let statusLabel, statusClass;
-    if (checkedOut) { statusLabel = "Jornada completada"; statusClass = "status-present"; }
+    if (checkedOut) { statusLabel = "Servicio completado"; statusClass = "status-present"; }
     else if (checkedIn) { statusLabel = "En servicio"; statusClass = "status-ok"; }
     else { statusLabel = "Sin marcar"; statusClass = "status-pending"; }
 
