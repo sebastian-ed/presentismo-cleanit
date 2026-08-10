@@ -226,30 +226,6 @@
       if (error) throw error;
     }
 
-    async createAuthUserWithProfile(payload) {
-      const cleanPayload = this.clean(payload);
-      const { data: sessionData, error: sessionError } = await this.client.auth.getSession();
-      if (sessionError) throw sessionError;
-      const accessToken = sessionData?.session?.access_token;
-      if (!accessToken) throw new Error("Sesión inválida. Volvé a ingresar como supervisor.");
-
-      const response = await fetch(`${CONFIG.SUPABASE_URL}/functions/v1/create-user`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${accessToken}`,
-          "apikey": CONFIG.SUPABASE_ANON_KEY
-        },
-        body: JSON.stringify(cleanPayload)
-      });
-
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(result.error || "No se pudo crear el usuario en Supabase Auth.");
-      }
-      return result;
-    }
-
     async upsertProfile(payload) {
       const cleanPayload = this.clean(payload);
       if (!cleanPayload.id) throw new Error("Falta el UUID del usuario de Supabase Auth.");
@@ -276,6 +252,34 @@
         .update({ is_active: false })
         .eq("operator_id", id);
       if (assignmentError) throw assignmentError;
+    }
+
+    async functionErrorMessage(error, fallback) {
+      // supabase-js pone el JSON de error de la función en error.context (Response),
+      // no en error.message — hay que leerlo aparte para mostrar algo útil.
+      try {
+        const body = await error?.context?.json?.();
+        if (body?.error) return body.error;
+      } catch (_) { /* noop */ }
+      return error?.message || fallback;
+    }
+
+    async createOperator({ username, dni, full_name, phone }) {
+      const { data, error } = await this.client.functions.invoke("create-operator", {
+        body: { action: "create", username, dni, full_name, phone }
+      });
+      if (error) throw new Error(await this.functionErrorMessage(error, "No se pudo crear el usuario."));
+      if (data?.error) throw new Error(data.error);
+      return data.profile;
+    }
+
+    async resetOperatorPassword(profileId, dni) {
+      const { data, error } = await this.client.functions.invoke("create-operator", {
+        body: { action: "reset_password", profile_id: profileId, dni }
+      });
+      if (error) throw new Error(await this.functionErrorMessage(error, "No se pudo restablecer la contraseña."));
+      if (data?.error) throw new Error(data.error);
+      return true;
     }
   }
 

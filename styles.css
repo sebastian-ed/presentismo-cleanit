@@ -529,3 +529,170 @@ input:disabled {
     align-items: end;
   }
 }
+
+/* ===== Panel operativo rápido + mapa GPS ===== */
+.summary-card.kpi-button {
+  width: 100%;
+  min-height: 100%;
+  appearance: none;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  border: 1px solid rgba(219, 227, 239, .85);
+  transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease;
+}
+.summary-card.kpi-button:hover,
+.summary-card.kpi-button:focus-visible {
+  transform: translateY(-2px);
+  box-shadow: 0 14px 30px rgba(15, 23, 42, .12);
+  border-color: #94a3b8;
+  outline: none;
+}
+.summary-card.kpi-button .kpi-hint {
+  display: block;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: .72rem;
+  font-weight: 800;
+}
+
+.location-btn {
+  min-height: 34px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: var(--ink);
+  font-weight: 900;
+  font-size: .78rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.location-btn:hover { border-color: #64748b; }
+.location-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: 14px;
+  background: rgba(15, 23, 42, .58);
+  backdrop-filter: blur(5px);
+}
+.modal-panel {
+  width: min(100%, 920px);
+  max-height: min(88vh, 900px);
+  overflow: auto;
+  border: 1px solid rgba(219, 227, 239, .95);
+  border-radius: 22px;
+  background: #fff;
+  box-shadow: 0 28px 80px rgba(15, 23, 42, .28);
+  padding: 16px;
+}
+.modal-panel-wide { width: min(100%, 980px); }
+.modal-panel-map { width: min(100%, 1120px); }
+.modal-head {
+  position: sticky;
+  top: -16px;
+  z-index: 8;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -2px -2px 14px;
+  padding: 12px 2px 10px;
+  background: rgba(255,255,255,.96);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+}
+.modal-head h3 { margin-bottom: 4px; font-size: 1.25rem; }
+.modal-close { flex: 0 0 auto; }
+body.modal-open { overflow: hidden; }
+
+.quick-detail-list { display: grid; gap: 10px; }
+.quick-detail-item {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #f8fafc;
+}
+.quick-detail-main { min-width: 0; }
+.quick-detail-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+.quick-detail-title strong { font-size: .94rem; }
+.quick-detail-meta { color: var(--muted); font-size: .82rem; line-height: 1.45; }
+.quick-detail-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-start; }
+.empty-state-compact {
+  padding: 24px 16px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 16px;
+  text-align: center;
+  color: var(--muted);
+  background: #f8fafc;
+}
+
+.location-summary {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.location-summary-card {
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #f8fafc;
+}
+.location-summary-card strong { display: block; margin-bottom: 4px; }
+.location-summary-card span { color: var(--muted); font-size: .82rem; line-height: 1.4; }
+.location-summary-card.alert { background: #fff7ed; border-color: #fed7aa; }
+.location-summary-card.ok { background: #f0fdf4; border-color: #bbf7d0; }
+
+.map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 4px 0 10px;
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 800;
+}
+.map-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  display: inline-block;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(15,23,42,.2);
+}
+.legend-checkin { background: #dc2626; }
+.legend-assigned { background: #f2b705; }
+.legend-other { background: #64748b; }
+.attendance-map {
+  width: 100%;
+  height: min(58vh, 610px);
+  min-height: 360px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  overflow: hidden;
+  background: #e2e8f0;
+}
+.leaflet-container { font-family: inherit; }
+
+@media (min-width: 720px) {
+  .quick-detail-item { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+  .location-summary { grid-template-columns: repeat(3, minmax(0,1fr)); }
+  .modal-panel { padding: 20px; }
+  .modal-head { top: -20px; margin-top: -6px; }
+}

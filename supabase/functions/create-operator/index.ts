@@ -65,8 +65,8 @@ Deno.serve(async (req) => {
       .maybeSingle();
 
     if (callerProfileError) throw callerProfileError;
-    if (!callerProfile || callerProfile.role !== "supervisor" || !callerProfile.is_active) {
-      return jsonResponse({ error: "Solo un supervisor puede realizar esta acción." }, 403);
+    if (!callerProfile || !['supervisor', 'admin'].includes(callerProfile.role) || !callerProfile.is_active) {
+      return jsonResponse({ error: "Solo un supervisor o administrador puede realizar esta acción." }, 403);
     }
 
     const body = await req.json().catch(() => ({}));

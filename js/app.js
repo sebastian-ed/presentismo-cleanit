@@ -21,8 +21,11 @@
     assignments: [],
     shifts: [],
     events: [],
+    dashboardRows: [],
     activeTab: "live"
   };
+
+  let attendanceMapInstance = null;
 
   const $ = (selector) => document.querySelector(selector);
   const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -241,15 +244,23 @@
     // Connection pill removed — no technical UI exposed to users
   }
 
+  function isManagementProfile(profile = state.currentProfile) {
+    const role = String(profile?.role || "").toLowerCase();
+    return role === "supervisor" || role === "admin";
+  }
+
   function profileMatchesLoginType(profile, expectedRole) {
     const role = String(profile?.role || "").toLowerCase();
     if (expectedRole === "operator") return role === "operator";
-    if (expectedRole === "supervisor") return role === "supervisor";
+    if (expectedRole === "supervisor") return role === "supervisor" || role === "admin";
     return true;
   }
 
   function roleLabel(role) {
-    return role === "operator" ? "operario" : "supervisor";
+    const normalized = String(role || "").toLowerCase();
+    if (normalized === "operator") return "operario";
+    if (normalized === "admin") return "administrador";
+    return "supervisor";
   }
 
   function renderLoginMode() {
@@ -600,7 +611,7 @@
   }
 
   async function syncAutomaticAbsenceEvents(date) {
-    if (state.currentProfile?.role !== "supervisor") return 0;
+    if (!isManagementProfile()) return 0;
 
     const now = new Date();
     const dueShifts = state.shifts.filter(shift => shouldCreateAutomaticAbsence(shift, now));
@@ -801,9 +812,13 @@
   }
 
   function statusDetailCell(status, event, emptyText) {
-    const when = event ? formatDateTime(event.created_at) : emptyText;
+    const when = event ? formatDateTime(event.client_time || event.created_at) : emptyText;
     const gps = event ? `<br><span class="muted small">${escapeHtml(gpsSummary(event))}</span>` : "";
     return `<span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${escapeHtml(when)}</span>${gps}`;
+  }
+
+  function hasCoordinates(event) {
+    return Boolean(event) && Number.isFinite(Number(event.lat)) && Number.isFinite(Number(event.lng));
   }
 
   function hasOperationalAlert(row) {
@@ -811,8 +826,38 @@
       || ["early_exit", "exit_outside", "missing_exit", "exit_due"].includes(row.exitStatus.key);
   }
 
-  function renderDashboard() {
-    const rows = state.shifts.map(shift => {
+  function operationalAlertItems(row) {
+    const items = [];
+    const entryItems = {
+      late: { label: "Entrada tarde / demorada", className: "status-late" },
+      absent: { label: "Ausencia", className: "status-absent" },
+      outside: { label: "Entrada fuera de radio", className: "status-outside" }
+    };
+    const exitItems = {
+      early_exit: { label: "Salida anticipada", className: "status-late" },
+      exit_outside: { label: "Salida fuera de radio", className: "status-outside" },
+      missing_exit: { label: "Salida no registrada", className: "status-absent" },
+      exit_due: { label: "Salida pendiente", className: "status-late" }
+    };
+    if (entryItems[row.entryStatus.key]) items.push(entryItems[row.entryStatus.key]);
+    if (exitItems[row.exitStatus.key]) items.push(exitItems[row.exitStatus.key]);
+    return items;
+  }
+
+  function operationalAlertLabels(row) {
+    return operationalAlertItems(row).map(item => item.label);
+  }
+
+  function operationalAlertPriority(row) {
+    const keys = [row.entryStatus.key, row.exitStatus.key];
+    if (keys.includes("absent") || keys.includes("missing_exit")) return 1;
+    if (keys.includes("outside") || keys.includes("exit_outside")) return 2;
+    if (keys.includes("early_exit")) return 3;
+    return 4;
+  }
+
+  function getDashboardRows() {
+    return state.shifts.map(shift => {
       const entryEvent = getEntryEvent(shift);
       const exitEvent = getExitEvent(shift);
       const manualEvent = getManualEvent(shift);
@@ -822,6 +867,12 @@
       const lastEvent = latestEventForShift(shift.id);
       return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent };
     });
+  }
+
+  function renderDashboard() {
+    const rows = getDashboardRows();
+    state.dashboardRows = rows;
+
     const counts = rows.reduce((acc, row) => {
       acc.total++;
       if (row.entryEvent) acc.entries++;
@@ -831,10 +882,10 @@
     }, { total: 0, entries: 0, exits: 0, alerts: 0 });
 
     $("#kpiGrid").innerHTML = `
-      ${kpi("Coberturas del día", counts.total)}
-      ${kpi("Entradas registradas", counts.entries, "status-present")}
-      ${kpi("Salidas registradas", counts.exits, "status-ok")}
-      ${kpi("Alertas operativas", counts.alerts, counts.alerts ? "status-late" : "status-present")}
+      ${kpi("Coberturas del día", counts.total, "", "coverage")}
+      ${kpi("Entradas registradas", counts.entries, "status-present", "entries")}
+      ${kpi("Salidas registradas", counts.exits, "status-ok", "exits")}
+      ${kpi("Alertas operativas", counts.alerts, counts.alerts ? "status-late" : "status-present", "alerts")}
     `;
 
     const tableRows = rows.map(row => {
@@ -843,6 +894,11 @@
       const site = byId(state.sites, shift.site_id);
       const message = buildWhatsAppMessage(shift, status);
       const url = whatsappUrl(site?.whatsapp_phone, message);
+      const mapButtons = [
+        hasCoordinates(entryEvent) ? `<button class="location-btn" data-map-event="${escapeHtml(entryEvent.id)}" type="button">Mapa entrada</button>` : "",
+        hasCoordinates(exitEvent) ? `<button class="location-btn" data-map-event="${escapeHtml(exitEvent.id)}" type="button">Mapa salida</button>` : ""
+      ].filter(Boolean).join("");
+
       return `
         <tr>
           <td><strong>${escapeHtml(operator?.full_name || "—")}</strong><br><span class="muted small">${escapeHtml(operator?.phone || "")}</span></td>
@@ -850,8 +906,9 @@
           <td>${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}</td>
           <td>${statusDetailCell(entryStatus, entryEvent, "Sin entrada")}</td>
           <td>${statusDetailCell(exitStatus, exitEvent, "Sin salida")}</td>
-          <td><span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.created_at)}` : "—"}</span></td>
+          <td><span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.client_time || lastEvent.created_at)}` : "—"}</span></td>
           <td class="row-actions">
+            ${mapButtons}
             <a class="wa-btn ${normalizePhone(site?.whatsapp_phone) ? "" : "disabled-link"}" href="${url}" target="_blank" rel="noopener">WhatsApp consorcio</a>
           </td>
         </tr>`;
@@ -867,8 +924,220 @@
     $("#lastRefreshLabel").textContent = `Actualizado ${new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })}`;
   }
 
-  function kpi(label, value, className = "") {
-    return `<div class="summary-card ${className}"><div class="kpi-value">${value}</div><div class="kpi-label">${label}</div></div>`;
+  function kpi(label, value, className = "", detailKey = "") {
+    if (!detailKey) {
+      return `<div class="summary-card ${className}"><div class="kpi-value">${value}</div><div class="kpi-label">${label}</div></div>`;
+    }
+    return `<button class="summary-card kpi-button ${className}" data-kpi-detail="${detailKey}" type="button" aria-label="Ver detalle de ${escapeHtml(label)}"><div class="kpi-value">${value}</div><div class="kpi-label">${label}</div><span class="kpi-hint">Ver detalle</span></button>`;
+  }
+
+  function formatOperationalDate(dateString) {
+    try {
+      return new Date(`${dateString}T12:00:00`).toLocaleDateString("es-AR", { weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" });
+    } catch (_) {
+      return dateString;
+    }
+  }
+
+  function openModal(id) {
+    const modal = $(`#${id}`);
+    if (!modal) return;
+    modal.classList.remove("hidden");
+    document.body.classList.add("modal-open");
+  }
+
+  function closeModal(id) {
+    const modal = $(`#${id}`);
+    if (!modal) return;
+    modal.classList.add("hidden");
+    if (id === "locationModal" && attendanceMapInstance) {
+      attendanceMapInstance.remove();
+      attendanceMapInstance = null;
+      const mapEl = $("#attendanceMap");
+      if (mapEl) mapEl.innerHTML = "";
+    }
+    if ($$(".modal-backdrop:not(.hidden)").length === 0) document.body.classList.remove("modal-open");
+  }
+
+  function quickDetailBadge(row, kind) {
+    if (kind === "entries") return `<span class="status-pill ${row.entryStatus.className}">${escapeHtml(row.entryStatus.label)}</span>`;
+    if (kind === "exits") return `<span class="status-pill ${row.exitStatus.className}">${escapeHtml(row.exitStatus.label)}</span>`;
+    if (kind === "alerts") {
+      return operationalAlertItems(row).map(item => `<span class="status-pill ${item.className}">${escapeHtml(item.label)}</span>`).join("");
+    }
+    return `<span class="status-pill ${row.status.className}">${escapeHtml(row.status.label)}</span>`;
+  }
+
+  function quickDetailMeta(row, kind) {
+    const shift = row.shift;
+    const lines = [`Horario ${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`];
+    if (kind === "entries" && row.entryEvent) {
+      lines.push(`Entrada: ${formatDateTime(row.entryEvent.client_time || row.entryEvent.created_at)}`);
+      lines.push(gpsSummary(row.entryEvent));
+    } else if (kind === "exits" && row.exitEvent) {
+      lines.push(`Salida: ${formatDateTime(row.exitEvent.client_time || row.exitEvent.created_at)}`);
+      lines.push(gpsSummary(row.exitEvent));
+    } else if (kind === "alerts") {
+      if (row.entryEvent) lines.push(`Entrada: ${formatDateTime(row.entryEvent.client_time || row.entryEvent.created_at)}`);
+      if (row.exitEvent) lines.push(`Salida: ${formatDateTime(row.exitEvent.client_time || row.exitEvent.created_at)}`);
+      if (row.manualEvent?.notes) lines.push(row.manualEvent.notes);
+    } else {
+      lines.push(`Entrada: ${row.entryEvent ? formatDateTime(row.entryEvent.client_time || row.entryEvent.created_at) : "Sin registrar"}`);
+      lines.push(`Salida: ${row.exitEvent ? formatDateTime(row.exitEvent.client_time || row.exitEvent.created_at) : "Sin registrar"}`);
+    }
+    return lines.filter(Boolean).map(line => escapeHtml(line)).join(" · ");
+  }
+
+  function quickDetailMapActions(row, kind) {
+    const events = [];
+    if (["coverage", "entries", "alerts"].includes(kind) && hasCoordinates(row.entryEvent)) events.push([row.entryEvent, "Ver entrada en mapa"]);
+    if (["coverage", "exits", "alerts"].includes(kind) && hasCoordinates(row.exitEvent)) events.push([row.exitEvent, "Ver salida en mapa"]);
+    return events.map(([event, label]) => `<button class="location-btn" data-map-event="${escapeHtml(event.id)}" type="button">${label}</button>`).join("");
+  }
+
+  function openQuickDetail(kind) {
+    if (!isManagementProfile()) return;
+    const rows = state.dashboardRows.length ? [...state.dashboardRows] : getDashboardRows();
+    const date = $("#dashboardDate").value || todayISO();
+    const config = {
+      coverage: { title: "Coberturas del día", subtitle: "Dotación programada y estado actual", filter: () => true },
+      entries: { title: "Entradas registradas", subtitle: "Ingresos efectivamente fichados", filter: row => Boolean(row.entryEvent) },
+      exits: { title: "Salidas registradas", subtitle: "Egresos efectivamente fichados", filter: row => Boolean(row.exitEvent) },
+      alerts: { title: "Alertas operativas", subtitle: "Incidencias que requieren revisión", filter: row => hasOperationalAlert(row) }
+    }[kind];
+    if (!config) return;
+
+    let filtered = rows.filter(config.filter);
+    if (kind === "alerts") filtered.sort((a, b) => operationalAlertPriority(a) - operationalAlertPriority(b));
+
+    $("#quickDetailTitle").textContent = config.title;
+    $("#quickDetailSubtitle").textContent = `${formatOperationalDate(date)} · ${config.subtitle} · ${filtered.length} registro${filtered.length === 1 ? "" : "s"}`;
+
+    $("#quickDetailBody").innerHTML = filtered.map(row => {
+      const operator = byId(state.profiles, row.shift.operator_id);
+      const site = byId(state.sites, row.shift.site_id);
+      return `
+        <article class="quick-detail-item">
+          <div class="quick-detail-main">
+            <div class="quick-detail-title">
+              <strong>${escapeHtml(operator?.full_name || "—")}</strong>
+              ${quickDetailBadge(row, kind)}
+            </div>
+            <div class="quick-detail-meta"><strong>${escapeHtml(site?.name || "—")}</strong> · ${escapeHtml(site?.address || "Sin dirección")}</div>
+            <div class="quick-detail-meta">${quickDetailMeta(row, kind)}</div>
+          </div>
+          <div class="quick-detail-actions">${quickDetailMapActions(row, kind)}</div>
+        </article>`;
+    }).join("") || `<div class="empty-state-compact">No hay registros para mostrar en esta categoría.</div>`;
+
+    openModal("quickDetailModal");
+  }
+
+  function nearestServiceTo(lat, lng) {
+    return state.sites
+      .filter(site => Number.isFinite(Number(site.lat)) && Number.isFinite(Number(site.lng)))
+      .map(site => ({ site, distance: haversineMeters(lat, lng, Number(site.lat), Number(site.lng)) }))
+      .sort((a, b) => a.distance - b.distance)[0] || null;
+  }
+
+  function openAttendanceMap(eventId) {
+    if (!isManagementProfile()) return;
+    const attendanceEvent = state.events.find(event => String(event.id) === String(eventId));
+    if (!attendanceEvent || !hasCoordinates(attendanceEvent)) {
+      toast("Esta marcación no tiene coordenadas GPS disponibles.");
+      return;
+    }
+    if (!window.L) {
+      toast("No se pudo cargar el mapa. Revisá la conexión a internet.");
+      return;
+    }
+
+    const lat = Number(attendanceEvent.lat);
+    const lng = Number(attendanceEvent.lng);
+    const operator = byId(state.profiles, attendanceEvent.operator_id);
+    const assignedSite = byId(state.sites, attendanceEvent.site_id);
+    const assignedDistance = assignedSite ? haversineMeters(lat, lng, Number(assignedSite.lat), Number(assignedSite.lng)) : null;
+    const nearest = nearestServiceTo(lat, lng);
+    const withinAssigned = assignedSite && assignedDistance !== null ? assignedDistance <= Number(assignedSite.gps_radius_m || 120) : null;
+
+    $("#locationModalTitle").textContent = `${eventTypeLabel(attendanceEvent.event_type)} · ${operator?.full_name || "Operario"}`;
+    $("#locationModalSubtitle").textContent = `${formatDateTime(attendanceEvent.client_time || attendanceEvent.created_at)} · ${assignedSite?.name || "Servicio sin identificar"}`;
+
+    const nearestDifferent = nearest?.site && assignedSite && nearest.site.id !== assignedSite.id;
+    $("#locationSummary").innerHTML = `
+      <div class="location-summary-card">
+        <strong>Fichaje GPS</strong>
+        <span>${lat.toFixed(6)}, ${lng.toFixed(6)} · Precisión ${attendanceEvent.gps_accuracy_m ? `${Math.round(Number(attendanceEvent.gps_accuracy_m))} m` : "sin dato"}</span>
+      </div>
+      <div class="location-summary-card ${withinAssigned === false ? "alert" : "ok"}">
+        <strong>Servicio asignado</strong>
+        <span>${escapeHtml(assignedSite?.name || "Sin servicio")} · ${assignedDistance !== null ? `${Math.round(assignedDistance)} m del punto` : "sin distancia"}${assignedSite ? ` · radio aceptado ${Math.round(Number(assignedSite.gps_radius_m || 120))} m` : ""}</span>
+      </div>
+      <div class="location-summary-card ${nearestDifferent ? "alert" : ""}">
+        <strong>Servicio geolocalizado más cercano</strong>
+        <span>${nearest ? `${escapeHtml(nearest.site.name)} · ${Math.round(nearest.distance)} m` : "No hay servicios geolocalizados"}${nearestDifferent ? " · distinto del asignado" : ""}</span>
+      </div>`;
+
+    openModal("locationModal");
+
+    window.requestAnimationFrame(() => {
+      if (attendanceMapInstance) attendanceMapInstance.remove();
+      attendanceMapInstance = window.L.map("attendanceMap", { zoomControl: true });
+      window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>'
+      }).addTo(attendanceMapInstance);
+
+      const checkinPoint = [lat, lng];
+      const checkinMarker = window.L.circleMarker(checkinPoint, {
+        radius: 9,
+        color: "#991b1b",
+        weight: 3,
+        fillColor: "#dc2626",
+        fillOpacity: .95
+      }).addTo(attendanceMapInstance);
+      checkinMarker.bindPopup(`<strong>${escapeHtml(operator?.full_name || "Operario")}</strong><br>${escapeHtml(eventTypeLabel(attendanceEvent.event_type))}<br>${escapeHtml(formatDateTime(attendanceEvent.client_time || attendanceEvent.created_at))}`).openPopup();
+
+      if (Number(attendanceEvent.gps_accuracy_m) > 0) {
+        window.L.circle(checkinPoint, {
+          radius: Number(attendanceEvent.gps_accuracy_m),
+          color: "#dc2626",
+          weight: 1,
+          fillColor: "#fecaca",
+          fillOpacity: .12
+        }).addTo(attendanceMapInstance);
+      }
+
+      state.sites.forEach(site => {
+        if (!Number.isFinite(Number(site.lat)) || !Number.isFinite(Number(site.lng))) return;
+        const isAssigned = assignedSite?.id === site.id;
+        const marker = window.L.circleMarker([Number(site.lat), Number(site.lng)], {
+          radius: isAssigned ? 10 : 6,
+          color: isAssigned ? "#a16207" : "#475569",
+          weight: isAssigned ? 4 : 2,
+          fillColor: isAssigned ? "#f2b705" : "#64748b",
+          fillOpacity: isAssigned ? .95 : .72
+        }).addTo(attendanceMapInstance);
+        marker.bindPopup(`<strong>${escapeHtml(site.name)}</strong><br>${escapeHtml(site.address || "")}<br>${isAssigned ? "Servicio asignado" : "Servicio Clean It"}`);
+      });
+
+      if (assignedSite && Number.isFinite(Number(assignedSite.lat)) && Number.isFinite(Number(assignedSite.lng))) {
+        const assignedPoint = [Number(assignedSite.lat), Number(assignedSite.lng)];
+        window.L.circle(assignedPoint, {
+          radius: Number(assignedSite.gps_radius_m || 120),
+          color: "#a16207",
+          weight: 2,
+          fillColor: "#fde68a",
+          fillOpacity: .12
+        }).addTo(attendanceMapInstance);
+        window.L.polyline([checkinPoint, assignedPoint], { color: "#0f172a", weight: 3, dashArray: "7,7", opacity: .7 }).addTo(attendanceMapInstance);
+        attendanceMapInstance.fitBounds(window.L.latLngBounds([checkinPoint, assignedPoint]).pad(.35), { maxZoom: 17 });
+      } else {
+        attendanceMapInstance.setView(checkinPoint, 16);
+      }
+
+      window.setTimeout(() => attendanceMapInstance?.invalidateSize(), 50);
+    });
   }
 
   function assignmentMatchesSearch(site, assignments, term) {
@@ -1225,7 +1494,7 @@
     list.innerHTML = state.profiles.map(user => `
       <div class="list-item">
         <div class="list-item-title">${escapeHtml(user.full_name)}</div>
-        <div class="muted small">${user.role === "supervisor" ? "Supervisor" : "Operario"} · ${escapeHtml(user.phone || "Sin teléfono")}</div>
+        <div class="muted small">${escapeHtml(roleLabel(user.role).replace(/^./, c => c.toUpperCase()))} · ${escapeHtml(user.phone || "Sin teléfono")}</div>
         <div class="muted small">UUID Auth / ID perfil: ${escapeHtml(user.id)}</div>
         ${user.notes ? `<div class="muted small">Notas: ${escapeHtml(user.notes)}</div>` : ""}
         <div class="list-item-actions">
@@ -1244,7 +1513,7 @@
     const isEditing = Boolean($("#userId").value);
     const role = $("#userRole").value;
     const showOperatorFields = !isEditing && role === "operator";
-    const showSupervisorFields = !isEditing && role === "supervisor";
+    const showSupervisorFields = !isEditing && ["supervisor", "admin"].includes(role);
 
     $("#userOperatorFields").classList.toggle("hidden", !showOperatorFields);
     $("#userSupervisorFields").classList.toggle("hidden", !showSupervisorFields);
@@ -1390,6 +1659,27 @@
     $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => renderTab(btn.dataset.tab)));
     $("#refreshDashboardBtn").addEventListener("click", renderSupervisorView);
     $("#dashboardDate").addEventListener("change", renderSupervisorView);
+    $("#kpiGrid").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-kpi-detail]");
+      if (button) openQuickDetail(button.dataset.kpiDetail);
+    });
+    $("#liveTable").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-map-event]");
+      if (button) openAttendanceMap(button.dataset.mapEvent);
+    });
+    $("#quickDetailBody").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-map-event]");
+      if (button) openAttendanceMap(button.dataset.mapEvent);
+    });
+    $$('[data-close-modal]').forEach(button => button.addEventListener("click", () => closeModal(button.dataset.closeModal)));
+    $$(".modal-backdrop").forEach(modal => modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeModal(modal.id);
+    }));
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      if (!$("#locationModal").classList.contains("hidden")) closeModal("locationModal");
+      else if (!$("#quickDetailModal").classList.contains("hidden")) closeModal("quickDetailModal");
+    });
     $("#coverageSearch").addEventListener("input", renderCoverage);
     $("#clearCoverageSearchBtn").addEventListener("click", () => { $("#coverageSearch").value = ""; renderCoverage(); });
 

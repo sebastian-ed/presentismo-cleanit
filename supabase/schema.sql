@@ -9,7 +9,7 @@ drop view if exists public.attendance_report;
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   full_name text not null,
-  role text not null check (role in ('operator', 'supervisor')),
+  role text not null check (role in ('operator', 'supervisor', 'admin')),
   phone text,
   notes text,
   is_active boolean not null default true,
@@ -128,7 +128,7 @@ stable
 security definer
 set search_path = public
 as $$
-  select coalesce(public.current_profile_role() = 'supervisor', false)
+  select coalesce(public.current_profile_role() in ('supervisor', 'admin'), false)
 $$;
 
 alter table public.profiles enable row level security;

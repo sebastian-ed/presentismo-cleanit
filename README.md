@@ -181,3 +181,53 @@ Sáb -> 08:00 a 10:00
 ```
 
 Eso evita sobrediseñar la base. El negocio necesita flexibilidad, no una catedral SQL para prender una luz.
+
+## Actualización 10/08/2026 · Panel operativo rápido + mapa GPS
+
+Esta versión agrega dos controles pensados para supervisión en tiempo real:
+
+1. **KPIs clickeables en “En vivo”**
+   - Coberturas del día.
+   - Entradas registradas.
+   - Salidas registradas.
+   - Alertas operativas.
+
+   Al hacer click se abre un listado rápido del día con operario, servicio, horario, estado e incidencias. En alertas se incluyen demoras, ausencias, entrada/salida fuera de radio, salida anticipada y salida pendiente/no registrada.
+
+2. **Mapa del fichaje**
+   - Desde cada fila del estado operativo se puede abrir `Mapa entrada` y, cuando exista, `Mapa salida`.
+   - El mapa muestra la coordenada real del fichaje.
+   - Muestra todos los servicios geolocalizados activos.
+   - El servicio asignado se destaca visualmente.
+   - Se dibuja el radio GPS aceptado y la línea entre fichaje y servicio asignado.
+   - Se calcula la distancia real al servicio asignado.
+   - También se informa cuál es el servicio geolocalizado más cercano al fichaje; si es distinto del asignado, queda indicado como dato operativo para revisión.
+
+El mapa usa **Leaflet + OpenStreetMap** y no requiere claves nuevas.
+
+### Acceso administrador
+
+La app ahora contempla el rol `admin` además de `supervisor` y `operator`. Administradores y supervisores pueden acceder al panel operativo; los operarios continúan limitados a sus propias asignaciones y fichajes.
+
+Si tu base ya está instalada, ejecutar una vez en Supabase SQL Editor:
+
+```text
+supabase/migrations/20260810_admin_ops_dashboard.sql
+```
+
+Si no necesitás diferenciar administrador de supervisor, podés seguir usando el rol `supervisor` para jefe operativo y supervisores. El panel nuevo funciona igualmente.
+
+### Archivos a publicar para esta actualización
+
+```text
+index.html
+styles.css
+js/app.js
+```
+
+Para habilitar el rol `admin`, además ejecutar la migración SQL indicada. Si desplegás las Edge Functions de gestión de usuarios, también se actualizaron:
+
+```text
+supabase/functions/create-operator/index.ts
+supabase/functions/create-user/index.ts
+```

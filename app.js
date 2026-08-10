@@ -21,12 +21,16 @@
     assignments: [],
     shifts: [],
     events: [],
+    dashboardRows: [],
     activeTab: "live"
   };
+
+  let attendanceMapInstance = null;
 
   const $ = (selector) => document.querySelector(selector);
   const $$ = (selector) => Array.from(document.querySelectorAll(selector));
   const todayISO = () => new Date().toISOString().slice(0, 10);
+  const todayDayId = () => { const d = new Date().getDay(); return d === 0 ? 7 : d; };
   const byId = (items, id) => items.find(item => item.id === id);
   const formatDateTime = (value) => value ? new Date(value).toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" }) : "—";
   const formatTime = (value) => value ? String(value).slice(0, 5) : "—";
@@ -237,21 +241,26 @@
   }
 
   function renderConnectionMode() {
-    const pill = $("#connectionPill");
-    pill.textContent = "Supabase conectado";
-    pill.classList.add("status-present");
-    pill.classList.remove("status-pending");
+    // Connection pill removed — no technical UI exposed to users
+  }
+
+  function isManagementProfile(profile = state.currentProfile) {
+    const role = String(profile?.role || "").toLowerCase();
+    return role === "supervisor" || role === "admin";
   }
 
   function profileMatchesLoginType(profile, expectedRole) {
     const role = String(profile?.role || "").toLowerCase();
     if (expectedRole === "operator") return role === "operator";
-    if (expectedRole === "supervisor") return role === "supervisor";
+    if (expectedRole === "supervisor") return role === "supervisor" || role === "admin";
     return true;
   }
 
   function roleLabel(role) {
-    return role === "operator" ? "operario" : "supervisor";
+    const normalized = String(role || "").toLowerCase();
+    if (normalized === "operator") return "operario";
+    if (normalized === "admin") return "administrador";
+    return "supervisor";
   }
 
   function renderLoginMode() {
@@ -265,9 +274,9 @@
 
     copy.innerHTML = isSupervisor
       ? `<p class="eyebrow">Acceso supervisor</p><h3>Panel de control</h3><p class="muted small no-margin">Permite ver estado en vivo y administrar servicios, usuarios y asignaciones.</p>`
-      : `<p class="eyebrow">Acceso operario</p><h3>Marcar presencia</h3><p class="muted small no-margin">Muestra solo los servicios asignados al usuario autenticado.</p>`;
-    emailLabel.textContent = isSupervisor ? "Email del supervisor" : "Email del operario";
-    email.placeholder = isSupervisor ? "supervisor@cleanit.com" : "operario@cleanit.com";
+      : `<p class="eyebrow">Acceso operario</p><h3>Marcar presencia</h3><p class="muted small no-margin">Ingresá tu nombre de usuario y DNI para registrar entrada o salida con GPS.</p>`;
+    emailLabel.textContent = isSupervisor ? "Email del supervisor" : "Nombre de usuario";
+    email.placeholder = isSupervisor ? "supervisor@cleanit.com" : "ej: arielacevedo";
     submit.textContent = isSupervisor ? "Ingresar como supervisor" : "Ingresar como operario";
     submit.className = isSupervisor ? "secondary-btn" : "primary-btn";
   }
@@ -280,7 +289,10 @@
 
     try {
       submitButton.disabled = true;
-      const email = emailInput.value.trim();
+      const rawInput = emailInput.value.trim().toLowerCase().replace(/\s+/g, '');
+      const email = state.loginMode === "operator" && !rawInput.includes("@")
+        ? `${rawInput}@cleanit.ar`
+        : rawInput;
       const password = passwordInput.value;
       const { user, profile } = await store.loginWithPassword(email, password);
 
@@ -322,105 +334,126 @@
 
   async function renderOperatorView() {
     const today = todayISO();
-    await refreshBaseData(today);
+    const [sites, events, assignments] = await Promise.all([store.listSites(), store.listEvents(), store.listAssignments()]);
+    state.sites = sites;
+    state.events = events;
+    state.assignments = assignments;
+
     $("#operatorTitle").textContent = `Hola, ${state.currentProfile.full_name}`;
-    const shifts = state.shifts.filter(shift => shift.operator_id === state.currentProfile.id);
+
+    const todayId = todayDayId();
+    const todaysAssignments = state.assignments
+      .filter(a =>
+        a.operator_id === state.currentProfile.id &&
+        a.is_active !== false &&
+        (a.days_of_week || []).map(Number).includes(todayId)
+      )
+      .sort((a, b) => String(a.scheduled_start).localeCompare(String(b.scheduled_start)));
+
     const container = $("#operatorShiftContainer");
 
-    if (!shifts.length) {
-      container.innerHTML = `
-        <div class="operator-card">
-          <h3>No tenés servicios cargados para hoy</h3>
-          <p class="muted">Si esto es incorrecto, avisá al supervisor. La app no puede registrar presencia sobre un servicio no asignado.</p>
-        </div>`;
+    if (todaysAssignments.length === 0) {
+      const shiftId = `${state.currentProfile.id}__${today}`;
+      const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
+      const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
+      container.innerHTML = renderGpsOnlyCard(shiftId, entryEvent, exitEvent, null);
+      container.querySelector("[data-gps-checkin]")?.addEventListener("click", () => handleGpsCheckin(shiftId, null));
+      container.querySelector("[data-gps-checkout]")?.addEventListener("click", () => handleGpsCheckout(shiftId));
       return;
     }
 
-    container.innerHTML = shifts.map(shift => renderOperatorShiftCard(shift)).join("");
-    container.querySelectorAll("[data-checkin]").forEach(btn => btn.addEventListener("click", () => handleCheckin(btn.dataset.checkin)));
-    container.querySelectorAll("[data-checkout]").forEach(btn => btn.addEventListener("click", () => handleCheckout(btn.dataset.checkout)));
-    container.querySelectorAll("[data-late]").forEach(btn => btn.addEventListener("click", () => handleManualStatus(btn.dataset.late, "late")));
-    container.querySelectorAll("[data-absent]").forEach(btn => btn.addEventListener("click", () => handleManualStatus(btn.dataset.absent, "absent")));
+    container.innerHTML = todaysAssignments
+      .map(assignment => {
+        const shiftId = `${assignment.id}__${today}`;
+        const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
+        const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
+        const assignedSite = byId(state.sites, assignment.site_id);
+        return renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite);
+      })
+      .join("");
+
+    todaysAssignments.forEach(assignment => {
+      const shiftId = `${assignment.id}__${today}`;
+      container.querySelector(`[data-gps-checkin="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckin(shiftId, assignment));
+      container.querySelector(`[data-gps-checkout="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckout(shiftId));
+    });
   }
 
-  function renderOperatorShiftCard(shift) {
-    const site = byId(state.sites, shift.site_id);
-    const entryEvent = getEntryEvent(shift);
-    const exitEvent = getExitEvent(shift);
-    const manualEvent = getManualEvent(shift);
-    const entryStatus = getEntryStatus(shift, entryEvent, manualEvent);
-    const exitStatus = getExitStatus(shift, entryEvent, exitEvent);
-    const operationalStatus = getShiftStatus(shift);
-    const start = formatTime(shift.scheduled_start);
-    const end = formatTime(shift.scheduled_end);
-    const lastEvent = latestEventForShift(shift.id);
-    const last = lastEvent ? `${eventTypeLabel(lastEvent.event_type)}: ${formatDateTime(lastEvent.created_at)}` : "Sin marcación registrada";
-    const entryDisabled = entryEvent ? "disabled" : "";
-    const exitDisabled = !entryEvent || exitEvent ? "disabled" : "";
-    const exitHelp = !entryEvent
-      ? "Primero registrá la entrada. La salida queda bloqueada hasta que exista ingreso."
-      : exitEvent
-        ? "La salida ya fue registrada para este servicio."
-        : "Al tocar el botón se registra hora de salida, GPS, precisión y distancia contra el punto cargado.";
+  function renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite = null) {
+    const checkedIn = Boolean(entryEvent);
+    const checkedOut = Boolean(exitEvent);
+    const detectedSite = entryEvent ? byId(state.sites, entryEvent.site_id) : null;
+    const displaySite = detectedSite || assignedSite;
+
+    const entryDisabled = checkedIn ? "disabled" : "";
+    const exitDisabled = !checkedIn || checkedOut ? "disabled" : "";
+
+    const entryInfo = entryEvent
+      ? `${formatDateTime(entryEvent.created_at)} · ${gpsSummary(entryEvent)}`
+      : "Sin entrada registrada";
+    const exitInfo = exitEvent
+      ? `${formatDateTime(exitEvent.created_at)} · ${gpsSummary(exitEvent)}`
+      : "Sin salida registrada";
+
+    let statusLabel, statusClass;
+    if (checkedOut) { statusLabel = "Servicio completado"; statusClass = "status-present"; }
+    else if (checkedIn) { statusLabel = "En servicio"; statusClass = "status-ok"; }
+    else { statusLabel = "Sin marcar"; statusClass = "status-pending"; }
+
+    const dateLabel = new Date().toLocaleDateString("es-AR", { weekday: "long", day: "numeric", month: "long" });
 
     return `
       <article class="operator-card main-checkin">
         <div class="card-title-row">
           <div>
-            <p class="eyebrow">${escapeHtml(start)} a ${escapeHtml(end)}</p>
-            <h3 class="service-title">${escapeHtml(site?.name || "Servicio sin nombre")}</h3>
-            <p class="muted">${escapeHtml(site?.address || "Sin dirección cargada")}</p>
+            <p class="eyebrow">Hoy · ${escapeHtml(dateLabel)}</p>
+            <h3 class="service-title">${displaySite ? escapeHtml(displaySite.name) : "Sin servicio asignado para hoy"}</h3>
+            <p class="muted">${displaySite ? escapeHtml(displaySite.address || "") : "Contactá al supervisor si creés que hay un error."}</p>
           </div>
-          <span class="status-pill ${operationalStatus.className}">${operationalStatus.label}</span>
+          <span class="status-pill ${statusClass}">${statusLabel}</span>
         </div>
 
         <div class="meta-grid">
-          <div class="meta-item"><strong>Radio permitido</strong><span>${site?.gps_radius_m || 0} m</span></div>
-          <div class="meta-item"><strong>Último registro</strong><span>${escapeHtml(last)}</span></div>
-          <div class="meta-item"><strong>Entrada</strong><span class="status-pill ${entryStatus.className}">${entryStatus.label}</span><span class="meta-subline">${entryEvent ? `${formatDateTime(entryEvent.created_at)} · ${gpsSummary(entryEvent)}` : "Sin entrada registrada"}</span></div>
-          <div class="meta-item"><strong>Salida</strong><span class="status-pill ${exitStatus.className}">${exitStatus.label}</span><span class="meta-subline">${exitEvent ? `${formatDateTime(exitEvent.created_at)} · ${gpsSummary(exitEvent)}` : "Sin salida registrada"}</span></div>
+          <div class="meta-item"><strong>Entrada</strong><span class="meta-subline">${entryInfo}</span></div>
+          <div class="meta-item"><strong>Salida</strong><span class="meta-subline">${exitInfo}</span></div>
         </div>
 
         <div class="checkin-box">
           <div class="checkpoint-title-row">
             <strong>Entrada al servicio</strong>
-            <span class="status-pill ${entryStatus.className}">${entryStatus.label}</span>
+            <span class="status-pill ${checkedIn ? "status-present" : "status-pending"}">${checkedIn ? "Registrada" : "Pendiente"}</span>
           </div>
           <label class="checkbox-row">
-            <input type="checkbox" id="confirm-in-${escapeHtml(shift.id)}" ${entryDisabled} />
+            <input type="checkbox" id="confirm-in-${escapeHtml(shiftId)}" ${entryDisabled} />
             <span>
-              <strong>Confirmo que estoy presente en el servicio</strong><br />
-              <span class="muted small">Al registrar entrada se guarda hora, ubicación GPS, precisión y distancia contra el punto cargado.</span>
+              <strong>Confirmo que estoy en el servicio</strong><br />
+              <span class="muted small">El GPS detecta automáticamente en qué servicio estás al registrar entrada.</span>
             </span>
           </label>
           <label>
-            <span>Observación de entrada opcional</span>
-            <textarea id="notes-in-${escapeHtml(shift.id)}" placeholder="Ej. Ingreso normal / Demora por transporte / Encargado no abrió..." ${entryDisabled}></textarea>
+            <span>Observación opcional</span>
+            <textarea id="notes-in-${escapeHtml(shiftId)}" placeholder="Ej. Ingreso normal / Encargado no abrió..." ${entryDisabled}></textarea>
           </label>
-          <button class="primary-btn big-action" data-checkin="${escapeHtml(shift.id)}" type="button" ${entryDisabled}>Registrar entrada con GPS</button>
-          <div class="quick-actions">
-            <button class="secondary-btn" data-late="${escapeHtml(shift.id)}" type="button" ${entryEvent ? "disabled" : ""}>Informar demora</button>
-            <button class="danger-btn" data-absent="${escapeHtml(shift.id)}" type="button" ${entryEvent ? "disabled" : ""}>Informar ausencia</button>
-          </div>
+          <button class="primary-btn big-action" data-gps-checkin="${escapeHtml(shiftId)}" type="button" ${entryDisabled}>Registrar entrada con GPS</button>
         </div>
 
         <div class="checkin-box exit-box">
           <div class="checkpoint-title-row">
             <strong>Salida del servicio</strong>
-            <span class="status-pill ${exitStatus.className}">${exitStatus.label}</span>
+            <span class="status-pill ${checkedOut ? "status-present" : "status-pending"}">${checkedOut ? "Registrada" : "Pendiente"}</span>
           </div>
           <label class="checkbox-row">
-            <input type="checkbox" id="confirm-out-${escapeHtml(shift.id)}" ${exitDisabled} />
+            <input type="checkbox" id="confirm-out-${escapeHtml(shiftId)}" ${exitDisabled} />
             <span>
               <strong>Confirmo que estoy saliendo del servicio</strong><br />
-              <span class="muted small">${escapeHtml(exitHelp)}</span>
+              <span class="muted small">${checkedOut ? "La salida ya fue registrada." : !checkedIn ? "Primero registrá la entrada." : "Se registra hora y ubicación GPS de salida."}</span>
             </span>
           </label>
           <label>
-            <span>Observación de salida opcional</span>
-            <textarea id="notes-out-${escapeHtml(shift.id)}" placeholder="Ej. Finalizó normal / Se retira por indicación del supervisor / Edificio cerrado..." ${exitDisabled}></textarea>
+            <span>Observación opcional</span>
+            <textarea id="notes-out-${escapeHtml(shiftId)}" placeholder="Ej. Finalizó normal / Edificio cerrado..." ${exitDisabled}></textarea>
           </label>
-          <button class="secondary-btn big-action" data-checkout="${escapeHtml(shift.id)}" type="button" ${exitDisabled}>Registrar salida con GPS</button>
+          <button class="secondary-btn big-action" data-gps-checkout="${escapeHtml(shiftId)}" type="button" ${exitDisabled}>Registrar salida con GPS</button>
         </div>
       </article>`;
   }
@@ -439,64 +472,104 @@
     });
   }
 
-  async function handleGpsAttendance(shiftId, mode) {
-    const shift = state.shifts.find(s => s.id === shiftId);
-    if (!shift) return toast("No se encontró el servicio asignado.");
-    const site = byId(state.sites, shift.site_id);
-    if (!site) return toast("No se encontró el servicio vinculado.");
+  async function handleGpsCheckin(shiftId, assignment = null) {
+    const today = todayISO();
+    const existingEntry = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
+    const checkbox = document.getElementById(`confirm-in-${shiftId}`);
+    const notes = document.getElementById(`notes-in-${shiftId}`)?.value || "";
 
-    const isCheckout = mode === "checkout";
-    const existingEntry = getEntryEvent(shift);
-    const existingExit = getExitEvent(shift);
-    const checkbox = document.getElementById(`${isCheckout ? "confirm-out" : "confirm-in"}-${shiftId}`);
-    const notes = document.getElementById(`${isCheckout ? "notes-out" : "notes-in"}-${shiftId}`)?.value || "";
-
-    if (isCheckout && !existingEntry) {
-      toast("Primero tiene que estar registrada la entrada.");
-      return;
-    }
-    if (!isCheckout && existingEntry) {
-      toast("La entrada ya fue registrada para este servicio.");
-      return;
-    }
-    if (isCheckout && existingExit) {
-      toast("La salida ya fue registrada para este servicio.");
-      return;
-    }
-    if (!checkbox?.checked) {
-      toast(isCheckout ? "Primero marcá el checkbox de salida." : "Primero marcá el checkbox de entrada.");
-      return;
-    }
+    if (existingEntry) return toast("La entrada ya fue registrada para hoy.");
+    if (!checkbox?.checked) return toast("Primero marcá el checkbox de entrada.");
 
     try {
       toast("Solicitando GPS de alta precisión...");
       const position = await getPosition();
       const { latitude, longitude, accuracy } = position.coords;
-      const distance = haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng));
-      const isInside = distance <= Number(site.gps_radius_m || 100);
-      const now = new Date();
-      const scheduled = getScheduledDateTime(shift, isCheckout ? "scheduled_end" : "scheduled_start");
-      const grace = Number(shift.grace_minutes || 10);
 
-      let eventType = "present";
-      let observedStatus = "present";
-      if (isCheckout) {
-        eventType = "checkout";
-        const minutesBeforeEnd = diffMinutes(scheduled, now);
-        observedStatus = minutesBeforeEnd > grace ? "early_exit" : "on_time_exit";
-      } else {
-        const elapsed = diffMinutes(now, scheduled);
-        observedStatus = elapsed > grace ? "late" : "present";
+      const assignedSite = assignment ? byId(state.sites, assignment.site_id) : null;
+
+      if (!assignedSite) {
+        await store.createEvent({
+          shift_id: shiftId,
+          assignment_id: null,
+          shift_date: today,
+          operator_id: state.currentProfile.id,
+          site_id: null,
+          event_type: "present",
+          observed_status: "present",
+          notes: `Sin asignación para hoy. ${notes}`.trim(),
+          lat: latitude,
+          lng: longitude,
+          gps_accuracy_m: accuracy,
+          distance_m: null,
+          is_inside_site: null,
+          client_time: new Date().toISOString()
+        });
+        toast("Entrada registrada. No tenés servicio asignado para hoy. Avisá al supervisor.");
+        await renderOperatorView();
+        return;
       }
 
+      const distance = haversineMeters(latitude, longitude, Number(assignedSite.lat), Number(assignedSite.lng));
+      const isInside = distance <= Number(assignedSite.gps_radius_m || 120);
+
       await store.createEvent({
-        shift_id: shift.id,
-        assignment_id: shift.assignment_id,
-        shift_date: shift.shift_date,
-        operator_id: shift.operator_id,
-        site_id: shift.site_id,
-        event_type: eventType,
-        observed_status: observedStatus,
+        shift_id: shiftId,
+        assignment_id: assignment.id,
+        shift_date: today,
+        operator_id: state.currentProfile.id,
+        site_id: assignedSite.id,
+        event_type: "present",
+        observed_status: "present",
+        notes: isInside ? notes : `Fuera de radio. ${notes}`.trim(),
+        lat: latitude,
+        lng: longitude,
+        gps_accuracy_m: accuracy,
+        distance_m: distance,
+        is_inside_site: isInside,
+        client_time: new Date().toISOString()
+      });
+
+      if (isInside) {
+        toast(`Entrada registrada en ${assignedSite.name} (${Math.round(distance)} m del punto de ingreso).`);
+      } else {
+        toast(`Entrada registrada. Estás a ${Math.round(distance)} m de ${assignedSite.name} (fuera del radio). Avisá al supervisor.`);
+      }
+      await renderOperatorView();
+    } catch (error) {
+      toast(error.message || "No se pudo obtener ubicación GPS.");
+    }
+  }
+
+  async function handleGpsCheckout(shiftId) {
+    const today = todayISO();
+    const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
+    const existingExit = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
+    const checkbox = document.getElementById(`confirm-out-${shiftId}`);
+    const notes = document.getElementById(`notes-out-${shiftId}`)?.value || "";
+
+    if (!entryEvent) return toast("Primero tenés que registrar la entrada.");
+    if (existingExit) return toast("La salida ya fue registrada para hoy.");
+    if (!checkbox?.checked) return toast("Primero marcá el checkbox de salida.");
+
+    try {
+      toast("Solicitando GPS de alta precisión...");
+      const position = await getPosition();
+      const { latitude, longitude, accuracy } = position.coords;
+
+      // Use same site from entry event
+      const site = byId(state.sites, entryEvent.site_id);
+      const distance = site ? haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng)) : null;
+      const isInside = site ? distance <= Number(site.gps_radius_m || 120) : null;
+
+      await store.createEvent({
+        shift_id: shiftId,
+        assignment_id: null,
+        shift_date: today,
+        operator_id: state.currentProfile.id,
+        site_id: entryEvent.site_id,
+        event_type: "checkout",
+        observed_status: "on_time_exit",
         notes,
         lat: latitude,
         lng: longitude,
@@ -506,25 +579,11 @@
         client_time: new Date().toISOString()
       });
 
-      if (isCheckout) {
-        if (!isInside) toast("Salida registrada, pero fuera del radio permitido.");
-        else if (observedStatus === "early_exit") toast("Salida registrada como anticipada.");
-        else toast("Salida registrada correctamente.");
-      } else {
-        toast(isInside ? "Entrada registrada correctamente." : "Entrada registrada, pero fuera del radio permitido.");
-      }
+      toast(isInside ? "Salida registrada correctamente." : "Salida registrada, pero fuera del radio del servicio.");
       await renderOperatorView();
     } catch (error) {
       toast(error.message || "No se pudo obtener ubicación GPS.");
     }
-  }
-
-  async function handleCheckin(shiftId) {
-    return handleGpsAttendance(shiftId, "checkin");
-  }
-
-  async function handleCheckout(shiftId) {
-    return handleGpsAttendance(shiftId, "checkout");
   }
 
   async function handleManualStatus(shiftId, eventType) {
@@ -552,7 +611,7 @@
   }
 
   async function syncAutomaticAbsenceEvents(date) {
-    if (state.currentProfile?.role !== "supervisor") return 0;
+    if (!isManagementProfile()) return 0;
 
     const now = new Date();
     const dueShifts = state.shifts.filter(shift => shouldCreateAutomaticAbsence(shift, now));
@@ -586,6 +645,145 @@
     return created;
   }
 
+  function buildFichajeRows(dateFrom, dateTo, operatorFilter) {
+    const events = state.events.filter(e => e.shift_date >= dateFrom && e.shift_date <= dateTo);
+
+    const shiftMap = new Map();
+    for (const event of events) {
+      if (!shiftMap.has(event.shift_id)) {
+        shiftMap.set(event.shift_id, { shift_id: event.shift_id, shift_date: event.shift_date, operator_id: event.operator_id, site_id: null });
+      }
+      const s = shiftMap.get(event.shift_id);
+      if (event.event_type === "present") s.entry = event;
+      if (event.event_type === "checkout") s.exit = event;
+      if (event.site_id) s.site_id = event.site_id;
+    }
+
+    let rows = Array.from(shiftMap.values()).map(s => {
+      const operator = byId(state.profiles, s.operator_id);
+      const site = byId(state.sites, s.site_id);
+      const entryTime = s.entry?.client_time;
+      const exitTime = s.exit?.client_time;
+
+      let minutes = null;
+      let horasLabel = "—";
+      if (entryTime && exitTime) {
+        minutes = Math.round((new Date(exitTime) - new Date(entryTime)) / 60000);
+        horasLabel = `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
+      }
+
+      let estado, estadoClass;
+      if (s.entry && s.exit) { estado = "Completo"; estadoClass = "status-present"; }
+      else if (s.entry) { estado = "Sin salida"; estadoClass = "status-late"; }
+      else { estado = "Sin marcación"; estadoClass = "status-absent"; }
+
+      return {
+        shift_date: s.shift_date,
+        operator_id: s.operator_id,
+        operator_name: operator?.full_name || "—",
+        site_name: site?.name || "—",
+        entry_time: entryTime,
+        exit_time: exitTime,
+        minutes,
+        horasLabel,
+        estado,
+        estadoClass
+      };
+    });
+
+    if (operatorFilter) rows = rows.filter(r => r.operator_id === operatorFilter);
+    rows.sort((a, b) => `${b.shift_date}${a.operator_name}`.localeCompare(`${a.shift_date}${b.operator_name}`));
+    return rows;
+  }
+
+  function renderFichaje() {
+    const dateFrom = $("#fichajeFrom").value || todayISO();
+    const dateTo = $("#fichajeTo").value || todayISO();
+    const operatorFilter = $("#fichajeOperator").value || "";
+
+    // Populate operator selector
+    const select = $("#fichajeOperator");
+    const currentVal = select.value;
+    const operators = state.profiles.filter(p => p.role === "operator").sort((a, b) => a.full_name.localeCompare(b.full_name));
+    select.innerHTML = `<option value="">Todos</option>` + operators.map(op => `<option value="${op.id}" ${op.id === currentVal ? "selected" : ""}>${escapeHtml(op.full_name)}</option>`).join("");
+
+    const rows = buildFichajeRows(dateFrom, dateTo, operatorFilter);
+
+    // Summary totals per operator
+    const totals = new Map();
+    for (const row of rows) {
+      if (!totals.has(row.operator_id)) totals.set(row.operator_id, { name: row.operator_name, minutes: 0, days: 0, incomplete: 0 });
+      const t = totals.get(row.operator_id);
+      if (row.minutes !== null) { t.minutes += row.minutes; t.days++; }
+      if (row.estado !== "Completo") t.incomplete++;
+    }
+
+    const totalMinutes = Array.from(totals.values()).reduce((acc, t) => acc + t.minutes, 0);
+    const totalDays = rows.filter(r => r.estado === "Completo").length;
+    const totalIncomplete = rows.filter(r => r.estado !== "Completo").length;
+
+    $("#fichajeSummary").innerHTML = `
+      ${kpi("Jornadas completas", totalDays, "status-present")}
+      ${kpi("Sin salida / sin marcar", totalIncomplete, totalIncomplete ? "status-late" : "status-present")}
+      ${kpi("Horas totales período", `${Math.floor(totalMinutes / 60)} h ${String(totalMinutes % 60).padStart(2, "0")} min`)}
+    `;
+
+    const tableRows = rows.map(row => `
+      <tr>
+        <td>${escapeHtml(row.shift_date)}</td>
+        <td><strong>${escapeHtml(row.operator_name)}</strong></td>
+        <td>${escapeHtml(row.site_name)}</td>
+        <td>${row.entry_time ? formatDateTime(row.entry_time) : "—"}</td>
+        <td>${row.exit_time ? formatDateTime(row.exit_time) : "—"}</td>
+        <td><strong>${escapeHtml(row.horasLabel)}</strong></td>
+        <td><span class="status-pill ${row.estadoClass}">${escapeHtml(row.estado)}</span></td>
+      </tr>`).join("");
+
+    $("#fichajeTable").innerHTML = `
+      <table>
+        <thead>
+          <tr><th>Fecha</th><th>Operario</th><th>Servicio</th><th>Entrada</th><th>Salida</th><th>Horas trabajadas</th><th>Estado</th></tr>
+        </thead>
+        <tbody>${tableRows || `<tr><td colspan="7">No hay registros en el período seleccionado.</td></tr>`}</tbody>
+      </table>`;
+  }
+
+  function exportFichajeExcel() {
+    const dateFrom = $("#fichajeFrom").value || todayISO();
+    const dateTo = $("#fichajeTo").value || todayISO();
+    const operatorFilter = $("#fichajeOperator").value || "";
+    const rows = buildFichajeRows(dateFrom, dateTo, operatorFilter);
+
+    // Sheet 1: detalle
+    const detalle = rows.map(r => ({
+      "Fecha": r.shift_date,
+      "Operario": r.operator_name,
+      "Servicio": r.site_name,
+      "Hora entrada": r.entry_time ? new Date(r.entry_time).toLocaleString("es-AR") : "",
+      "Hora salida": r.exit_time ? new Date(r.exit_time).toLocaleString("es-AR") : "",
+      "Horas trabajadas": r.horasLabel,
+      "Minutos trabajados": r.minutes ?? "",
+      "Estado": r.estado
+    }));
+
+    // Sheet 2: resumen por operario
+    const totals = new Map();
+    for (const row of rows) {
+      if (!totals.has(row.operator_id)) totals.set(row.operator_id, { Operario: row.operator_name, "Jornadas completas": 0, "Total minutos": 0, "Total horas": "" });
+      const t = totals.get(row.operator_id);
+      if (row.minutes !== null) { t["Jornadas completas"]++; t["Total minutos"] += row.minutes; }
+    }
+    const resumen = Array.from(totals.values()).map(t => {
+      t["Total horas"] = `${Math.floor(t["Total minutos"] / 60)} h ${String(t["Total minutos"] % 60).padStart(2, "0")} min`;
+      return t;
+    }).sort((a, b) => a.Operario.localeCompare(b.Operario));
+
+    const wb = window.XLSX.utils.book_new();
+    window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.json_to_sheet(detalle), "Detalle");
+    window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.json_to_sheet(resumen), "Resumen por operario");
+    window.XLSX.writeFile(wb, `fichaje-cleanit-${dateFrom}-al-${dateTo}.xlsx`);
+  }
+
   async function renderSupervisorView() {
     const date = $("#dashboardDate").value || todayISO();
     await refreshBaseData(date);
@@ -596,11 +794,13 @@
     }
     renderTab(state.activeTab);
     renderDashboard();
+    renderFichaje();
     renderCoverage();
     renderSites();
     renderAssignmentSelectors();
     renderAssignments();
     renderUsers();
+    syncUserFormFields();
     renderRecords();
   }
 
@@ -612,9 +812,13 @@
   }
 
   function statusDetailCell(status, event, emptyText) {
-    const when = event ? formatDateTime(event.created_at) : emptyText;
+    const when = event ? formatDateTime(event.client_time || event.created_at) : emptyText;
     const gps = event ? `<br><span class="muted small">${escapeHtml(gpsSummary(event))}</span>` : "";
     return `<span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${escapeHtml(when)}</span>${gps}`;
+  }
+
+  function hasCoordinates(event) {
+    return Boolean(event) && Number.isFinite(Number(event.lat)) && Number.isFinite(Number(event.lng));
   }
 
   function hasOperationalAlert(row) {
@@ -622,8 +826,38 @@
       || ["early_exit", "exit_outside", "missing_exit", "exit_due"].includes(row.exitStatus.key);
   }
 
-  function renderDashboard() {
-    const rows = state.shifts.map(shift => {
+  function operationalAlertItems(row) {
+    const items = [];
+    const entryItems = {
+      late: { label: "Entrada tarde / demorada", className: "status-late" },
+      absent: { label: "Ausencia", className: "status-absent" },
+      outside: { label: "Entrada fuera de radio", className: "status-outside" }
+    };
+    const exitItems = {
+      early_exit: { label: "Salida anticipada", className: "status-late" },
+      exit_outside: { label: "Salida fuera de radio", className: "status-outside" },
+      missing_exit: { label: "Salida no registrada", className: "status-absent" },
+      exit_due: { label: "Salida pendiente", className: "status-late" }
+    };
+    if (entryItems[row.entryStatus.key]) items.push(entryItems[row.entryStatus.key]);
+    if (exitItems[row.exitStatus.key]) items.push(exitItems[row.exitStatus.key]);
+    return items;
+  }
+
+  function operationalAlertLabels(row) {
+    return operationalAlertItems(row).map(item => item.label);
+  }
+
+  function operationalAlertPriority(row) {
+    const keys = [row.entryStatus.key, row.exitStatus.key];
+    if (keys.includes("absent") || keys.includes("missing_exit")) return 1;
+    if (keys.includes("outside") || keys.includes("exit_outside")) return 2;
+    if (keys.includes("early_exit")) return 3;
+    return 4;
+  }
+
+  function getDashboardRows() {
+    return state.shifts.map(shift => {
       const entryEvent = getEntryEvent(shift);
       const exitEvent = getExitEvent(shift);
       const manualEvent = getManualEvent(shift);
@@ -633,6 +867,12 @@
       const lastEvent = latestEventForShift(shift.id);
       return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent };
     });
+  }
+
+  function renderDashboard() {
+    const rows = getDashboardRows();
+    state.dashboardRows = rows;
+
     const counts = rows.reduce((acc, row) => {
       acc.total++;
       if (row.entryEvent) acc.entries++;
@@ -642,10 +882,10 @@
     }, { total: 0, entries: 0, exits: 0, alerts: 0 });
 
     $("#kpiGrid").innerHTML = `
-      ${kpi("Coberturas del día", counts.total)}
-      ${kpi("Entradas registradas", counts.entries, "status-present")}
-      ${kpi("Salidas registradas", counts.exits, "status-ok")}
-      ${kpi("Alertas operativas", counts.alerts, counts.alerts ? "status-late" : "status-present")}
+      ${kpi("Coberturas del día", counts.total, "", "coverage")}
+      ${kpi("Entradas registradas", counts.entries, "status-present", "entries")}
+      ${kpi("Salidas registradas", counts.exits, "status-ok", "exits")}
+      ${kpi("Alertas operativas", counts.alerts, counts.alerts ? "status-late" : "status-present", "alerts")}
     `;
 
     const tableRows = rows.map(row => {
@@ -654,6 +894,11 @@
       const site = byId(state.sites, shift.site_id);
       const message = buildWhatsAppMessage(shift, status);
       const url = whatsappUrl(site?.whatsapp_phone, message);
+      const mapButtons = [
+        hasCoordinates(entryEvent) ? `<button class="location-btn" data-map-event="${escapeHtml(entryEvent.id)}" type="button">Mapa entrada</button>` : "",
+        hasCoordinates(exitEvent) ? `<button class="location-btn" data-map-event="${escapeHtml(exitEvent.id)}" type="button">Mapa salida</button>` : ""
+      ].filter(Boolean).join("");
+
       return `
         <tr>
           <td><strong>${escapeHtml(operator?.full_name || "—")}</strong><br><span class="muted small">${escapeHtml(operator?.phone || "")}</span></td>
@@ -661,8 +906,9 @@
           <td>${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}</td>
           <td>${statusDetailCell(entryStatus, entryEvent, "Sin entrada")}</td>
           <td>${statusDetailCell(exitStatus, exitEvent, "Sin salida")}</td>
-          <td><span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.created_at)}` : "—"}</span></td>
+          <td><span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.client_time || lastEvent.created_at)}` : "—"}</span></td>
           <td class="row-actions">
+            ${mapButtons}
             <a class="wa-btn ${normalizePhone(site?.whatsapp_phone) ? "" : "disabled-link"}" href="${url}" target="_blank" rel="noopener">WhatsApp consorcio</a>
           </td>
         </tr>`;
@@ -678,8 +924,220 @@
     $("#lastRefreshLabel").textContent = `Actualizado ${new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })}`;
   }
 
-  function kpi(label, value, className = "") {
-    return `<div class="summary-card ${className}"><div class="kpi-value">${value}</div><div class="kpi-label">${label}</div></div>`;
+  function kpi(label, value, className = "", detailKey = "") {
+    if (!detailKey) {
+      return `<div class="summary-card ${className}"><div class="kpi-value">${value}</div><div class="kpi-label">${label}</div></div>`;
+    }
+    return `<button class="summary-card kpi-button ${className}" data-kpi-detail="${detailKey}" type="button" aria-label="Ver detalle de ${escapeHtml(label)}"><div class="kpi-value">${value}</div><div class="kpi-label">${label}</div><span class="kpi-hint">Ver detalle</span></button>`;
+  }
+
+  function formatOperationalDate(dateString) {
+    try {
+      return new Date(`${dateString}T12:00:00`).toLocaleDateString("es-AR", { weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" });
+    } catch (_) {
+      return dateString;
+    }
+  }
+
+  function openModal(id) {
+    const modal = $(`#${id}`);
+    if (!modal) return;
+    modal.classList.remove("hidden");
+    document.body.classList.add("modal-open");
+  }
+
+  function closeModal(id) {
+    const modal = $(`#${id}`);
+    if (!modal) return;
+    modal.classList.add("hidden");
+    if (id === "locationModal" && attendanceMapInstance) {
+      attendanceMapInstance.remove();
+      attendanceMapInstance = null;
+      const mapEl = $("#attendanceMap");
+      if (mapEl) mapEl.innerHTML = "";
+    }
+    if ($$(".modal-backdrop:not(.hidden)").length === 0) document.body.classList.remove("modal-open");
+  }
+
+  function quickDetailBadge(row, kind) {
+    if (kind === "entries") return `<span class="status-pill ${row.entryStatus.className}">${escapeHtml(row.entryStatus.label)}</span>`;
+    if (kind === "exits") return `<span class="status-pill ${row.exitStatus.className}">${escapeHtml(row.exitStatus.label)}</span>`;
+    if (kind === "alerts") {
+      return operationalAlertItems(row).map(item => `<span class="status-pill ${item.className}">${escapeHtml(item.label)}</span>`).join("");
+    }
+    return `<span class="status-pill ${row.status.className}">${escapeHtml(row.status.label)}</span>`;
+  }
+
+  function quickDetailMeta(row, kind) {
+    const shift = row.shift;
+    const lines = [`Horario ${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`];
+    if (kind === "entries" && row.entryEvent) {
+      lines.push(`Entrada: ${formatDateTime(row.entryEvent.client_time || row.entryEvent.created_at)}`);
+      lines.push(gpsSummary(row.entryEvent));
+    } else if (kind === "exits" && row.exitEvent) {
+      lines.push(`Salida: ${formatDateTime(row.exitEvent.client_time || row.exitEvent.created_at)}`);
+      lines.push(gpsSummary(row.exitEvent));
+    } else if (kind === "alerts") {
+      if (row.entryEvent) lines.push(`Entrada: ${formatDateTime(row.entryEvent.client_time || row.entryEvent.created_at)}`);
+      if (row.exitEvent) lines.push(`Salida: ${formatDateTime(row.exitEvent.client_time || row.exitEvent.created_at)}`);
+      if (row.manualEvent?.notes) lines.push(row.manualEvent.notes);
+    } else {
+      lines.push(`Entrada: ${row.entryEvent ? formatDateTime(row.entryEvent.client_time || row.entryEvent.created_at) : "Sin registrar"}`);
+      lines.push(`Salida: ${row.exitEvent ? formatDateTime(row.exitEvent.client_time || row.exitEvent.created_at) : "Sin registrar"}`);
+    }
+    return lines.filter(Boolean).map(line => escapeHtml(line)).join(" · ");
+  }
+
+  function quickDetailMapActions(row, kind) {
+    const events = [];
+    if (["coverage", "entries", "alerts"].includes(kind) && hasCoordinates(row.entryEvent)) events.push([row.entryEvent, "Ver entrada en mapa"]);
+    if (["coverage", "exits", "alerts"].includes(kind) && hasCoordinates(row.exitEvent)) events.push([row.exitEvent, "Ver salida en mapa"]);
+    return events.map(([event, label]) => `<button class="location-btn" data-map-event="${escapeHtml(event.id)}" type="button">${label}</button>`).join("");
+  }
+
+  function openQuickDetail(kind) {
+    if (!isManagementProfile()) return;
+    const rows = state.dashboardRows.length ? [...state.dashboardRows] : getDashboardRows();
+    const date = $("#dashboardDate").value || todayISO();
+    const config = {
+      coverage: { title: "Coberturas del día", subtitle: "Dotación programada y estado actual", filter: () => true },
+      entries: { title: "Entradas registradas", subtitle: "Ingresos efectivamente fichados", filter: row => Boolean(row.entryEvent) },
+      exits: { title: "Salidas registradas", subtitle: "Egresos efectivamente fichados", filter: row => Boolean(row.exitEvent) },
+      alerts: { title: "Alertas operativas", subtitle: "Incidencias que requieren revisión", filter: row => hasOperationalAlert(row) }
+    }[kind];
+    if (!config) return;
+
+    let filtered = rows.filter(config.filter);
+    if (kind === "alerts") filtered.sort((a, b) => operationalAlertPriority(a) - operationalAlertPriority(b));
+
+    $("#quickDetailTitle").textContent = config.title;
+    $("#quickDetailSubtitle").textContent = `${formatOperationalDate(date)} · ${config.subtitle} · ${filtered.length} registro${filtered.length === 1 ? "" : "s"}`;
+
+    $("#quickDetailBody").innerHTML = filtered.map(row => {
+      const operator = byId(state.profiles, row.shift.operator_id);
+      const site = byId(state.sites, row.shift.site_id);
+      return `
+        <article class="quick-detail-item">
+          <div class="quick-detail-main">
+            <div class="quick-detail-title">
+              <strong>${escapeHtml(operator?.full_name || "—")}</strong>
+              ${quickDetailBadge(row, kind)}
+            </div>
+            <div class="quick-detail-meta"><strong>${escapeHtml(site?.name || "—")}</strong> · ${escapeHtml(site?.address || "Sin dirección")}</div>
+            <div class="quick-detail-meta">${quickDetailMeta(row, kind)}</div>
+          </div>
+          <div class="quick-detail-actions">${quickDetailMapActions(row, kind)}</div>
+        </article>`;
+    }).join("") || `<div class="empty-state-compact">No hay registros para mostrar en esta categoría.</div>`;
+
+    openModal("quickDetailModal");
+  }
+
+  function nearestServiceTo(lat, lng) {
+    return state.sites
+      .filter(site => Number.isFinite(Number(site.lat)) && Number.isFinite(Number(site.lng)))
+      .map(site => ({ site, distance: haversineMeters(lat, lng, Number(site.lat), Number(site.lng)) }))
+      .sort((a, b) => a.distance - b.distance)[0] || null;
+  }
+
+  function openAttendanceMap(eventId) {
+    if (!isManagementProfile()) return;
+    const attendanceEvent = state.events.find(event => String(event.id) === String(eventId));
+    if (!attendanceEvent || !hasCoordinates(attendanceEvent)) {
+      toast("Esta marcación no tiene coordenadas GPS disponibles.");
+      return;
+    }
+    if (!window.L) {
+      toast("No se pudo cargar el mapa. Revisá la conexión a internet.");
+      return;
+    }
+
+    const lat = Number(attendanceEvent.lat);
+    const lng = Number(attendanceEvent.lng);
+    const operator = byId(state.profiles, attendanceEvent.operator_id);
+    const assignedSite = byId(state.sites, attendanceEvent.site_id);
+    const assignedDistance = assignedSite ? haversineMeters(lat, lng, Number(assignedSite.lat), Number(assignedSite.lng)) : null;
+    const nearest = nearestServiceTo(lat, lng);
+    const withinAssigned = assignedSite && assignedDistance !== null ? assignedDistance <= Number(assignedSite.gps_radius_m || 120) : null;
+
+    $("#locationModalTitle").textContent = `${eventTypeLabel(attendanceEvent.event_type)} · ${operator?.full_name || "Operario"}`;
+    $("#locationModalSubtitle").textContent = `${formatDateTime(attendanceEvent.client_time || attendanceEvent.created_at)} · ${assignedSite?.name || "Servicio sin identificar"}`;
+
+    const nearestDifferent = nearest?.site && assignedSite && nearest.site.id !== assignedSite.id;
+    $("#locationSummary").innerHTML = `
+      <div class="location-summary-card">
+        <strong>Fichaje GPS</strong>
+        <span>${lat.toFixed(6)}, ${lng.toFixed(6)} · Precisión ${attendanceEvent.gps_accuracy_m ? `${Math.round(Number(attendanceEvent.gps_accuracy_m))} m` : "sin dato"}</span>
+      </div>
+      <div class="location-summary-card ${withinAssigned === false ? "alert" : "ok"}">
+        <strong>Servicio asignado</strong>
+        <span>${escapeHtml(assignedSite?.name || "Sin servicio")} · ${assignedDistance !== null ? `${Math.round(assignedDistance)} m del punto` : "sin distancia"}${assignedSite ? ` · radio aceptado ${Math.round(Number(assignedSite.gps_radius_m || 120))} m` : ""}</span>
+      </div>
+      <div class="location-summary-card ${nearestDifferent ? "alert" : ""}">
+        <strong>Servicio geolocalizado más cercano</strong>
+        <span>${nearest ? `${escapeHtml(nearest.site.name)} · ${Math.round(nearest.distance)} m` : "No hay servicios geolocalizados"}${nearestDifferent ? " · distinto del asignado" : ""}</span>
+      </div>`;
+
+    openModal("locationModal");
+
+    window.requestAnimationFrame(() => {
+      if (attendanceMapInstance) attendanceMapInstance.remove();
+      attendanceMapInstance = window.L.map("attendanceMap", { zoomControl: true });
+      window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>'
+      }).addTo(attendanceMapInstance);
+
+      const checkinPoint = [lat, lng];
+      const checkinMarker = window.L.circleMarker(checkinPoint, {
+        radius: 9,
+        color: "#991b1b",
+        weight: 3,
+        fillColor: "#dc2626",
+        fillOpacity: .95
+      }).addTo(attendanceMapInstance);
+      checkinMarker.bindPopup(`<strong>${escapeHtml(operator?.full_name || "Operario")}</strong><br>${escapeHtml(eventTypeLabel(attendanceEvent.event_type))}<br>${escapeHtml(formatDateTime(attendanceEvent.client_time || attendanceEvent.created_at))}`).openPopup();
+
+      if (Number(attendanceEvent.gps_accuracy_m) > 0) {
+        window.L.circle(checkinPoint, {
+          radius: Number(attendanceEvent.gps_accuracy_m),
+          color: "#dc2626",
+          weight: 1,
+          fillColor: "#fecaca",
+          fillOpacity: .12
+        }).addTo(attendanceMapInstance);
+      }
+
+      state.sites.forEach(site => {
+        if (!Number.isFinite(Number(site.lat)) || !Number.isFinite(Number(site.lng))) return;
+        const isAssigned = assignedSite?.id === site.id;
+        const marker = window.L.circleMarker([Number(site.lat), Number(site.lng)], {
+          radius: isAssigned ? 10 : 6,
+          color: isAssigned ? "#a16207" : "#475569",
+          weight: isAssigned ? 4 : 2,
+          fillColor: isAssigned ? "#f2b705" : "#64748b",
+          fillOpacity: isAssigned ? .95 : .72
+        }).addTo(attendanceMapInstance);
+        marker.bindPopup(`<strong>${escapeHtml(site.name)}</strong><br>${escapeHtml(site.address || "")}<br>${isAssigned ? "Servicio asignado" : "Servicio Clean It"}`);
+      });
+
+      if (assignedSite && Number.isFinite(Number(assignedSite.lat)) && Number.isFinite(Number(assignedSite.lng))) {
+        const assignedPoint = [Number(assignedSite.lat), Number(assignedSite.lng)];
+        window.L.circle(assignedPoint, {
+          radius: Number(assignedSite.gps_radius_m || 120),
+          color: "#a16207",
+          weight: 2,
+          fillColor: "#fde68a",
+          fillOpacity: .12
+        }).addTo(attendanceMapInstance);
+        window.L.polyline([checkinPoint, assignedPoint], { color: "#0f172a", weight: 3, dashArray: "7,7", opacity: .7 }).addTo(attendanceMapInstance);
+        attendanceMapInstance.fitBounds(window.L.latLngBounds([checkinPoint, assignedPoint]).pad(.35), { maxZoom: 17 });
+      } else {
+        attendanceMapInstance.setView(checkinPoint, 16);
+      }
+
+      window.setTimeout(() => attendanceMapInstance?.invalidateSize(), 50);
+    });
   }
 
   function assignmentMatchesSearch(site, assignments, term) {
@@ -1036,58 +1494,37 @@
     list.innerHTML = state.profiles.map(user => `
       <div class="list-item">
         <div class="list-item-title">${escapeHtml(user.full_name)}</div>
-        <div class="muted small">${user.role === "supervisor" ? "Supervisor" : "Operario"} · ${escapeHtml(user.phone || "Sin teléfono")}</div>
-        <div class="muted small">Email: ${escapeHtml(user.email || "—")}</div>
-        <div class="muted small">ID interno Auth: ${escapeHtml(user.id)}</div>
+        <div class="muted small">${escapeHtml(roleLabel(user.role).replace(/^./, c => c.toUpperCase()))} · ${escapeHtml(user.phone || "Sin teléfono")}</div>
+        <div class="muted small">UUID Auth / ID perfil: ${escapeHtml(user.id)}</div>
         ${user.notes ? `<div class="muted small">Notas: ${escapeHtml(user.notes)}</div>` : ""}
         <div class="list-item-actions">
           <button class="secondary-btn small-btn" data-edit-user="${user.id}" type="button">Editar</button>
+          ${user.role === "operator" ? `<button class="secondary-btn small-btn" data-reset-password="${user.id}" type="button">Restablecer contraseña</button>` : ""}
           <button class="danger-btn small-btn" data-delete-user="${user.id}" type="button">Eliminar</button>
         </div>
       </div>`).join("") || `<p class="muted">No hay usuarios cargados.</p>`;
 
     list.querySelectorAll("[data-edit-user]").forEach(btn => btn.addEventListener("click", () => editUser(btn.dataset.editUser)));
     list.querySelectorAll("[data-delete-user]").forEach(btn => btn.addEventListener("click", () => deleteUser(btn.dataset.deleteUser)));
+    list.querySelectorAll("[data-reset-password]").forEach(btn => btn.addEventListener("click", () => resetOperatorPasswordPrompt(btn.dataset.resetPassword)));
   }
 
-  function setUserCreateMode(isCreate) {
-    const createFields = $("#userCreateAuthFields");
-    const email = $("#userEmail");
-    const password = $("#userPassword");
-    const submit = $("#userSubmitBtn");
-    const help = $("#userFormHelp");
+  function syncUserFormFields() {
+    const isEditing = Boolean($("#userId").value);
+    const role = $("#userRole").value;
+    const showOperatorFields = !isEditing && role === "operator";
+    const showSupervisorFields = !isEditing && ["supervisor", "admin"].includes(role);
 
-    if (!createFields || !email || !password || !submit || !help) return;
-
-    createFields.classList.toggle("hidden", !isCreate);
-    email.required = isCreate;
-    password.required = isCreate;
-    email.disabled = !isCreate;
-    password.disabled = !isCreate;
-    submit.textContent = isCreate ? "Crear usuario y acceso" : "Guardar cambios";
-    help.textContent = isCreate
-      ? "Desde acá se crea el usuario en Supabase Authentication y se genera automáticamente su perfil operativo. No se carga UUID manual."
-      : "En edición se actualiza el perfil operativo. La contraseña se cambia desde Supabase Auth o con un flujo específico de reseteo.";
-  }
-
-  function newUserPayloadFromForm() {
-    const email = $("#userEmail").value.trim().toLowerCase();
-    const password = $("#userPassword").value;
-    if (!email) throw new Error("Cargá el email de acceso.");
-    if (!password || password.length < 6) throw new Error("La contraseña inicial debe tener al menos 6 caracteres.");
-    return {
-      email,
-      password,
-      full_name: $("#userName").value.trim(),
-      phone: $("#userPhone").value.trim(),
-      role: $("#userRole").value,
-      notes: $("#userNotes").value.trim()
-    };
+    $("#userOperatorFields").classList.toggle("hidden", !showOperatorFields);
+    $("#userSupervisorFields").classList.toggle("hidden", !showSupervisorFields);
+    $("#userUsername").required = showOperatorFields;
+    $("#userDni").required = showOperatorFields;
+    $("#userAuthId").required = showSupervisorFields;
   }
 
   function userPayloadFromForm() {
     const id = $("#userId").value || $("#userAuthId").value.trim();
-    if (!id) throw new Error("Falta el UUID interno del usuario de Supabase Auth.");
+    if (!id) throw new Error("Tenés que cargar el UUID real del usuario creado en Supabase Authentication.");
     return {
       id,
       full_name: $("#userName").value.trim(),
@@ -1102,10 +1539,12 @@
     $("#userForm").reset();
     $("#userId").value = "";
     $("#userAuthId").value = "";
+    $("#userUsername").value = "";
+    $("#userDni").value = "";
     $("#userRole").value = "operator";
-    $("#userFormTitle").textContent = "Nuevo usuario Auth + perfil";
+    $("#userFormTitle").textContent = "Nuevo usuario";
     $("#cancelUserEditBtn").classList.add("hidden");
-    setUserCreateMode(true);
+    syncUserFormFields();
   }
 
   function editUser(id) {
@@ -1114,14 +1553,14 @@
     $("#userId").value = user.id;
     $("#userRole").value = user.role || "operator";
     $("#userAuthId").value = user.id || "";
-    $("#userEmail").value = user.email || "";
-    $("#userPassword").value = "";
+    $("#userUsername").value = "";
+    $("#userDni").value = "";
     $("#userName").value = user.full_name || "";
     $("#userPhone").value = user.phone || "";
     $("#userNotes").value = user.notes || "";
     $("#userFormTitle").textContent = "Editar usuario";
     $("#cancelUserEditBtn").classList.remove("hidden");
-    setUserCreateMode(false);
+    syncUserFormFields();
     renderTab("users");
   }
 
@@ -1134,6 +1573,19 @@
     await store.deleteProfile(id);
     toast("Usuario eliminado.");
     await renderSupervisorView();
+  }
+
+  async function resetOperatorPasswordPrompt(id) {
+    const user = byId(state.profiles, id);
+    if (!user) return;
+    const dni = window.prompt(`Nuevo DNI (contraseña) para ${user.full_name}:`);
+    if (!dni) return;
+    try {
+      await store.resetOperatorPassword(id, dni.trim());
+      toast("Contraseña restablecida.");
+    } catch (error) {
+      toast(error.message || "No se pudo restablecer la contraseña.");
+    }
   }
 
   function renderRecords() {
@@ -1207,6 +1659,27 @@
     $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => renderTab(btn.dataset.tab)));
     $("#refreshDashboardBtn").addEventListener("click", renderSupervisorView);
     $("#dashboardDate").addEventListener("change", renderSupervisorView);
+    $("#kpiGrid").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-kpi-detail]");
+      if (button) openQuickDetail(button.dataset.kpiDetail);
+    });
+    $("#liveTable").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-map-event]");
+      if (button) openAttendanceMap(button.dataset.mapEvent);
+    });
+    $("#quickDetailBody").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-map-event]");
+      if (button) openAttendanceMap(button.dataset.mapEvent);
+    });
+    $$('[data-close-modal]').forEach(button => button.addEventListener("click", () => closeModal(button.dataset.closeModal)));
+    $$(".modal-backdrop").forEach(modal => modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeModal(modal.id);
+    }));
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      if (!$("#locationModal").classList.contains("hidden")) closeModal("locationModal");
+      else if (!$("#quickDetailModal").classList.contains("hidden")) closeModal("quickDetailModal");
+    });
     $("#coverageSearch").addEventListener("input", renderCoverage);
     $("#clearCoverageSearchBtn").addEventListener("click", () => { $("#coverageSearch").value = ""; renderCoverage(); });
 
@@ -1243,28 +1716,39 @@
       event.preventDefault();
       try {
         const isEditing = Boolean($("#userId").value);
-        if (isEditing) {
-          await store.upsertProfile(userPayloadFromForm());
-          toast("Usuario actualizado.");
+        if (!isEditing && $("#userRole").value === "operator") {
+          await store.createOperator({
+            username: $("#userUsername").value.trim(),
+            dni: $("#userDni").value.trim(),
+            full_name: $("#userName").value.trim(),
+            phone: $("#userPhone").value.trim()
+          });
         } else {
-          await store.createAuthUserWithProfile(newUserPayloadFromForm());
-          toast("Usuario creado con acceso Auth y perfil operativo.");
+          await store.upsertProfile(userPayloadFromForm());
         }
         resetUserForm();
+        toast("Usuario guardado.");
         await renderSupervisorView();
       } catch (error) {
         toast(error.message || "No se pudo guardar el usuario.");
       }
     });
+    $("#userRole").addEventListener("change", syncUserFormFields);
     $("#cancelUserEditBtn").addEventListener("click", resetUserForm);
     $("#exportCsvBtn").addEventListener("click", exportCsv);
+
+    const firstDay = new Date();
+    firstDay.setDate(1);
+    $("#fichajeFrom").value = firstDay.toISOString().slice(0, 10);
+    $("#fichajeTo").value = todayISO();
+    $("#applyFichajeBtn").addEventListener("click", renderFichaje);
+    $("#exportFichajeBtn").addEventListener("click", exportFichajeExcel);
   }
 
   async function init() {
     renderConnectionMode();
     renderLoginMode();
     renderAssignmentSchedule();
-    setUserCreateMode(true);
     $("#dashboardDate").value = todayISO();
     $("#assignmentValidFrom").value = todayISO();
     bindEvents();
