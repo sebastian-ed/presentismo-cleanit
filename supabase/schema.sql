@@ -48,6 +48,10 @@ create table if not exists public.assignments (
   valid_from date not null default current_date,
   valid_to date,
   notes text,
+  assignment_type text not null default 'fixed' check (assignment_type in ('fixed', 'coverage', 'reinforcement')),
+  covered_operator_id uuid references public.profiles(id) on delete set null,
+  created_by uuid references public.profiles(id) on delete set null,
+  suppress_regular_assignments boolean not null default false,
   is_active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -65,6 +69,9 @@ create table if not exists public.attendance_events (
   site_id uuid not null references public.sites(id) on delete restrict,
   event_type text not null check (event_type in ('present', 'checkout', 'late', 'absent')),
   observed_status text check (observed_status in ('present', 'late', 'absent', 'on_time_exit', 'early_exit')),
+  work_type text not null default 'regular' check (work_type in ('regular', 'coverage', 'reinforcement')),
+  entry_source text not null default 'assignment' check (entry_source in ('assignment', 'operator_extra')),
+  validation_status text not null default 'confirmed' check (validation_status in ('confirmed', 'pending', 'rejected')),
   notes text,
   lat double precision,
   lng double precision,
@@ -154,6 +161,7 @@ drop policy if exists "attendance_select_own_or_supervisor" on public.attendance
 drop policy if exists "attendance_insert_own_or_supervisor" on public.attendance_events;
 drop policy if exists "attendance_select_relevant" on public.attendance_events;
 drop policy if exists "attendance_insert_relevant" on public.attendance_events;
+drop policy if exists "attendance_update_supervisor" on public.attendance_events;
 
 create policy "profiles_select_own_or_supervisor"
 on public.profiles
@@ -212,6 +220,13 @@ for insert
 to authenticated
 with check (public.is_supervisor() or operator_id = auth.uid());
 
+create policy "attendance_update_supervisor"
+on public.attendance_events
+for update
+to authenticated
+using (public.is_supervisor())
+with check (public.is_supervisor());
+
 revoke all on public.profiles from anon;
 revoke all on public.sites from anon;
 revoke all on public.assignments from anon;
@@ -221,7 +236,7 @@ grant usage on schema public to authenticated;
 grant select, insert, update on public.profiles to authenticated;
 grant select, insert, update on public.sites to authenticated;
 grant select, insert, update on public.assignments to authenticated;
-grant select, insert on public.attendance_events to authenticated;
+grant select, insert, update on public.attendance_events to authenticated;
 
 create or replace view public.attendance_report
 with (security_invoker = true)

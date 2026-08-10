@@ -24,7 +24,13 @@
     events: [],
     dashboardRows: [],
     liveStatusFilter: "all",
-    activeTab: "live"
+    recordsEvents: [],
+    recordsProfiles: [],
+    recordsSites: [],
+    recordsLoaded: false,
+    activeTab: "live",
+    bulkSelectedAssignmentIds: new Set(),
+    bulkSelectedSiteIds: new Set()
   };
 
   let attendanceMapInstance = null;
@@ -41,6 +47,149 @@
   const normalizePhone = (raw) => String(raw || "").replace(/[^0-9]/g, "");
   const escapeHtml = (str) => String(str ?? "").replace(/[&<>'"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c]));
   const dayLabel = (id, variant = "short") => DAYS.find(d => d.id === Number(id))?.[variant] || id;
+
+  function dateToISO(date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const d = String(date.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+
+  function parseISODate(dateString) {
+    return new Date(`${dateString}T12:00:00`);
+  }
+
+  function addDaysISO(dateString, days) {
+    const d = parseISODate(dateString);
+    d.setDate(d.getDate() + Number(days || 0));
+    return dateToISO(d);
+  }
+
+  function monthStartISO(dateString) {
+    const d = parseISODate(dateString);
+    d.setDate(1);
+    return dateToISO(d);
+  }
+
+  function monthEndISO(dateString) {
+    const d = parseISODate(dateString);
+    d.setMonth(d.getMonth() + 1, 0);
+    return dateToISO(d);
+  }
+
+  function minISO(values) {
+    return values.filter(Boolean).sort()[0] || null;
+  }
+
+  function maxISO(values) {
+    const filtered = values.filter(Boolean).sort();
+    return filtered[filtered.length - 1] || null;
+  }
+
+  function periodElements(kind) {
+    if (kind === "live") {
+      return { period: $("#liveExportPeriod"), from: $("#liveExportFrom"), to: $("#liveExportTo") };
+    }
+    return { period: $("#recordsPeriod"), from: $("#recordsFrom"), to: $("#recordsTo") };
+  }
+
+  function periodAnchor(kind) {
+    return kind === "live" ? ($("#dashboardDate")?.value || todayISO()) : todayISO();
+  }
+
+  function syncPeriodControls(kind, preserveCustom = true) {
+    const { period, from, to } = periodElements(kind);
+    if (!period || !from || !to) return;
+    const value = period.value;
+    const anchorDate = periodAnchor(kind);
+    const custom = value === "custom";
+    const all = value === "all";
+
+    if (all) {
+      from.value = "";
+      to.value = "";
+    } else if (!custom || !preserveCustom || !from.value || !to.value) {
+      let rangeFrom = anchorDate;
+      let rangeTo = anchorDate;
+      if (value === "yesterday") rangeFrom = rangeTo = addDaysISO(anchorDate, -1);
+      if (value === "last7") rangeFrom = addDaysISO(anchorDate, -6);
+      if (value === "month") {
+        rangeFrom = monthStartISO(anchorDate);
+        rangeTo = kind === "live" ? minISO([monthEndISO(anchorDate), todayISO()]) || anchorDate : todayISO();
+      }
+      if (value === "lastmonth") {
+        const previousMonthEnd = addDaysISO(monthStartISO(anchorDate), -1);
+        rangeFrom = monthStartISO(previousMonthEnd);
+        rangeTo = monthEndISO(previousMonthEnd);
+      }
+      if (value === "today") rangeFrom = rangeTo = todayISO();
+      if (value === "shown") rangeFrom = rangeTo = anchorDate;
+      from.value = rangeFrom;
+      to.value = rangeTo;
+    }
+
+    from.disabled = all || !custom;
+    to.disabled = all || !custom;
+  }
+
+  function resolvePeriod(kind) {
+    const { period, from, to } = periodElements(kind);
+    const value = period?.value || (kind === "live" ? "shown" : "month");
+    syncPeriodControls(kind, true);
+    if (value === "all") return { mode: value, from: null, to: null, isAll: true, label: "historial-completo" };
+    const rangeFrom = from?.value || periodAnchor(kind);
+    const rangeTo = to?.value || rangeFrom;
+    if (rangeFrom > rangeTo) throw new Error("La fecha Desde no puede ser posterior a Hasta.");
+    return { mode: value, from: rangeFrom, to: rangeTo, isAll: false, label: rangeFrom === rangeTo ? rangeFrom : `${rangeFrom}-al-${rangeTo}` };
+  }
+
+  function formatClock(value) {
+    if (!value) return "";
+    try {
+      return new Date(value).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" });
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function csvEscape(value) {
+    return `"${String(value ?? "").replace(/"/g, '""')}"`;
+  }
+
+  function downloadCsvObjects(rows, headers, filename) {
+    const lines = [headers.map(h => csvEscape(h)).join(",")];
+    rows.forEach(row => lines.push(headers.map(header => csvEscape(row[header])).join(",")));
+    const blob = new Blob(["\ufeff" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function applyWorksheetUsability(ws, widths = []) {
+    if (!ws) return;
+    if (widths.length) ws["!cols"] = widths.map(wch => ({ wch }));
+    if (ws["!ref"]) ws["!autofilter"] = { ref: ws["!ref"] };
+  }
+
+  async function withExportButton(button, busyText, callback) {
+    if (!button) return callback();
+    const previous = button.textContent;
+    button.disabled = true;
+    button.textContent = busyText;
+    button.closest(".export-panel, .data-card")?.classList.add("export-loading");
+    try {
+      return await callback();
+    } finally {
+      button.disabled = false;
+      button.textContent = previous;
+      button.closest(".export-panel, .data-card")?.classList.remove("export-loading");
+    }
+  }
 
   function toast(message, type = "default") {
     const el = $("#toast");
@@ -152,8 +301,8 @@
     if (minutesAfterEnd < 0) {
       // Mientras el operario sigue trabajando, la columna Salida también conserva
       // visualmente una anomalía de ingreso para evitar que un azul "normal" la oculte.
-      if (entryEvent.is_inside_site === false) return { key: "in_service_outside", label: "En servicio", className: "status-outside" };
-      if (entryEvent.observed_status === "late") return { key: "in_service_late", label: "En servicio", className: "status-late" };
+      if (entryEvent.is_inside_site === false) return { key: "in_service_outside", label: "En servicio · entrada fuera de radio", className: "status-outside" };
+      if (entryEvent.observed_status === "late") return { key: "in_service_late", label: "En servicio · entrada tarde", className: "status-late" };
       return { key: "in_service", label: "En servicio", className: "status-ok" };
     }
     if (minutesAfterEnd <= grace) return { key: "exit_due", label: "Debe registrar salida", className: "status-late" };
@@ -169,7 +318,7 @@
 
     if (["completed", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(exitStatus.key)) return exitStatus;
     if (entryEvent && ["in_service", "in_service_outside", "in_service_late"].includes(exitStatus.key)) {
-      if (entryStatus.key === "outside") return { key: "in_service_outside", label: "En servicio · fuera de radio", className: "status-outside" };
+      if (entryStatus.key === "outside") return { key: "in_service_outside", label: "En servicio · entrada fuera de radio", className: "status-outside" };
       if (entryStatus.key === "late") return { key: "in_service_late", label: "En servicio · entrada tarde", className: "status-late" };
       return { key: "in_service", label: "En servicio", className: "status-present" };
     }
@@ -274,6 +423,44 @@
     if (normalized === "operator") return "operario";
     if (normalized === "admin") return "administrador";
     return "supervisor";
+  }
+
+  function assignmentTypeLabel(type) {
+    const normalized = String(type || "fixed").toLowerCase();
+    if (normalized === "coverage") return "Cobertura por ausencia";
+    if (normalized === "reinforcement") return "Refuerzo";
+    return "Asignación fija";
+  }
+
+  function workTypeLabel(type) {
+    const normalized = String(type || "regular").toLowerCase();
+    if (normalized === "coverage") return "Cobertura por ausencia";
+    if (normalized === "reinforcement") return "Refuerzo";
+    return "Trabajo regular";
+  }
+
+  function validationLabel(status) {
+    const normalized = String(status || "confirmed").toLowerCase();
+    if (normalized === "pending") return "Pendiente de validar";
+    if (normalized === "rejected") return "Rechazado";
+    return "Validado";
+  }
+
+  function assignmentAppliesOnDate(assignment, dateString) {
+    if (!assignment || assignment.is_active === false) return false;
+    const day = (() => { const d = new Date(`${dateString}T12:00:00`).getDay(); return d === 0 ? 7 : d; })();
+    if (!(assignment.days_of_week || []).map(Number).includes(day)) return false;
+    if (assignment.valid_from && assignment.valid_from > dateString) return false;
+    if (assignment.valid_to && assignment.valid_to < dateString) return false;
+    return true;
+  }
+
+  function assignmentsOverlap(a, b) {
+    const aStart = String(a?.scheduled_start || "00:00").slice(0, 5);
+    const aEnd = String(a?.scheduled_end || "23:59").slice(0, 5);
+    const bStart = String(b?.scheduled_start || "00:00").slice(0, 5);
+    const bEnd = String(b?.scheduled_end || "23:59").slice(0, 5);
+    return aStart < bEnd && bStart < aEnd;
   }
 
   function renderLoginMode() {
@@ -399,6 +586,8 @@
       }
       $("#dashboardDate").value = todayISO();
       $("#assignmentValidFrom").value = todayISO();
+      if ($("#extraAssignmentDate")) $("#extraAssignmentDate").value = todayISO();
+      syncPeriodControls("live", false);
       await renderSupervisorView();
     }
   }
@@ -407,6 +596,10 @@
     await store.signOut();
     state.currentUser = null;
     state.currentProfile = null;
+    state.recordsEvents = [];
+    state.recordsProfiles = [];
+    state.recordsSites = [];
+    state.recordsLoaded = false;
     setView("#loginView");
   }
 
@@ -419,45 +612,70 @@
 
     $("#operatorTitle").textContent = `Hola, ${state.currentProfile.full_name}`;
 
-    const todayId = todayDayId();
-    const todaysAssignments = state.assignments
-      .filter(a =>
-        a.operator_id === state.currentProfile.id &&
-        a.is_active !== false &&
-        (a.days_of_week || []).map(Number).includes(todayId)
-      )
+    const activeToday = state.assignments.filter(a => a.operator_id === state.currentProfile.id && assignmentAppliesOnDate(a, today));
+    const suppressors = activeToday.filter(a => (a.assignment_type || "fixed") !== "fixed" && a.suppress_regular_assignments === true);
+    const todaysAssignments = activeToday
+      .filter(a => (a.assignment_type || "fixed") !== "fixed" || !suppressors.some(extra => extra.id !== a.id && assignmentsOverlap(extra, a)))
       .sort((a, b) => String(a.scheduled_start).localeCompare(String(b.scheduled_start)));
 
-    const container = $("#operatorShiftContainer");
+    const extraEvents = state.events.filter(e =>
+      e.operator_id === state.currentProfile.id &&
+      e.shift_date === today &&
+      e.assignment_id == null &&
+      e.entry_source === "operator_extra" &&
+      ["coverage", "reinforcement"].includes(String(e.work_type || ""))
+    );
+    const extraGroups = new Map();
+    extraEvents.forEach(event => {
+      if (!extraGroups.has(event.shift_id)) extraGroups.set(event.shift_id, []);
+      extraGroups.get(event.shift_id).push(event);
+    });
 
-    if (todaysAssignments.length === 0) {
-      const shiftId = `${state.currentProfile.id}__${today}`;
-      const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
-      const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
-      container.innerHTML = renderGpsOnlyCard(shiftId, entryEvent, exitEvent, null);
-      container.querySelector("[data-gps-checkin]")?.addEventListener("click", () => handleGpsCheckin(shiftId, null));
-      container.querySelector("[data-gps-checkout]")?.addEventListener("click", () => handleGpsCheckout(shiftId));
-      return;
+    const container = $("#operatorShiftContainer");
+    const cards = [];
+
+    if (!todaysAssignments.length && !extraGroups.size) {
+      cards.push(`
+        <article class="operator-card operator-empty-card">
+          <p class="eyebrow">Sin asignación fija para hoy</p>
+          <h3>No tenés un servicio programado.</h3>
+          <p class="muted no-margin">Si te enviaron a cubrir una ausencia o a reforzar otro servicio, usá la opción extraordinaria de abajo para que el fichaje quede asociado al lugar correcto.</p>
+        </article>`);
     }
 
-    container.innerHTML = todaysAssignments
-      .map(assignment => {
-        const shiftId = `${assignment.id}__${today}`;
-        const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
-        const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
-        const assignedSite = byId(state.sites, assignment.site_id);
-        return renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite);
-      })
-      .join("");
+    todaysAssignments.forEach(assignment => {
+      const shiftId = `${assignment.id}__${today}`;
+      const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
+      const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
+      const assignedSite = byId(state.sites, assignment.site_id);
+      cards.push(renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite, assignment));
+    });
+
+    extraGroups.forEach((eventsForShift, shiftId) => {
+      const entryEvent = eventsForShift.find(e => e.event_type === "present");
+      const exitEvent = eventsForShift.find(e => e.event_type === "checkout");
+      if (!entryEvent) return;
+      const site = byId(state.sites, entryEvent.site_id);
+      cards.push(renderSelfReportedExtraCard(shiftId, entryEvent, exitEvent, site));
+    });
+
+    const hasOpenExtra = Array.from(extraGroups.values()).some(group => group.some(e => e.event_type === "present") && !group.some(e => e.event_type === "checkout"));
+    cards.push(renderExtraDutyStartCard(hasOpenExtra));
+    container.innerHTML = cards.join("");
 
     todaysAssignments.forEach(assignment => {
       const shiftId = `${assignment.id}__${today}`;
       container.querySelector(`[data-gps-checkin="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckin(shiftId, assignment));
       container.querySelector(`[data-gps-checkout="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckout(shiftId));
     });
+    extraGroups.forEach((eventsForShift, shiftId) => {
+      if (!eventsForShift.some(e => e.event_type === "present")) return;
+      container.querySelector(`[data-gps-checkout="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckout(shiftId));
+    });
+    container.querySelector("[data-extra-checkin]")?.addEventListener("click", handleExtraDutyCheckin);
   }
 
-  function renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite = null) {
+  function renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite = null, assignment = null) {
     const checkedIn = Boolean(entryEvent);
     const checkedOut = Boolean(exitEvent);
     const detectedSite = entryEvent ? byId(state.sites, entryEvent.site_id) : null;
@@ -479,12 +697,19 @@
     else { statusLabel = "Sin marcar"; statusClass = "status-pending"; }
 
     const dateLabel = new Date().toLocaleDateString("es-AR", { weekday: "long", day: "numeric", month: "long" });
+    const assignmentType = assignment?.assignment_type || "fixed";
+    const isExtraAssignment = assignmentType !== "fixed";
+    const coveredOperator = assignment?.covered_operator_id ? byId(state.profiles, assignment.covered_operator_id) : null;
+    const assignmentMeta = isExtraAssignment
+      ? `<div class="extra-duty-meta"><span class="extra-duty-badge ${assignmentType}">${escapeHtml(assignmentTypeLabel(assignmentType))}</span>${coveredOperator ? `<span class="muted small">Cubre a ${escapeHtml(coveredOperator.full_name || "operario")}</span>` : ""}</div>`
+      : "";
 
     return `
       <article class="operator-card main-checkin">
         <div class="card-title-row">
           <div>
             <p class="eyebrow">Hoy · ${escapeHtml(dateLabel)}</p>
+            ${assignmentMeta}
             <h3 class="service-title">${displaySite ? escapeHtml(displaySite.name) : "Sin servicio asignado para hoy"}</h3>
             <p class="muted">${displaySite ? escapeHtml(displaySite.address || "") : "Contactá al supervisor si creés que hay un error."}</p>
           </div>
@@ -536,6 +761,116 @@
       </article>`;
   }
 
+  function renderSelfReportedExtraCard(shiftId, entryEvent, exitEvent, site) {
+    const checkedOut = Boolean(exitEvent);
+    const type = entryEvent.work_type || "coverage";
+    const validation = entryEvent.validation_status || "pending";
+    const validationClass = validation === "confirmed" ? "status-present" : validation === "rejected" ? "status-rejected" : "status-extra";
+    const exitDisabled = checkedOut ? "disabled" : "";
+    return `
+      <article class="operator-card main-checkin extra-self-card">
+        <div class="card-title-row">
+          <div>
+            <p class="eyebrow">Trabajo extraordinario declarado por vos</p>
+            <div class="extra-duty-meta">
+              <span class="extra-duty-badge ${escapeHtml(type)}">${escapeHtml(workTypeLabel(type))}</span>
+              <span class="status-pill ${validationClass}">${escapeHtml(validationLabel(validation))}</span>
+            </div>
+            <h3 class="service-title">${escapeHtml(site?.name || "Servicio")}</h3>
+            <p class="muted">${escapeHtml(site?.address || "")}</p>
+          </div>
+          <span class="status-pill ${checkedOut ? "status-present" : "status-ok"}">${checkedOut ? "Servicio completado" : "En servicio"}</span>
+        </div>
+        <div class="meta-grid">
+          <div class="meta-item"><strong>Entrada</strong><span class="meta-subline">${formatDateTime(entryEvent.client_time || entryEvent.created_at)} · ${gpsSummary(entryEvent)}</span></div>
+          <div class="meta-item"><strong>Salida</strong><span class="meta-subline">${exitEvent ? `${formatDateTime(exitEvent.client_time || exitEvent.created_at)} · ${gpsSummary(exitEvent)}` : "Sin salida registrada"}</span></div>
+        </div>
+        <div class="checkin-box exit-box">
+          <div class="checkpoint-title-row">
+            <strong>Salida del servicio</strong>
+            <span class="status-pill ${checkedOut ? "status-present" : "status-pending"}">${checkedOut ? "Registrada" : "Pendiente"}</span>
+          </div>
+          <label class="checkbox-row">
+            <input type="checkbox" id="confirm-out-${escapeHtml(shiftId)}" ${exitDisabled} />
+            <span><strong>Confirmo que estoy saliendo del servicio</strong><br><span class="muted small">La salida queda vinculada a esta cobertura/refuerzo.</span></span>
+          </label>
+          <label><span>Observación opcional</span><textarea id="notes-out-${escapeHtml(shiftId)}" ${exitDisabled} placeholder="Ej. Finalizó normal..."></textarea></label>
+          <button class="secondary-btn big-action" data-gps-checkout="${escapeHtml(shiftId)}" type="button" ${exitDisabled}>Registrar salida con GPS</button>
+        </div>
+      </article>`;
+  }
+
+  function renderExtraDutyStartCard(hasOpenExtra = false) {
+    const options = state.sites.map(site => `<option value="${site.id}">${escapeHtml(site.name)}${site.address ? ` · ${escapeHtml(site.address)}` : ""}</option>`).join("");
+    return `
+      <article class="operator-card extra-duty-start-card">
+        <div class="card-title-row">
+          <div>
+            <p class="eyebrow">Situación excepcional</p>
+            <h3>¿Te enviaron a cubrir o reforzar otro servicio?</h3>
+            <p class="muted small no-margin">Usá esta opción solo si el supervisor todavía no cargó la tarea extraordinaria. El registro queda identificado como declarado por el operario y pendiente de validación.</p>
+          </div>
+          <span class="status-pill status-extra">Extraordinario</span>
+        </div>
+        ${hasOpenExtra ? `<div class="inline-warning">Ya tenés una cobertura/refuerzo extraordinario abierto. Registrá su salida antes de iniciar otro.</div>` : ""}
+        <div class="extra-duty-operator-grid">
+          <label><span>Tipo</span><select id="operatorExtraType" ${hasOpenExtra ? "disabled" : ""}><option value="coverage">Cobertura por ausencia</option><option value="reinforcement">Refuerzo</option></select></label>
+          <label><span>Servicio</span><select id="operatorExtraSite" ${hasOpenExtra ? "disabled" : ""}>${options}</select></label>
+          <label class="extra-notes-field"><span>Motivo / observación</span><input id="operatorExtraNotes" ${hasOpenExtra ? "disabled" : ""} placeholder="Ej. Me envió supervisor Juan para cubrir una ausencia" /></label>
+        </div>
+        <label class="checkbox-row">
+          <input type="checkbox" id="operatorExtraConfirm" ${hasOpenExtra ? "disabled" : ""} />
+          <span><strong>Confirmo que fui enviado a este servicio</strong><br><span class="muted small">Se registrarán hora, GPS, servicio y tipo de trabajo.</span></span>
+        </label>
+        <button class="primary-btn big-action" data-extra-checkin type="button" ${hasOpenExtra || !state.sites.length ? "disabled" : ""}>Registrar entrada extraordinaria</button>
+      </article>`;
+  }
+
+  async function handleExtraDutyCheckin() {
+    const siteId = $("#operatorExtraSite")?.value;
+    const type = $("#operatorExtraType")?.value || "coverage";
+    const notes = $("#operatorExtraNotes")?.value || "";
+    const confirm = $("#operatorExtraConfirm");
+    if (!confirm?.checked) return toast("Confirmá que fuiste enviado a ese servicio.");
+    const site = byId(state.sites, siteId);
+    if (!site) return toast("Seleccioná el servicio al que fuiste enviado.");
+
+    const existingOpen = state.events.some(e => e.operator_id === state.currentProfile.id && e.shift_date === todayISO() && e.assignment_id == null && e.entry_source === "operator_extra" && e.event_type === "present" && !state.events.some(x => x.shift_id === e.shift_id && x.event_type === "checkout"));
+    if (existingOpen) return toast("Ya tenés una cobertura/refuerzo extraordinario abierto. Registrá primero la salida.");
+
+    try {
+      toast("Solicitando GPS de alta precisión...");
+      const position = await getPosition();
+      const { latitude, longitude, accuracy } = position.coords;
+      const distance = haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng));
+      const isInside = distance <= Number(site.gps_radius_m || 120);
+      const shiftId = `extra__${state.currentProfile.id}__${todayISO()}__${Date.now()}`;
+      await store.createEvent({
+        shift_id: shiftId,
+        assignment_id: null,
+        shift_date: todayISO(),
+        operator_id: state.currentProfile.id,
+        site_id: site.id,
+        event_type: "present",
+        observed_status: "present",
+        work_type: type,
+        entry_source: "operator_extra",
+        validation_status: "pending",
+        notes: `Trabajo extraordinario declarado por operario. ${notes}${isInside ? "" : " · Entrada fuera de radio."}`.trim(),
+        lat: latitude,
+        lng: longitude,
+        gps_accuracy_m: accuracy,
+        distance_m: distance,
+        is_inside_site: isInside,
+        client_time: new Date().toISOString()
+      });
+      toast(`${workTypeLabel(type)} registrada en ${site.name}. Quedó pendiente de validación del supervisor.`, "success");
+      await renderOperatorView();
+    } catch (error) {
+      toast(error.message || "No se pudo registrar el trabajo extraordinario.");
+    }
+  }
+
   function getPosition() {
     return new Promise((resolve, reject) => {
       if (!navigator.geolocation) {
@@ -575,6 +910,9 @@
           site_id: null,
           event_type: "present",
           observed_status: "present",
+          work_type: "regular",
+          entry_source: "operator_extra",
+          validation_status: "pending",
           notes: `Sin asignación para hoy. ${notes}`.trim(),
           lat: latitude,
           lng: longitude,
@@ -599,6 +937,9 @@
         site_id: assignedSite.id,
         event_type: "present",
         observed_status: "present",
+        work_type: assignment.assignment_type === "coverage" ? "coverage" : assignment.assignment_type === "reinforcement" ? "reinforcement" : "regular",
+        entry_source: "assignment",
+        validation_status: "confirmed",
         notes: isInside ? notes : `Fuera de radio. ${notes}`.trim(),
         lat: latitude,
         lng: longitude,
@@ -642,12 +983,15 @@
 
       await store.createEvent({
         shift_id: shiftId,
-        assignment_id: null,
+        assignment_id: entryEvent.assignment_id || null,
         shift_date: today,
         operator_id: state.currentProfile.id,
         site_id: entryEvent.site_id,
         event_type: "checkout",
         observed_status: "on_time_exit",
+        work_type: entryEvent.work_type || "regular",
+        entry_source: entryEvent.entry_source || (entryEvent.assignment_id ? "assignment" : "operator_extra"),
+        validation_status: entryEvent.validation_status || (entryEvent.assignment_id ? "confirmed" : "pending"),
         notes,
         lat: latitude,
         lng: longitude,
@@ -732,7 +1076,12 @@
         shiftMap.set(event.shift_id, { shift_id: event.shift_id, shift_date: event.shift_date, operator_id: event.operator_id, site_id: null });
       }
       const s = shiftMap.get(event.shift_id);
-      if (event.event_type === "present") s.entry = event;
+      if (event.event_type === "present") {
+        s.entry = event;
+        s.work_type = event.work_type || "regular";
+        s.entry_source = event.entry_source || "assignment";
+        s.validation_status = event.validation_status || "confirmed";
+      }
       if (event.event_type === "checkout") s.exit = event;
       if (event.site_id) s.site_id = event.site_id;
     }
@@ -760,6 +1109,11 @@
         operator_id: s.operator_id,
         operator_name: operator?.full_name || "—",
         site_name: site?.name || "—",
+        work_type: s.work_type || "regular",
+        work_type_label: workTypeLabel(s.work_type || "regular"),
+        entry_source: s.entry_source || "assignment",
+        validation_status: s.validation_status || "confirmed",
+        validation_label: validationLabel(s.validation_status || "confirmed"),
         entry_time: entryTime,
         exit_time: exitTime,
         minutes,
@@ -811,6 +1165,7 @@
         <td>${escapeHtml(row.shift_date)}</td>
         <td><strong>${escapeHtml(row.operator_name)}</strong></td>
         <td>${escapeHtml(row.site_name)}</td>
+        <td>${escapeHtml(row.work_type_label)}${row.entry_source === "operator_extra" ? `<br><span class="muted small">Declarado por operario · ${escapeHtml(row.validation_label)}</span>` : ""}</td>
         <td>${row.entry_time ? formatDateTime(row.entry_time) : "—"}</td>
         <td>${row.exit_time ? formatDateTime(row.exit_time) : "—"}</td>
         <td><strong>${escapeHtml(row.horasLabel)}</strong></td>
@@ -820,9 +1175,9 @@
     $("#fichajeTable").innerHTML = `
       <table>
         <thead>
-          <tr><th>Fecha</th><th>Operario</th><th>Servicio</th><th>Entrada</th><th>Salida</th><th>Horas trabajadas</th><th>Estado</th></tr>
+          <tr><th>Fecha</th><th>Operario</th><th>Servicio</th><th>Tipo de trabajo</th><th>Entrada</th><th>Salida</th><th>Horas trabajadas</th><th>Estado</th></tr>
         </thead>
-        <tbody>${tableRows || `<tr><td colspan="7">No hay registros en el período seleccionado.</td></tr>`}</tbody>
+        <tbody>${tableRows || `<tr><td colspan="8">No hay registros en el período seleccionado.</td></tr>`}</tbody>
       </table>`;
   }
 
@@ -837,6 +1192,9 @@
       "Fecha": r.shift_date,
       "Operario": r.operator_name,
       "Servicio": r.site_name,
+      "Tipo de trabajo": r.work_type_label,
+      "Origen": r.entry_source === "operator_extra" ? "Declarado por operario" : "Asignación",
+      "Validación": r.validation_label,
       "Hora entrada": r.entry_time ? new Date(r.entry_time).toLocaleString("es-AR") : "",
       "Hora salida": r.exit_time ? new Date(r.exit_time).toLocaleString("es-AR") : "",
       "Horas trabajadas": r.horasLabel,
@@ -901,7 +1259,8 @@
 
   function hasOperationalAlert(row) {
     return ["late", "absent", "outside"].includes(row.entryStatus.key)
-      || ["early_exit", "exit_outside", "missing_exit", "exit_due"].includes(row.exitStatus.key);
+      || ["early_exit", "exit_outside", "missing_exit", "exit_due"].includes(row.exitStatus.key)
+      || (row.isSelfReportedExtra && ["pending", "rejected"].includes(row.extraValidationStatus));
   }
 
   function operationalAlertItems(row) {
@@ -919,6 +1278,8 @@
     };
     if (entryItems[row.entryStatus.key]) items.push(entryItems[row.entryStatus.key]);
     if (exitItems[row.exitStatus.key]) items.push(exitItems[row.exitStatus.key]);
+    if (row.isSelfReportedExtra && row.extraValidationStatus === "pending") items.push({ label: "Trabajo extraordinario pendiente de validar", className: "status-extra" });
+    if (row.isSelfReportedExtra && row.extraValidationStatus === "rejected") items.push({ label: "Trabajo extraordinario rechazado", className: "status-rejected" });
     return items;
   }
 
@@ -934,8 +1295,55 @@
     return 4;
   }
 
+  function getSelfReportedExtraDashboardRows() {
+    const date = $("#dashboardDate")?.value || todayISO();
+    const events = state.events.filter(event => event.shift_date === date && event.assignment_id == null && event.entry_source === "operator_extra" && ["coverage", "reinforcement"].includes(String(event.work_type || "")));
+    const groups = new Map();
+    events.forEach(event => {
+      if (!groups.has(event.shift_id)) groups.set(event.shift_id, []);
+      groups.get(event.shift_id).push(event);
+    });
+    const rows = [];
+    groups.forEach((group, shiftId) => {
+      const entryEvent = group.filter(e => e.event_type === "present").sort((a, b) => new Date(b.client_time || b.created_at) - new Date(a.client_time || a.created_at))[0];
+      if (!entryEvent) return;
+      const exitEvent = group.filter(e => e.event_type === "checkout").sort((a, b) => new Date(b.client_time || b.created_at) - new Date(a.client_time || a.created_at))[0] || null;
+      const validation = entryEvent.validation_status || "pending";
+      const entryStatus = entryEvent.is_inside_site === false
+        ? { key: "outside", label: "Entrada fuera de radio", className: "status-outside" }
+        : { key: "present", label: "Entrada registrada", className: "status-present" };
+      let exitStatus;
+      if (exitEvent) {
+        exitStatus = exitEvent.is_inside_site === false
+          ? { key: "exit_outside", label: "Salida fuera de radio", className: "status-outside" }
+          : { key: "completed", label: "Salida registrada", className: "status-present" };
+      } else {
+        exitStatus = { key: "in_service_extra", label: "En servicio extraordinario", className: "status-extra" };
+      }
+      let status = exitEvent ? { ...exitStatus } : { key: "extra", label: `${workTypeLabel(entryEvent.work_type)} · ${validationLabel(validation)}`, className: validation === "rejected" ? "status-rejected" : "status-extra" };
+      if (validation === "pending") status = { key: "extra_pending", label: `${workTypeLabel(entryEvent.work_type)} · pendiente de validar`, className: "status-extra" };
+      if (validation === "rejected") status = { key: "extra_rejected", label: `${workTypeLabel(entryEvent.work_type)} · rechazado`, className: "status-rejected" };
+      const shift = {
+        id: shiftId,
+        assignment_id: null,
+        shift_date: date,
+        operator_id: entryEvent.operator_id,
+        site_id: entryEvent.site_id,
+        scheduled_start: null,
+        scheduled_end: null,
+        grace_minutes: 0,
+        absence_after_minutes: 0,
+        assignment_type: entryEvent.work_type || "coverage",
+        notes: entryEvent.notes || ""
+      };
+      const lastEvent = [...group].sort((a, b) => new Date(b.client_time || b.created_at) - new Date(a.client_time || a.created_at))[0];
+      rows.push({ shift, entryEvent, exitEvent, manualEvent: null, entryStatus, exitStatus, status, lastEvent, isSelfReportedExtra: true, extraValidationStatus: validation, extraWorkType: entryEvent.work_type || "coverage" });
+    });
+    return rows;
+  }
+
   function getDashboardRows() {
-    return state.shifts.map(shift => {
+    const regularRows = state.shifts.map(shift => {
       const entryEvent = getEntryEvent(shift);
       const exitEvent = getExitEvent(shift);
       const manualEvent = getManualEvent(shift);
@@ -943,8 +1351,9 @@
       const exitStatus = getExitStatus(shift, entryEvent, exitEvent);
       const status = getShiftStatus(shift);
       const lastEvent = latestEventForShift(shift.id);
-      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent };
+      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent, isSelfReportedExtra: false };
     });
+    return [...regularRows, ...getSelfReportedExtraDashboardRows()].sort((a, b) => `${a.shift.scheduled_start || "99:99"}|${byId(state.sites, a.shift.site_id)?.name || ""}`.localeCompare(`${b.shift.scheduled_start || "99:99"}|${byId(state.sites, b.shift.site_id)?.name || ""}`));
   }
 
   function liveStatusFilterDefinitions(rows) {
@@ -952,11 +1361,12 @@
     const definitions = [
       { key: "all", label: "Todos", tone: "neutral", matches: () => true },
       { key: "alerts", label: "Con alerta", tone: "alert", matches: row => hasOperationalAlert(row) },
-      { key: "on_time", label: "En horario", tone: "present", matches: row => row.entryStatus.key === "present" },
+      { key: "on_time", label: "Ingreso correcto", tone: "present", matches: row => row.entryStatus.key === "present" },
       { key: "late", label: "Llegada tarde", tone: "late", matches: row => row.entryStatus.key === "late" || row.entryEvent?.observed_status === "late" },
       { key: "outside", label: "Fuera de radio", tone: "outside", matches: row => row.entryStatus.key === "outside" },
       { key: "absent", label: "Ausentes", tone: "absent", matches: row => row.entryStatus.key === "absent" },
       { key: "pending", label: "Pendientes", tone: "pending", matches: row => ["scheduled", "on_window"].includes(row.entryStatus.key) },
+      { key: "extra", label: "Coberturas / refuerzos", tone: "extra", matches: row => row.isSelfReportedExtra || ["coverage", "reinforcement"].includes(String(row.shift.assignment_type || "")) },
       { key: "exit_alert", label: "Alertas de salida", tone: "exit", matches: row => exitAlertKeys.includes(row.exitStatus.key) }
     ];
     return definitions.map(def => ({ ...def, count: rows.filter(def.matches).length }));
@@ -982,6 +1392,80 @@
   function filteredDashboardRows(rows) {
     const definition = liveStatusFilterDefinitions(rows).find(def => def.key === state.liveStatusFilter);
     return definition ? rows.filter(definition.matches) : rows;
+  }
+
+  let liveScrollSyncLock = false;
+
+  function refreshLiveFloatingScrollbar() {
+    const tableWrap = $("#liveTable");
+    const proxy = $("#liveTableScrollProxy");
+    if (!tableWrap || !proxy) return;
+    const inner = proxy.querySelector(".floating-h-scroll-inner");
+    if (!inner) return;
+
+    const hasOverflow = tableWrap.scrollWidth > tableWrap.clientWidth + 2;
+    const rect = tableWrap.getBoundingClientRect();
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+    const tableIsOnScreen = rect.bottom > 0 && rect.top < viewportHeight;
+    const nativeBottomScrollbarIsBelowViewport = rect.bottom > viewportHeight - 2;
+    const shouldFloat = hasOverflow && tableIsOnScreen && nativeBottomScrollbarIsBelowViewport;
+
+    inner.style.width = `${Math.max(tableWrap.scrollWidth, tableWrap.clientWidth)}px`;
+
+    if (!shouldFloat) {
+      proxy.classList.add("hidden");
+      return;
+    }
+
+    const left = Math.max(8, rect.left);
+    const right = Math.min(window.innerWidth - 8, rect.right);
+    const width = Math.max(120, right - left);
+    proxy.style.left = `${left}px`;
+    proxy.style.width = `${width}px`;
+    proxy.style.bottom = "8px";
+    proxy.classList.remove("hidden");
+
+    if (!liveScrollSyncLock && Math.abs(proxy.scrollLeft - tableWrap.scrollLeft) > 1) {
+      proxy.scrollLeft = tableWrap.scrollLeft;
+    }
+  }
+
+  function setupLiveFloatingScrollbar() {
+    const tableWrap = $("#liveTable");
+    const proxy = $("#liveTableScrollProxy");
+    if (!tableWrap || !proxy || proxy.dataset.bound === "1") {
+      refreshLiveFloatingScrollbar();
+      return;
+    }
+    proxy.dataset.bound = "1";
+
+    tableWrap.addEventListener("scroll", () => {
+      if (liveScrollSyncLock) return;
+      liveScrollSyncLock = true;
+      proxy.scrollLeft = tableWrap.scrollLeft;
+      liveScrollSyncLock = false;
+    }, { passive: true });
+
+    proxy.addEventListener("scroll", () => {
+      if (liveScrollSyncLock) return;
+      liveScrollSyncLock = true;
+      tableWrap.scrollLeft = proxy.scrollLeft;
+      liveScrollSyncLock = false;
+    }, { passive: true });
+
+    window.addEventListener("scroll", refreshLiveFloatingScrollbar, { passive: true });
+    window.addEventListener("resize", refreshLiveFloatingScrollbar, { passive: true });
+    refreshLiveFloatingScrollbar();
+  }
+
+  async function updateExtraValidation(shiftId, status) {
+    if (!isManagementProfile()) return toast("No tenés permisos para validar este registro.");
+    if (!shiftId || !["confirmed", "rejected"].includes(status)) return;
+    const action = status === "confirmed" ? "validar" : "rechazar";
+    if (!window.confirm(`¿${action === "validar" ? "Validar" : "Rechazar"} este trabajo extraordinario declarado por el operario?`)) return;
+    await store.updateEventsByShift(shiftId, { validation_status: status });
+    toast(status === "confirmed" ? "Trabajo extraordinario validado." : "Trabajo extraordinario marcado como rechazado.", status === "confirmed" ? "success" : undefined);
+    await renderSupervisorView();
   }
 
   function renderDashboard() {
@@ -1010,8 +1494,13 @@
       const { shift, entryEvent, exitEvent, entryStatus, exitStatus, status, lastEvent } = row;
       const operator = byId(state.profiles, shift.operator_id);
       const site = byId(state.sites, shift.site_id);
-      const message = buildWhatsAppMessage(shift, status);
+      const message = row.isSelfReportedExtra ? `Trabajo extraordinario registrado por ${operator?.full_name || "operario"} en ${site?.name || "servicio"}.` : buildWhatsAppMessage(shift, status);
       const url = whatsappUrl(site?.whatsapp_phone, message);
+      const assignmentType = row.isSelfReportedExtra ? (row.extraWorkType || "coverage") : (shift.assignment_type || "fixed");
+      const typeBadge = assignmentType !== "fixed" ? `<span class="extra-duty-badge ${escapeHtml(assignmentType)}">${escapeHtml(assignmentTypeLabel(assignmentType))}</span>` : "";
+      const validationActions = row.isSelfReportedExtra && row.extraValidationStatus === "pending"
+        ? `<div class="validation-actions"><button class="secondary-btn small-btn" data-extra-validation="confirmed" data-extra-shift="${escapeHtml(shift.id)}" type="button">Validar</button><button class="ghost-btn small-btn" data-extra-validation="rejected" data-extra-shift="${escapeHtml(shift.id)}" type="button">Rechazar</button></div>`
+        : row.isSelfReportedExtra ? `<span class="muted small">${escapeHtml(validationLabel(row.extraValidationStatus))}</span>` : "";
       const mapButtons = [
         hasCoordinates(entryEvent) ? `<button class="location-btn" data-map-event="${escapeHtml(entryEvent.id)}" type="button">Mapa entrada</button>` : "",
         hasCoordinates(exitEvent) ? `<button class="location-btn" data-map-event="${escapeHtml(exitEvent.id)}" type="button">Mapa salida</button>` : ""
@@ -1020,13 +1509,14 @@
       return `
         <tr>
           <td><strong>${escapeHtml(operator?.full_name || "—")}</strong><br><span class="muted small">${escapeHtml(operator?.phone || "")}</span></td>
-          <td><strong>${escapeHtml(site?.name || "—")}</strong><br><span class="muted small">${escapeHtml(site?.address || "")}</span></td>
-          <td>${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}</td>
+          <td><strong>${escapeHtml(site?.name || "—")}</strong><br>${typeBadge ? `${typeBadge}<br>` : ""}<span class="muted small">${escapeHtml(site?.address || "")}</span></td>
+          <td>${row.isSelfReportedExtra ? `<span class="extra-schedule-label">Sin horario previo</span>` : `${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`}</td>
           <td>${statusDetailCell(entryStatus, entryEvent, "Sin entrada")}</td>
           <td>${statusDetailCell(exitStatus, exitEvent, "Sin salida")}</td>
           <td><span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.client_time || lastEvent.created_at)}` : "—"}</span></td>
           <td class="row-actions">
             ${mapButtons}
+            ${validationActions}
             <a class="wa-btn ${normalizePhone(site?.whatsapp_phone) ? "" : "disabled-link"}" href="${url}" target="_blank" rel="noopener">WhatsApp consorcio</a>
           </td>
         </tr>`;
@@ -1040,6 +1530,8 @@
         <tbody>${tableRows || `<tr><td colspan="7">${rows.length ? "No hay personas que coincidan con este filtro." : "No hay cobertura programada para esta fecha."}</td></tr>`}</tbody>
       </table>`;
     $("#lastRefreshLabel").textContent = `Actualizado ${new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })}`;
+    setupLiveFloatingScrollbar();
+    requestAnimationFrame(refreshLiveFloatingScrollbar);
   }
 
   function kpi(label, value, className = "", detailKey = "") {
@@ -1088,7 +1580,7 @@
 
   function quickDetailMeta(row, kind) {
     const shift = row.shift;
-    const lines = [`Horario ${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`];
+    const lines = [row.isSelfReportedExtra ? "Sin horario previo · trabajo extraordinario" : `Horario ${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`];
     if (kind === "entries" && row.entryEvent) {
       lines.push(`Entrada: ${formatDateTime(row.entryEvent.client_time || row.entryEvent.created_at)}`);
       lines.push(gpsSummary(row.entryEvent));
@@ -1271,7 +1763,7 @@
     const term = $("#coverageSearch")?.value?.trim() || "";
     const grid = $("#coverageGrid");
     const html = state.sites
-      .map(site => ({ site, assignments: state.assignments.filter(a => a.site_id === site.id) }))
+      .map(site => ({ site, assignments: state.assignments.filter(a => a.site_id === site.id && (a.assignment_type || "fixed") === "fixed") }))
       .filter(group => assignmentMatchesSearch(group.site, group.assignments, term))
       .map(({ site, assignments }) => {
         const dayCards = DAYS.map(day => {
@@ -1304,8 +1796,17 @@
 
   function renderSites() {
     const list = $("#sitesList");
+    const validIds = new Set(state.sites.map(site => site.id));
+    state.bulkSelectedSiteIds = new Set([...state.bulkSelectedSiteIds].filter(id => validIds.has(id)));
+
     list.innerHTML = state.sites.map(site => `
-      <div class="list-item">
+      <div class="list-item ${state.bulkSelectedSiteIds.has(site.id) ? "bulk-selected-item" : ""}">
+        <div class="bulk-select-line">
+          <label class="bulk-select-control">
+            <input type="checkbox" data-select-site="${site.id}" ${state.bulkSelectedSiteIds.has(site.id) ? "checked" : ""} />
+            <span>Seleccionar para cambio masivo</span>
+          </label>
+        </div>
         <div class="list-item-head">
           <div>
             <div class="list-item-title">${escapeHtml(site.name)}</div>
@@ -1321,8 +1822,15 @@
         </div>
       </div>`).join("") || `<p class="muted">No hay servicios cargados.</p>`;
 
+    list.querySelectorAll("[data-select-site]").forEach(input => input.addEventListener("change", () => {
+      if (input.checked) state.bulkSelectedSiteIds.add(input.dataset.selectSite);
+      else state.bulkSelectedSiteIds.delete(input.dataset.selectSite);
+      input.closest(".list-item")?.classList.toggle("bulk-selected-item", input.checked);
+      updateBulkSelectionSummaries();
+    }));
     list.querySelectorAll("[data-edit-site]").forEach(btn => btn.addEventListener("click", () => editSite(btn.dataset.editSite)));
     list.querySelectorAll("[data-delete-site]").forEach(btn => btn.addEventListener("click", () => deleteSite(btn.dataset.deleteSite)));
+    updateBulkSelectionSummaries();
   }
 
   function sitePayloadFromForm() {
@@ -1379,8 +1887,13 @@
 
   function renderAssignmentSelectors() {
     const operators = state.profiles.filter(p => p.role === "operator");
-    $("#assignmentOperator").innerHTML = operators.map(op => `<option value="${op.id}">${escapeHtml(op.full_name)}</option>`).join("");
-    $("#assignmentSite").innerHTML = state.sites.map(site => `<option value="${site.id}">${escapeHtml(site.name)}</option>`).join("");
+    const operatorOptions = operators.map(op => `<option value="${op.id}">${escapeHtml(op.full_name)}</option>`).join("");
+    const siteOptions = state.sites.map(site => `<option value="${site.id}">${escapeHtml(site.name)}</option>`).join("");
+    $("#assignmentOperator").innerHTML = operatorOptions;
+    $("#assignmentSite").innerHTML = siteOptions;
+    if ($("#extraAssignmentOperator")) $("#extraAssignmentOperator").innerHTML = operatorOptions;
+    if ($("#extraAssignmentSite")) $("#extraAssignmentSite").innerHTML = siteOptions;
+    if ($("#extraCoveredOperator")) $("#extraCoveredOperator").innerHTML = `<option value="">Sin especificar</option>${operatorOptions}`;
   }
 
   function defaultScheduleStart() { return "08:00"; }
@@ -1511,8 +2024,149 @@
     }));
   }
 
+  function updateBulkSelectionSummaries() {
+    const assignmentCount = state.bulkSelectedAssignmentIds.size;
+    const siteCount = state.bulkSelectedSiteIds.size;
+    if ($("#bulkAssignmentSelectionSummary")) {
+      $("#bulkAssignmentSelectionSummary").textContent = `${assignmentCount} asignación${assignmentCount === 1 ? "" : "es"} seleccionada${assignmentCount === 1 ? "" : "s"} de ${state.assignments.length}.`;
+    }
+    if ($("#bulkSiteSelectionSummary")) {
+      $("#bulkSiteSelectionSummary").textContent = `${siteCount} servicio${siteCount === 1 ? "" : "s"} seleccionado${siteCount === 1 ? "" : "s"} de ${state.sites.length}.`;
+    }
+  }
+
+  function selectedAssignmentTargets() {
+    const scope = $("#bulkAssignmentScope")?.value || "all";
+    if (scope === "selected") return state.assignments.filter(a => state.bulkSelectedAssignmentIds.has(a.id));
+    return [...state.assignments];
+  }
+
+  function selectedSiteTargets() {
+    const scope = $("#bulkSiteScope")?.value || "all";
+    if (scope === "selected") return state.sites.filter(site => state.bulkSelectedSiteIds.has(site.id));
+    return [...state.sites];
+  }
+
+  async function applyBulkAssignmentSettings() {
+    const graceRaw = $("#bulkAssignmentGrace").value.trim();
+    const absentRaw = $("#bulkAssignmentAbsent").value.trim();
+    if (!graceRaw && !absentRaw) throw new Error("Ingresá al menos un valor para demora o ausencia.");
+
+    const patch = {};
+    if (graceRaw) {
+      const grace = Number(graceRaw);
+      if (!Number.isFinite(grace) || grace < 0 || grace > 120) throw new Error("La tolerancia de demora debe estar entre 0 y 120 minutos.");
+      patch.grace_minutes = Math.round(grace);
+    }
+    if (absentRaw) {
+      const absent = Number(absentRaw);
+      if (!Number.isFinite(absent) || absent < 1 || absent > 240) throw new Error("El margen de ausencia debe estar entre 1 y 240 minutos.");
+      patch.absence_after_minutes = Math.round(absent);
+    }
+
+    const targets = selectedAssignmentTargets();
+    if (!targets.length) throw new Error($("#bulkAssignmentScope").value === "selected" ? "Seleccioná al menos una asignación." : "No hay asignaciones activas para modificar.");
+
+    const invalid = targets.filter(a => {
+      const nextGrace = patch.grace_minutes ?? Number(a.grace_minutes ?? 10);
+      const nextAbsent = patch.absence_after_minutes ?? Number(a.absence_after_minutes ?? 30);
+      return nextAbsent <= nextGrace;
+    });
+    if (invalid.length) {
+      throw new Error(`La ausencia debe quedar después de la tolerancia de demora. Hay ${invalid.length} asignación${invalid.length === 1 ? "" : "es"} que quedarían con valores incompatibles.`);
+    }
+
+    const changes = [
+      patch.grace_minutes !== undefined ? `demora ${patch.grace_minutes} min` : null,
+      patch.absence_after_minutes !== undefined ? `ausencia ${patch.absence_after_minutes} min` : null
+    ].filter(Boolean).join(" · ");
+    const scopeLabel = $("#bulkAssignmentScope").value === "selected" ? "seleccionadas" : "activas";
+    if (!window.confirm(`¿Aplicar ${changes} a ${targets.length} asignación${targets.length === 1 ? "" : "es"} ${scopeLabel}? El cambio también puede modificar las alertas del día en curso.`)) return;
+
+    const button = $("#applyBulkAssignmentsBtn");
+    button.disabled = true;
+    try {
+      await store.bulkUpdateAssignments(targets.map(a => a.id), patch);
+      $("#bulkAssignmentGrace").value = "";
+      $("#bulkAssignmentAbsent").value = "";
+      toast(`${targets.length} asignación${targets.length === 1 ? "" : "es"} actualizada${targets.length === 1 ? "" : "s"}.`, "success");
+      await renderSupervisorView();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function applyBulkSiteRadius() {
+    const radius = Number($("#bulkSiteRadius").value);
+    if (!Number.isFinite(radius) || radius < 10 || radius > 1000) throw new Error("El radio GPS debe estar entre 10 y 1000 metros.");
+    const roundedRadius = Math.round(radius);
+    const targets = selectedSiteTargets();
+    if (!targets.length) throw new Error($("#bulkSiteScope").value === "selected" ? "Seleccioná al menos un servicio." : "No hay servicios activos para modificar.");
+
+    const scopeLabel = $("#bulkSiteScope").value === "selected" ? "seleccionados" : "activos";
+    if (!window.confirm(`¿Establecer un radio GPS de ${roundedRadius} m en ${targets.length} servicio${targets.length === 1 ? "" : "s"} ${scopeLabel}?`)) return;
+
+    const button = $("#applyBulkSitesBtn");
+    button.disabled = true;
+    try {
+      await store.bulkUpdateSites(targets.map(site => site.id), { gps_radius_m: roundedRadius });
+      $("#bulkSiteRadius").value = "";
+      toast(`${targets.length} servicio${targets.length === 1 ? "" : "s"} actualizado${targets.length === 1 ? "" : "s"} a ${roundedRadius} m.`, "success");
+      await renderSupervisorView();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function saveExtraAssignment(event) {
+    event.preventDefault();
+    const operatorId = $("#extraAssignmentOperator")?.value;
+    const siteId = $("#extraAssignmentSite")?.value;
+    const type = $("#extraAssignmentType")?.value || "coverage";
+    const date = $("#extraAssignmentDate")?.value || todayISO();
+    const start = $("#extraAssignmentStart")?.value;
+    const end = $("#extraAssignmentEnd")?.value;
+    const grace = Number($("#extraAssignmentGrace")?.value || 10);
+    const absent = Number($("#extraAssignmentAbsent")?.value || 30);
+    const coveredOperatorId = $("#extraCoveredOperator")?.value || null;
+    const notes = $("#extraAssignmentNotes")?.value.trim() || "";
+    const suppressRegular = Boolean($("#extraSuppressRegular")?.checked);
+
+    if (!operatorId || !siteId || !date || !start || !end) throw new Error("Completá operario, servicio, fecha y horario.");
+    if (end <= start) throw new Error("La hora de salida debe ser posterior a la entrada.");
+    if (absent <= grace) throw new Error("El margen de ausencia debe ser posterior a la tolerancia de demora.");
+    const day = (() => { const d = new Date(`${date}T12:00:00`).getDay(); return d === 0 ? 7 : d; })();
+
+    await store.upsertAssignment({
+      operator_id: operatorId,
+      site_id: siteId,
+      days_of_week: [day],
+      scheduled_start: start,
+      scheduled_end: end,
+      grace_minutes: grace,
+      absence_after_minutes: absent,
+      valid_from: date,
+      valid_to: date,
+      assignment_type: type,
+      covered_operator_id: coveredOperatorId,
+      created_by: state.currentProfile?.id || null,
+      suppress_regular_assignments: suppressRegular,
+      notes: notes || (type === "coverage" ? "Cobertura extraordinaria" : "Refuerzo extraordinario"),
+      is_active: true
+    });
+
+    $("#extraAssignmentNotes").value = "";
+    $("#extraCoveredOperator").value = "";
+    if ($("#extraSuppressRegular")) $("#extraSuppressRegular").checked = false;
+    $("#extraAssignmentDate").value = todayISO();
+    toast(`${assignmentTypeLabel(type)} creada. El operario la verá como tarea extraordinaria.`, "success");
+    await renderSupervisorView();
+  }
+
   function renderAssignments() {
     const list = $("#assignmentsList");
+    const validIds = new Set(state.assignments.map(assignment => assignment.id));
+    state.bulkSelectedAssignmentIds = new Set([...state.bulkSelectedAssignmentIds].filter(id => validIds.has(id)));
     const sorted = [...state.assignments].sort((a, b) => {
       const siteA = byId(state.sites, a.site_id)?.name || "";
       const siteB = byId(state.sites, b.site_id)?.name || "";
@@ -1522,12 +2176,23 @@
     list.innerHTML = sorted.map(assignment => {
       const op = byId(state.profiles, assignment.operator_id);
       const site = byId(state.sites, assignment.site_id);
+      const coveredOp = assignment.covered_operator_id ? byId(state.profiles, assignment.covered_operator_id) : null;
+      const assignmentType = assignment.assignment_type || "fixed";
       const days = (assignment.days_of_week || []).map(d => dayLabel(d)).join(", ");
       const vigencia = `${assignment.valid_from || "—"}${assignment.valid_to ? ` a ${assignment.valid_to}` : " en adelante"}`;
+      const selected = state.bulkSelectedAssignmentIds.has(assignment.id);
       return `
-        <div class="list-item">
-          <div class="list-item-title">${escapeHtml(site?.name || "—")}</div>
+        <div class="list-item ${selected ? "bulk-selected-item" : ""}">
+          <div class="bulk-select-line">
+            <label class="bulk-select-control">
+              <input type="checkbox" data-select-assignment="${assignment.id}" ${selected ? "checked" : ""} />
+              <span>Seleccionar para cambio masivo</span>
+            </label>
+          </div>
+          <div class="list-item-title-row"><div class="list-item-title">${escapeHtml(site?.name || "—")}</div>${assignmentType !== "fixed" ? `<span class="extra-duty-badge ${escapeHtml(assignmentType)}">${escapeHtml(assignmentTypeLabel(assignmentType))}</span>` : ""}</div>
           <div class="muted small"><strong>${escapeHtml(op?.full_name || "—")}</strong> · ${formatTime(assignment.scheduled_start)} a ${formatTime(assignment.scheduled_end)}</div>
+          ${coveredOp ? `<div class="muted small">Cubre a: <strong>${escapeHtml(coveredOp.full_name || "—")}</strong></div>` : ""}
+          ${assignment.suppress_regular_assignments ? `<div class="muted small"><strong>Reemplaza la asignación habitual del operario en ese horario.</strong></div>` : ""}
           <div class="muted small">Días: ${escapeHtml(days || "—")} · Vigencia: ${escapeHtml(vigencia)}</div>
           <div class="muted small">Tolerancia: ${assignment.grace_minutes} min · Ausente desde: ${assignment.absence_after_minutes} min</div>
           ${assignment.notes ? `<div class="muted small">Notas: ${escapeHtml(assignment.notes)}</div>` : ""}
@@ -1538,8 +2203,15 @@
         </div>`;
     }).join("") || `<p class="muted">No hay asignaciones cargadas.</p>`;
 
+    list.querySelectorAll("[data-select-assignment]").forEach(input => input.addEventListener("change", () => {
+      if (input.checked) state.bulkSelectedAssignmentIds.add(input.dataset.selectAssignment);
+      else state.bulkSelectedAssignmentIds.delete(input.dataset.selectAssignment);
+      input.closest(".list-item")?.classList.toggle("bulk-selected-item", input.checked);
+      updateBulkSelectionSummaries();
+    }));
     list.querySelectorAll("[data-edit-assignment]").forEach(btn => btn.addEventListener("click", () => editAssignment(btn.dataset.editAssignment)));
     list.querySelectorAll("[data-delete-assignment]").forEach(btn => btn.addEventListener("click", () => deleteAssignment(btn.dataset.deleteAssignment)));
+    updateBulkSelectionSummaries();
   }
 
   function assignmentPayloadsFromForm() {
@@ -1556,7 +2228,8 @@
       valid_from: $("#assignmentValidFrom").value || todayISO(),
       valid_to: $("#assignmentValidTo").value || null,
       notes: $("#assignmentNotes").value.trim(),
-      is_active: true
+      is_active: true,
+      ...(!id ? { assignment_type: "fixed", created_by: state.currentProfile?.id || null } : {})
     };
 
     return groups.map((group, index) => ({
@@ -1766,20 +2439,467 @@
     }
   }
 
+  function eventTimestamp(event) {
+    return event?.client_time || event?.created_at || null;
+  }
+
+  function latestEventFromList(events, type) {
+    const allowed = Array.isArray(type) ? type : [type];
+    return [...events]
+      .filter(event => allowed.includes(event.event_type))
+      .sort((a, b) => new Date(eventTimestamp(b) || 0) - new Date(eventTimestamp(a) || 0))[0] || null;
+  }
+
+  function assignmentHistoricalEnd(assignment) {
+    if (assignment.valid_to) return assignment.valid_to;
+    if (assignment.is_active === false) {
+      const changed = assignment.updated_at || assignment.created_at;
+      return changed ? String(changed).slice(0, 10) : null;
+    }
+    return null;
+  }
+
+  function assignmentAppliesHistorically(assignment, dateString) {
+    const day = (() => { const d = parseISODate(dateString).getDay(); return d === 0 ? 7 : d; })();
+    const days = Array.isArray(assignment.days_of_week) ? assignment.days_of_week.map(Number) : [];
+    if (!days.includes(day)) return false;
+    const start = assignment.valid_from || String(assignment.created_at || "").slice(0, 10);
+    const end = assignmentHistoricalEnd(assignment);
+    if (start && start > dateString) return false;
+    if (end && end < dateString) return false;
+    return true;
+  }
+
+  function assignmentSuppressedHistorically(assignment, dateString, allAssignments) {
+    if ((assignment.assignment_type || "fixed") !== "fixed") return false;
+    return (allAssignments || []).some(extra =>
+      extra.operator_id === assignment.operator_id &&
+      (extra.assignment_type || "fixed") !== "fixed" &&
+      extra.suppress_regular_assignments === true &&
+      assignmentAppliesHistorically(extra, dateString) &&
+      assignmentsOverlap(extra, assignment)
+    );
+  }
+
+  function scheduledRangeForShift(dateString, startTime, endTime) {
+    const start = new Date(`${dateString}T${String(startTime || "00:00").slice(0, 5)}:00`);
+    let end = new Date(`${dateString}T${String(endTime || "00:00").slice(0, 5)}:00`);
+    if (end.getTime() <= start.getTime()) end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
+    return { start, end };
+  }
+
+  function eventInsideLabel(event) {
+    if (!event) return "";
+    return event.is_inside_site === true ? "Sí" : event.is_inside_site === false ? "No" : "";
+  }
+
+  function getHistoricalShiftEvaluation(shift, events, now = new Date()) {
+    const entry = latestEventFromList(events, "present");
+    const exit = latestEventFromList(events, "checkout");
+    const absentEvent = latestEventFromList(events, "absent");
+    const lateEvent = latestEventFromList(events, "late");
+    const { start, end } = scheduledRangeForShift(shift.shift_date, shift.scheduled_start, shift.scheduled_end);
+    const grace = Number(shift.grace_minutes ?? 10);
+    const absentAfter = Number(shift.absence_after_minutes ?? 30);
+    const isFuture = now.getTime() < start.getTime();
+    const absenceDue = now.getTime() > start.getTime() + absentAfter * 60000;
+    const exitDue = now.getTime() > end.getTime() + grace * 60000;
+
+    let entryStatus = "Pendiente";
+    let entryKey = "pending";
+    let source = "Programación";
+    if (entry) {
+      source = "Marcación";
+      if (entry.is_inside_site === false) { entryStatus = "Entrada fuera de radio"; entryKey = "outside"; }
+      else if (entry.observed_status === "late" || new Date(eventTimestamp(entry)).getTime() > start.getTime() + grace * 60000) { entryStatus = "Entrada tarde"; entryKey = "late"; }
+      else { entryStatus = "Entrada correcta"; entryKey = "present"; }
+    } else if (absentEvent) {
+      entryStatus = "Ausente registrado";
+      entryKey = "absent";
+      source = "Ausencia registrada";
+    } else if (!isFuture && absenceDue) {
+      entryStatus = "Sin entrada / ausencia inferida";
+      entryKey = "absent";
+      source = "Inferido por programación";
+    } else if (lateEvent) {
+      entryStatus = "Demora informada";
+      entryKey = "late";
+      source = "Demora registrada";
+    }
+
+    let exitStatus = "Sin entrada";
+    let exitKey = "not_started";
+    if (exit) {
+      source = source === "Programación" ? "Marcación" : source;
+      if (exit.is_inside_site === false) { exitStatus = "Salida fuera de radio"; exitKey = "exit_outside"; }
+      else if (exit.observed_status === "early_exit" || new Date(eventTimestamp(exit)).getTime() < end.getTime() - grace * 60000) { exitStatus = "Salida anticipada"; exitKey = "early_exit"; }
+      else { exitStatus = "Salida correcta"; exitKey = "completed"; }
+    } else if (entry) {
+      if (exitDue) { exitStatus = "Salida no registrada"; exitKey = "missing_exit"; }
+      else {
+        exitStatus = entryKey === "outside" ? "En servicio · entrada fuera de radio" : entryKey === "late" ? "En servicio · entrada tarde" : "En servicio";
+        exitKey = "in_service";
+      }
+    }
+
+    const alerts = [];
+    const entryIsLate = Boolean(entry) && (entry.observed_status === "late" || new Date(eventTimestamp(entry)).getTime() > start.getTime() + grace * 60000);
+    if (entryKey === "late" || entryIsLate) alerts.push("Llegada tarde");
+    if (entryKey === "outside") alerts.push("Entrada fuera de radio");
+    if (entryKey === "absent") alerts.push("Ausencia / sin entrada");
+    if (exitKey === "early_exit") alerts.push("Salida anticipada");
+    if (exitKey === "exit_outside") alerts.push("Salida fuera de radio");
+    if (exitKey === "missing_exit") alerts.push("Salida no registrada");
+
+    let operational = "Pendiente";
+    if (entryKey === "absent") operational = entryStatus;
+    else if (entry && !exit) operational = exitStatus;
+    else if (entry && exit) {
+      if (exitKey === "early_exit") operational = "Jornada con salida anticipada";
+      else if (exitKey === "exit_outside") operational = "Jornada · salida fuera de radio";
+      else if (entryKey === "outside") operational = "Jornada completa · entrada fuera de radio";
+      else if (entryKey === "late") operational = "Jornada completa · entrada tarde";
+      else operational = "Jornada completa";
+    } else if (isFuture) operational = "Programado";
+
+    const entryMoment = entry ? new Date(eventTimestamp(entry)) : null;
+    const exitMoment = exit ? new Date(eventTimestamp(exit)) : null;
+    const rawLateMinutes = entryMoment ? Math.max(0, Math.round((entryMoment.getTime() - start.getTime()) / 60000)) : null;
+    const rawEarlyExitMinutes = exitMoment ? Math.max(0, Math.round((end.getTime() - exitMoment.getTime()) / 60000)) : null;
+    const lateMinutes = entryMoment ? (entryIsLate ? rawLateMinutes : 0) : null;
+    const earlyExitMinutes = exitMoment ? (exitKey === "early_exit" ? rawEarlyExitMinutes : 0) : null;
+
+    return { entry, exit, absentEvent, lateEvent, entryStatus, entryKey, exitStatus, exitKey, operational, alerts, source, lateMinutes, earlyExitMinutes, start, end };
+  }
+
+  async function fetchReportContext(period) {
+    const [profiles, sites, assignments, events] = await Promise.all([
+      store.listAllProfiles(),
+      store.listAllSites(),
+      store.listAllAssignments(),
+      store.listEventsRange(period.from, period.to)
+    ]);
+    return { profiles, sites, assignments, events };
+  }
+
+  function resolveCompleteOperationalPeriod(period, context) {
+    if (!period.isAll) return period;
+    const starts = [
+      ...context.assignments.map(a => a.valid_from || String(a.created_at || "").slice(0, 10)),
+      ...context.events.map(e => e.shift_date)
+    ];
+    const earliest = minISO(starts) || todayISO();
+    return { ...period, from: earliest, to: todayISO(), label: `${earliest}-al-${todayISO()}` };
+  }
+
+  function buildOperationalExportRows(period, context) {
+    const resolved = resolveCompleteOperationalPeriod(period, context);
+    const profilesById = new Map(context.profiles.map(item => [item.id, item]));
+    const sitesById = new Map(context.sites.map(item => [item.id, item]));
+    const eventsByShift = new Map();
+    const eventsByAssignmentDate = new Map();
+    context.events.forEach(event => {
+      if (!eventsByShift.has(event.shift_id)) eventsByShift.set(event.shift_id, []);
+      eventsByShift.get(event.shift_id).push(event);
+      if (event.assignment_id && event.shift_date) {
+        const key = `${event.assignment_id}__${event.shift_date}`;
+        if (!eventsByAssignmentDate.has(key)) eventsByAssignmentDate.set(key, []);
+        eventsByAssignmentDate.get(key).push(event);
+      }
+    });
+
+    const rows = [];
+    const matchedShiftIds = new Set();
+    const reportNow = new Date();
+
+    for (const assignment of context.assignments) {
+      let date = maxISO([resolved.from, assignment.valid_from || String(assignment.created_at || "").slice(0, 10)]) || resolved.from;
+      const assignmentEnd = assignmentHistoricalEnd(assignment);
+      const endDate = minISO([resolved.to, assignmentEnd]) || resolved.to;
+      if (!date || !endDate || date > endDate) continue;
+
+      while (date <= endDate) {
+        if (assignmentAppliesHistorically(assignment, date) && !assignmentSuppressedHistorically(assignment, date, context.assignments)) {
+          const shiftId = `${assignment.id}__${date}`;
+          const shift = {
+            id: shiftId,
+            shift_date: date,
+            assignment_id: assignment.id,
+            operator_id: assignment.operator_id,
+            site_id: assignment.site_id,
+            scheduled_start: assignment.scheduled_start,
+            scheduled_end: assignment.scheduled_end,
+            grace_minutes: assignment.grace_minutes ?? 10,
+            absence_after_minutes: assignment.absence_after_minutes ?? 30,
+            notes: assignment.notes || ""
+          };
+          const shiftEvents = eventsByShift.get(shiftId) || eventsByAssignmentDate.get(`${assignment.id}__${date}`) || [];
+          shiftEvents.forEach(e => matchedShiftIds.add(e.shift_id));
+          const evalResult = getHistoricalShiftEvaluation(shift, shiftEvents, reportNow);
+          const operator = profilesById.get(assignment.operator_id);
+          const site = sitesById.get(assignment.site_id);
+          const coveredOperator = assignment.covered_operator_id ? profilesById.get(assignment.covered_operator_id) : null;
+          const assignmentType = assignment.assignment_type || "fixed";
+          const notes = [assignment.notes, evalResult.absentEvent?.notes, evalResult.lateEvent?.notes, evalResult.entry?.notes, evalResult.exit?.notes].filter(Boolean).join(" | ");
+
+          rows.push({
+            "Fecha": date,
+            "Operario": operator?.full_name || assignment.operator_id || "",
+            "Servicio": site?.name || assignment.site_id || "",
+            "Tipo de trabajo": assignmentTypeLabel(assignmentType),
+            "Cubre a": coveredOperator?.full_name || "",
+            "Origen de tarea": assignmentType === "fixed" ? "Asignación fija" : "Tarea extraordinaria cargada por supervisor",
+            "Validación": "Validado",
+            "Dirección": site?.address || "",
+            "Horario programado": `${String(assignment.scheduled_start || "").slice(0, 5)} - ${String(assignment.scheduled_end || "").slice(0, 5)}`,
+            "Hora entrada": evalResult.entry ? formatClock(eventTimestamp(evalResult.entry)) : "",
+            "Estado entrada": evalResult.entryStatus,
+            "Minutos demora": evalResult.lateMinutes ?? "",
+            "Entrada dentro radio": eventInsideLabel(evalResult.entry),
+            "Distancia entrada (m)": evalResult.entry?.distance_m != null ? Math.round(Number(evalResult.entry.distance_m)) : "",
+            "Precisión entrada (m)": evalResult.entry?.gps_accuracy_m != null ? Math.round(Number(evalResult.entry.gps_accuracy_m)) : "",
+            "Lat entrada": evalResult.entry?.lat ?? "",
+            "Lng entrada": evalResult.entry?.lng ?? "",
+            "Hora salida": evalResult.exit ? formatClock(eventTimestamp(evalResult.exit)) : "",
+            "Estado salida": evalResult.exitStatus,
+            "Minutos salida anticipada": evalResult.earlyExitMinutes ?? "",
+            "Salida dentro radio": eventInsideLabel(evalResult.exit),
+            "Distancia salida (m)": evalResult.exit?.distance_m != null ? Math.round(Number(evalResult.exit.distance_m)) : "",
+            "Precisión salida (m)": evalResult.exit?.gps_accuracy_m != null ? Math.round(Number(evalResult.exit.gps_accuracy_m)) : "",
+            "Lat salida": evalResult.exit?.lat ?? "",
+            "Lng salida": evalResult.exit?.lng ?? "",
+            "Estado operativo": evalResult.operational,
+            "Alertas RRHH": evalResult.alerts.join(" | "),
+            "Origen del estado": evalResult.source,
+            "Observaciones": notes,
+            "Assignment ID": assignment.id,
+            "Shift ID": shiftId
+          });
+        }
+        date = addDaysISO(date, 1);
+      }
+    }
+
+    // No se pierden fichajes excepcionales que no puedan reconstruirse desde una asignación vigente/histórica.
+    const groupedUnmatched = new Map();
+    context.events.forEach(event => {
+      if (matchedShiftIds.has(event.shift_id)) return;
+      const key = event.shift_id || `${event.operator_id}_${event.shift_date}`;
+      if (!groupedUnmatched.has(key)) groupedUnmatched.set(key, []);
+      groupedUnmatched.get(key).push(event);
+    });
+    groupedUnmatched.forEach(events => {
+      const sample = events[0];
+      const entry = latestEventFromList(events, "present");
+      const exit = latestEventFromList(events, "checkout");
+      const operator = profilesById.get(sample.operator_id);
+      const site = sitesById.get(sample.site_id);
+      const alerts = [];
+      if (entry?.observed_status === "late") alerts.push("Llegada tarde");
+      if (entry?.is_inside_site === false) alerts.push("Entrada fuera de radio");
+      if (exit?.observed_status === "early_exit") alerts.push("Salida anticipada");
+      if (exit?.is_inside_site === false) alerts.push("Salida fuera de radio");
+      rows.push({
+        "Fecha": sample.shift_date || "",
+        "Operario": operator?.full_name || sample.operator_id || "",
+        "Servicio": site?.name || sample.site_id || "",
+        "Tipo de trabajo": workTypeLabel(entry?.work_type || sample.work_type || "regular"),
+        "Cubre a": "",
+        "Origen de tarea": (entry?.entry_source || sample.entry_source) === "operator_extra" ? "Declarado por operario" : "Marcación sin turno reconstruido",
+        "Validación": validationLabel(entry?.validation_status || sample.validation_status || "confirmed"),
+        "Dirección": site?.address || "",
+        "Horario programado": "No reconstruido",
+        "Hora entrada": entry ? formatClock(eventTimestamp(entry)) : "",
+        "Estado entrada": entry ? (entry.is_inside_site === false ? "Entrada fuera de radio" : entry.observed_status === "late" ? "Entrada tarde" : "Entrada registrada") : "Sin entrada",
+        "Minutos demora": "",
+        "Entrada dentro radio": eventInsideLabel(entry),
+        "Distancia entrada (m)": entry?.distance_m != null ? Math.round(Number(entry.distance_m)) : "",
+        "Precisión entrada (m)": entry?.gps_accuracy_m != null ? Math.round(Number(entry.gps_accuracy_m)) : "",
+        "Lat entrada": entry?.lat ?? "",
+        "Lng entrada": entry?.lng ?? "",
+        "Hora salida": exit ? formatClock(eventTimestamp(exit)) : "",
+        "Estado salida": exit ? (exit.is_inside_site === false ? "Salida fuera de radio" : exit.observed_status === "early_exit" ? "Salida anticipada" : "Salida registrada") : "",
+        "Minutos salida anticipada": "",
+        "Salida dentro radio": eventInsideLabel(exit),
+        "Distancia salida (m)": exit?.distance_m != null ? Math.round(Number(exit.distance_m)) : "",
+        "Precisión salida (m)": exit?.gps_accuracy_m != null ? Math.round(Number(exit.gps_accuracy_m)) : "",
+        "Lat salida": exit?.lat ?? "",
+        "Lng salida": exit?.lng ?? "",
+        "Estado operativo": entry ? (exit ? "Jornada con fichajes" : "En servicio / sin salida") : eventTypeLabel(sample.event_type),
+        "Alertas RRHH": alerts.join(" | "),
+        "Origen del estado": "Marcación sin turno reconstruido",
+        "Observaciones": events.map(e => e.notes).filter(Boolean).join(" | "),
+        "Assignment ID": sample.assignment_id || "",
+        "Shift ID": sample.shift_id || ""
+      });
+    });
+
+    rows.sort((a, b) => `${a.Fecha}|${a.Operario}|${a.Servicio}`.localeCompare(`${b.Fecha}|${b.Operario}|${b.Servicio}`));
+    return { rows, period: resolved };
+  }
+
+  function operationalSummaryByOperator(rows) {
+    const map = new Map();
+    rows.forEach(row => {
+      const key = row.Operario || "Sin identificar";
+      if (!map.has(key)) map.set(key, { "Operario": key, "Coberturas": 0, "Ingresos correctos": 0, "Llegadas tarde": 0, "Fuera de radio": 0, "Ausencias / sin entrada": 0, "Ausencias registradas": 0, "Sin entrada inferido": 0, "Salidas anticipadas": 0, "Salidas no registradas": 0 });
+      const item = map.get(key);
+      item["Coberturas"]++;
+      if (row["Estado entrada"] === "Entrada correcta") item["Ingresos correctos"]++;
+      if (String(row["Estado entrada"]).includes("tarde") || String(row["Alertas RRHH"]).includes("Llegada tarde")) item["Llegadas tarde"]++;
+      if (String(row["Alertas RRHH"]).includes("fuera de radio")) item["Fuera de radio"]++;
+      if (String(row["Alertas RRHH"]).includes("Ausencia / sin entrada")) item["Ausencias / sin entrada"]++;
+      if (row["Origen del estado"] === "Ausencia registrada") item["Ausencias registradas"]++;
+      if (row["Origen del estado"] === "Inferido por programación") item["Sin entrada inferido"]++;
+      if (String(row["Alertas RRHH"]).includes("Salida anticipada")) item["Salidas anticipadas"]++;
+      if (String(row["Alertas RRHH"]).includes("Salida no registrada")) item["Salidas no registradas"]++;
+    });
+    return Array.from(map.values()).sort((a, b) => a.Operario.localeCompare(b.Operario));
+  }
+
+  function operationalSummaryByDate(rows) {
+    const map = new Map();
+    rows.forEach(row => {
+      const key = row.Fecha || "Sin fecha";
+      if (!map.has(key)) map.set(key, { "Fecha": key, "Coberturas": 0, "Ingresos correctos": 0, "Llegadas tarde": 0, "Fuera de radio": 0, "Ausencias / sin entrada": 0, "Ausencias registradas": 0, "Sin entrada inferido": 0, "Alertas de salida": 0 });
+      const item = map.get(key);
+      item["Coberturas"]++;
+      if (row["Estado entrada"] === "Entrada correcta") item["Ingresos correctos"]++;
+      if (String(row["Alertas RRHH"]).includes("Llegada tarde")) item["Llegadas tarde"]++;
+      if (String(row["Alertas RRHH"]).includes("fuera de radio")) item["Fuera de radio"]++;
+      if (String(row["Alertas RRHH"]).includes("Ausencia / sin entrada")) item["Ausencias / sin entrada"]++;
+      if (row["Origen del estado"] === "Ausencia registrada") item["Ausencias registradas"]++;
+      if (row["Origen del estado"] === "Inferido por programación") item["Sin entrada inferido"]++;
+      if (/Salida anticipada|Salida no registrada|Salida fuera de radio/.test(String(row["Alertas RRHH"]))) item["Alertas de salida"]++;
+    });
+    return Array.from(map.values()).sort((a, b) => a.Fecha.localeCompare(b.Fecha));
+  }
+
+  async function getOperationalExportData() {
+    const requested = resolvePeriod("live");
+    const context = await fetchReportContext(requested);
+    return buildOperationalExportRows(requested, context);
+  }
+
+  async function exportLiveCsv() {
+    const button = $("#exportLiveCsvBtn");
+    await withExportButton(button, "Generando...", async () => {
+      const { rows, period } = await getOperationalExportData();
+      const headers = rows.length ? Object.keys(rows[0]) : ["Fecha", "Operario", "Servicio", "Estado operativo", "Alertas RRHH"];
+      downloadCsvObjects(rows, headers, `estado-operativo-cleanit-${period.label}.csv`);
+      toast(`${rows.length} cobertura${rows.length === 1 ? "" : "s"} exportada${rows.length === 1 ? "" : "s"} a CSV.`, "success");
+    });
+  }
+
+  async function exportLiveExcel() {
+    const button = $("#exportLiveExcelBtn");
+    await withExportButton(button, "Generando...", async () => {
+      if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+      const { rows, period } = await getOperationalExportData();
+      const wb = window.XLSX.utils.book_new();
+      const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Sin datos": "No hay coberturas o registros en el período seleccionado." }]);
+      applyWorksheetUsability(ws, [12, 28, 30, 34, 19, 13, 27, 15, 18, 20, 20, 14, 14, 13, 28, 23, 18, 20, 20, 14, 14, 38, 40, 28, 38, 38, 42]);
+      window.XLSX.utils.book_append_sheet(wb, ws, "Estado operativo");
+
+      const byOperator = operationalSummaryByOperator(rows);
+      const wsOperators = window.XLSX.utils.json_to_sheet(byOperator.length ? byOperator : [{ "Operario": "Sin datos" }]);
+      applyWorksheetUsability(wsOperators, [28, 13, 18, 16, 16, 22, 20, 20, 20, 23]);
+      window.XLSX.utils.book_append_sheet(wb, wsOperators, "Resumen por operario");
+
+      const byDate = operationalSummaryByDate(rows);
+      const wsDates = window.XLSX.utils.json_to_sheet(byDate.length ? byDate : [{ "Fecha": "Sin datos" }]);
+      applyWorksheetUsability(wsDates, [14, 13, 18, 16, 16, 22, 20, 20, 18]);
+      window.XLSX.utils.book_append_sheet(wb, wsDates, "Resumen por día");
+
+      window.XLSX.writeFile(wb, `estado-operativo-cleanit-${period.label}.xlsx`);
+      toast(`${rows.length} cobertura${rows.length === 1 ? "" : "s"} exportada${rows.length === 1 ? "" : "s"} a Excel.`, "success");
+    });
+  }
+
+  function recordExportObject(event, profiles = state.profiles, sites = state.sites) {
+    const op = byId(profiles, event.operator_id);
+    const site = byId(sites, event.site_id);
+    return {
+      "Fecha y hora": eventTimestamp(event) || event.created_at || "",
+      "Fecha servicio": event.shift_date || "",
+      "Operario": op?.full_name || event.operator_id || "",
+      "Servicio": site?.name || event.site_id || "",
+      "Dirección": site?.address || "",
+      "Tipo de trabajo": workTypeLabel(event.work_type || "regular"),
+      "Origen de tarea": event.entry_source === "operator_extra" ? "Declarado por operario" : "Asignación",
+      "Validación": validationLabel(event.validation_status || "confirmed"),
+      "Tipo": event.event_type || "",
+      "Tipo legible": eventTypeLabel(event.event_type),
+      "Estado": event.observed_status || "",
+      "Estado legible": observedStatusLabel(event.observed_status),
+      "Lat": event.lat ?? "",
+      "Lng": event.lng ?? "",
+      "Precisión (m)": event.gps_accuracy_m ?? "",
+      "Distancia (m)": event.distance_m ?? "",
+      "Dentro radio": event.is_inside_site === true ? "Sí" : event.is_inside_site === false ? "No" : "",
+      "Observación": event.notes || "",
+      "Assignment ID": event.assignment_id || "",
+      "Shift ID": event.shift_id || ""
+    };
+  }
+
+  async function fetchRecordsForSelectedPeriod() {
+    const period = resolvePeriod("records");
+    const [events, profiles, sites] = await Promise.all([
+      store.listEventsRange(period.from, period.to),
+      store.listAllProfiles(),
+      store.listAllSites()
+    ]);
+    return { period, events, profiles, sites };
+  }
+
+  async function loadRecordsPeriod() {
+    const button = $("#applyRecordsBtn");
+    await withExportButton(button, "Cargando...", async () => {
+      const result = await fetchRecordsForSelectedPeriod();
+      state.recordsEvents = result.events;
+      state.recordsProfiles = result.profiles;
+      state.recordsSites = result.sites;
+      state.recordsLoaded = true;
+      renderRecords();
+    });
+  }
+
+  async function exportRecordsExcel() {
+    const button = $("#exportRecordsExcelBtn");
+    await withExportButton(button, "Generando...", async () => {
+      if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+      const { period, events, profiles, sites } = await fetchRecordsForSelectedPeriod();
+      const rows = events.map(event => recordExportObject(event, profiles, sites));
+      const wb = window.XLSX.utils.book_new();
+      const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Sin datos": "No hay marcaciones en el período seleccionado." }]);
+      applyWorksheetUsability(ws, [22, 14, 28, 30, 34, 14, 16, 16, 18, 14, 14, 15, 15, 15, 38, 38, 42]);
+      window.XLSX.utils.book_append_sheet(wb, ws, "Marcaciones");
+      window.XLSX.writeFile(wb, `marcaciones-cleanit-${period.label}.xlsx`);
+      toast(`${rows.length} marcación${rows.length === 1 ? "" : "es"} exportada${rows.length === 1 ? "" : "s"} a Excel.`, "success");
+    });
+  }
+
   function renderRecords() {
-    const rows = state.events.map(event => {
-      const op = byId(state.profiles, event.operator_id);
-      const site = byId(state.sites, event.site_id);
+    const events = state.recordsLoaded ? state.recordsEvents : state.events;
+    const displayLimit = 1000;
+    const displayEvents = events.slice(0, displayLimit);
+    const profileSource = state.recordsLoaded ? state.recordsProfiles : state.profiles;
+    const siteSource = state.recordsLoaded ? state.recordsSites : state.sites;
+    const rows = displayEvents.map(event => {
+      const op = byId(profileSource, event.operator_id);
+      const site = byId(siteSource, event.site_id);
       return `
         <tr>
-          <td>${formatDateTime(event.created_at)}</td>
+          <td>${formatDateTime(eventTimestamp(event) || event.created_at)}</td>
           <td>${escapeHtml(event.shift_date || "—")}</td>
           <td>${escapeHtml(op?.full_name || event.operator_id || "—")}</td>
           <td>${escapeHtml(site?.name || event.site_id || "—")}</td>
+          <td>${escapeHtml(workTypeLabel(event.work_type || "regular"))}${event.entry_source === "operator_extra" ? `<br><span class="muted small">Declarado por operario · ${escapeHtml(validationLabel(event.validation_status || "pending"))}</span>` : ""}</td>
           <td><strong>${escapeHtml(eventTypeLabel(event.event_type))}</strong><br><span class="muted small">${escapeHtml(observedStatusLabel(event.observed_status))}</span></td>
-          <td>${event.lat ? `${Number(event.lat).toFixed(6)}, ${Number(event.lng).toFixed(6)}` : "—"}</td>
-          <td>${event.gps_accuracy_m ? `${Math.round(event.gps_accuracy_m)} m` : "—"}</td>
-          <td>${event.distance_m ? `${Math.round(event.distance_m)} m` : "—"}</td>
+          <td>${event.lat != null ? `${Number(event.lat).toFixed(6)}, ${Number(event.lng).toFixed(6)}` : "—"}</td>
+          <td>${event.gps_accuracy_m != null ? `${Math.round(Number(event.gps_accuracy_m))} m` : "—"}</td>
+          <td>${event.distance_m != null ? `${Math.round(Number(event.distance_m))} m` : "—"}</td>
           <td>${event.is_inside_site === true ? "Sí" : event.is_inside_site === false ? "No" : "—"}</td>
           <td>${escapeHtml(event.notes || "")}</td>
         </tr>`;
@@ -1787,43 +2907,55 @@
 
     $("#recordsTable").innerHTML = `
       <table>
-        <thead><tr><th>Hora registro</th><th>Fecha servicio</th><th>Operario</th><th>Servicio</th><th>Tipo</th><th>GPS</th><th>Precisión</th><th>Distancia</th><th>Dentro radio</th><th>Obs.</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="10">Todavía no hay marcaciones.</td></tr>`}</tbody>
+        <thead><tr><th>Hora registro</th><th>Fecha servicio</th><th>Operario</th><th>Servicio</th><th>Tipo de trabajo</th><th>Marcación</th><th>GPS</th><th>Precisión</th><th>Distancia</th><th>Dentro radio</th><th>Obs.</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="11">No hay marcaciones para el período seleccionado.</td></tr>`}</tbody>
       </table>`;
+
+    const summary = $("#recordsRangeSummary");
+    if (summary) {
+      let label = "registros cargados";
+      try {
+        const period = resolvePeriod("records");
+        label = period.isAll ? "historial completo" : period.from === period.to ? formatOperationalDate(period.from) : `${formatOperationalDate(period.from)} al ${formatOperationalDate(period.to)}`;
+      } catch (_) { /* conserva etiqueta genérica */ }
+      const displayNote = events.length > displayLimit ? ` · mostrando ${displayLimit} en pantalla; la exportación incluye las ${events.length}` : "";
+      summary.textContent = `${events.length} marcación${events.length === 1 ? "" : "es"} · ${label}${displayNote}`;
+    }
   }
 
-  function exportCsv() {
-    const header = ["fecha_hora", "fecha_servicio", "operario", "servicio", "tipo", "tipo_legible", "estado", "estado_legible", "lat", "lng", "precision_m", "distancia_m", "dentro_radio", "observacion", "assignment_id", "shift_id"];
-    const lines = state.events.map(event => {
-      const op = byId(state.profiles, event.operator_id);
-      const site = byId(state.sites, event.site_id);
-      const values = [
-        event.created_at,
-        event.shift_date || "",
-        op?.full_name || event.operator_id || "",
-        site?.name || event.site_id || "",
-        event.event_type || "",
-        eventTypeLabel(event.event_type),
-        event.observed_status || "",
-        observedStatusLabel(event.observed_status),
-        event.lat || "",
-        event.lng || "",
-        event.gps_accuracy_m || "",
-        event.distance_m || "",
-        event.is_inside_site === true ? "si" : event.is_inside_site === false ? "no" : "",
-        event.notes || "",
-        event.assignment_id || "",
-        event.shift_id || ""
-      ];
-      return values.map(value => `"${String(value).replace(/"/g, '""')}"`).join(",");
+  async function exportCsv() {
+    const button = $("#exportCsvBtn");
+    await withExportButton(button, "Generando...", async () => {
+      const { period, events, profiles, sites } = await fetchRecordsForSelectedPeriod();
+      const headers = ["fecha_hora", "fecha_servicio", "operario", "servicio", "tipo", "tipo_legible", "estado", "estado_legible", "lat", "lng", "precision_m", "distancia_m", "dentro_radio", "observacion", "assignment_id", "shift_id", "tipo_trabajo", "origen_tarea", "validacion"];
+      const rows = events.map(event => {
+        const op = byId(profiles, event.operator_id);
+        const site = byId(sites, event.site_id);
+        return {
+          fecha_hora: event.created_at || "",
+          fecha_servicio: event.shift_date || "",
+          operario: op?.full_name || event.operator_id || "",
+          servicio: site?.name || event.site_id || "",
+          tipo_trabajo: workTypeLabel(event.work_type || "regular"),
+          origen_tarea: event.entry_source === "operator_extra" ? "Declarado por operario" : "Asignación",
+          validacion: validationLabel(event.validation_status || "confirmed"),
+          tipo: event.event_type || "",
+          tipo_legible: eventTypeLabel(event.event_type),
+          estado: event.observed_status || "",
+          estado_legible: observedStatusLabel(event.observed_status),
+          lat: event.lat ?? "",
+          lng: event.lng ?? "",
+          precision_m: event.gps_accuracy_m ?? "",
+          distancia_m: event.distance_m ?? "",
+          dentro_radio: event.is_inside_site === true ? "si" : event.is_inside_site === false ? "no" : "",
+          observacion: event.notes || "",
+          assignment_id: event.assignment_id || "",
+          shift_id: event.shift_id || ""
+        };
+      });
+      downloadCsvObjects(rows, headers, `presentismo-cleanit-${period.label}.csv`);
+      toast(`${rows.length} marcación${rows.length === 1 ? "" : "es"} exportada${rows.length === 1 ? "" : "s"} a CSV.`, "success");
     });
-    const blob = new Blob([[header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `presentismo-cleanit-${todayISO()}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
   }
 
   function bindEvents() {
@@ -1840,10 +2972,20 @@
     $("#forgotPasswordForm").addEventListener("submit", handleForgotPassword);
     $("#resetPasswordForm").addEventListener("submit", handleResetPassword);
     $("#operatorLogoutBtn").addEventListener("click", logout);
+    $("#refreshOperatorBtn")?.addEventListener("click", () => renderOperatorView().catch(error => toast(error.message || "No se pudieron actualizar los servicios.")));
     $("#supervisorLogoutBtn").addEventListener("click", logout);
-    $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => renderTab(btn.dataset.tab)));
+    $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => {
+      renderTab(btn.dataset.tab);
+      if (btn.dataset.tab === "records") loadRecordsPeriod().catch(error => toast(error.message || "No se pudieron cargar los registros."));
+    }));
     $("#refreshDashboardBtn").addEventListener("click", renderSupervisorView);
-    $("#dashboardDate").addEventListener("change", renderSupervisorView);
+    $("#dashboardDate").addEventListener("change", async () => {
+      syncPeriodControls("live", false);
+      await renderSupervisorView();
+    });
+    $("#liveExportPeriod").addEventListener("change", () => syncPeriodControls("live", false));
+    $("#exportLiveCsvBtn").addEventListener("click", () => exportLiveCsv().catch(error => toast(error.message || "No se pudo exportar el estado operativo.")));
+    $("#exportLiveExcelBtn").addEventListener("click", () => exportLiveExcel().catch(error => toast(error.message || "No se pudo exportar el estado operativo.")));
     $("#kpiGrid").addEventListener("click", (event) => {
       const button = event.target.closest("[data-kpi-detail]");
       if (button) openQuickDetail(button.dataset.kpiDetail);
@@ -1855,8 +2997,10 @@
       renderDashboard();
     });
     $("#liveTable").addEventListener("click", (event) => {
-      const button = event.target.closest("[data-map-event]");
-      if (button) openAttendanceMap(button.dataset.mapEvent);
+      const mapButton = event.target.closest("[data-map-event]");
+      if (mapButton) return openAttendanceMap(mapButton.dataset.mapEvent);
+      const validationButton = event.target.closest("[data-extra-validation]");
+      if (validationButton) updateExtraValidation(validationButton.dataset.extraShift, validationButton.dataset.extraValidation).catch(error => toast(error.message || "No se pudo validar el registro."));
     });
     $("#quickDetailBody").addEventListener("click", (event) => {
       const button = event.target.closest("[data-map-event]");
@@ -1882,6 +3026,18 @@
       await renderSupervisorView();
     });
     $("#cancelSiteEditBtn").addEventListener("click", resetSiteForm);
+    $("#selectAllSitesBtn").addEventListener("click", () => {
+      state.bulkSelectedSiteIds = new Set(state.sites.map(site => site.id));
+      renderSites();
+    });
+    $("#clearSelectedSitesBtn").addEventListener("click", () => {
+      state.bulkSelectedSiteIds.clear();
+      renderSites();
+    });
+    $("#bulkSiteScope").addEventListener("change", updateBulkSelectionSummaries);
+    $("#applyBulkSitesBtn").addEventListener("click", () => applyBulkSiteRadius().catch(error => toast(error.message || "No se pudo actualizar el radio GPS.")));
+
+    $("#extraAssignmentForm")?.addEventListener("submit", (event) => saveExtraAssignment(event).catch(error => toast(error.message || "No se pudo crear la tarea extraordinaria.")));
 
     $("#assignmentForm").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -1902,6 +3058,16 @@
     $("#presetAllDaysBtn").addEventListener("click", applyAllDaysPreset);
     $("#copyFirstScheduleBtn").addEventListener("click", copyFirstScheduleToActiveDays);
     $("#clearScheduleBtn").addEventListener("click", clearAssignmentSchedule);
+    $("#selectAllAssignmentsBtn").addEventListener("click", () => {
+      state.bulkSelectedAssignmentIds = new Set(state.assignments.map(assignment => assignment.id));
+      renderAssignments();
+    });
+    $("#clearSelectedAssignmentsBtn").addEventListener("click", () => {
+      state.bulkSelectedAssignmentIds.clear();
+      renderAssignments();
+    });
+    $("#bulkAssignmentScope").addEventListener("change", updateBulkSelectionSummaries);
+    $("#applyBulkAssignmentsBtn").addEventListener("click", () => applyBulkAssignmentSettings().catch(error => toast(error.message || "No se pudieron actualizar las tolerancias.")));
 
     $("#userForm").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -1922,7 +3088,14 @@
     });
     $("#userRole").addEventListener("change", syncUserFormFields);
     $("#cancelUserEditBtn").addEventListener("click", resetUserForm);
-    $("#exportCsvBtn").addEventListener("click", exportCsv);
+    $("#recordsPeriod").addEventListener("change", () => {
+      syncPeriodControls("records", false);
+      state.recordsLoaded = false;
+      if (state.activeTab === "records") loadRecordsPeriod().catch(error => toast(error.message || "No se pudieron cargar los registros."));
+    });
+    $("#applyRecordsBtn").addEventListener("click", () => loadRecordsPeriod().catch(error => toast(error.message || "No se pudieron cargar los registros.")));
+    $("#exportCsvBtn").addEventListener("click", () => exportCsv().catch(error => toast(error.message || "No se pudo exportar el CSV.")));
+    $("#exportRecordsExcelBtn").addEventListener("click", () => exportRecordsExcel().catch(error => toast(error.message || "No se pudo exportar el Excel.")));
 
     const firstDay = new Date();
     firstDay.setDate(1);
@@ -1938,6 +3111,9 @@
     renderAssignmentSchedule();
     $("#dashboardDate").value = todayISO();
     $("#assignmentValidFrom").value = todayISO();
+    if ($("#extraAssignmentDate")) $("#extraAssignmentDate").value = todayISO();
+    syncPeriodControls("live", false);
+    syncPeriodControls("records", false);
     bindEvents();
 
     store.onAuthStateChange((event, session) => {
