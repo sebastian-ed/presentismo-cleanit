@@ -289,6 +289,62 @@ input:focus, select:focus, textarea:focus { border-color: var(--primary); box-sh
 .summary-card .kpi-label { margin-top: 6px; color: var(--muted); font-weight: 800; font-size: .8rem; }
 .card-title-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
 .card-title-row h3 { margin: 0; }
+.live-status-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 12px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #f8fafc;
+}
+.live-filter-label {
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 900;
+}
+.status-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 7px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink);
+  font-size: .78rem;
+  font-weight: 850;
+  white-space: nowrap;
+  transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease;
+}
+.status-filter-btn:hover { transform: translateY(-1px); box-shadow: 0 5px 14px rgba(15,23,42,.08); }
+.status-filter-btn.active {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+  box-shadow: 0 6px 16px rgba(15,23,42,.16);
+}
+.filter-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 23px;
+  height: 23px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #334155;
+  font-size: .72rem;
+}
+.status-filter-btn.active .filter-count { background: rgba(255,255,255,.18); color: #fff; }
+.filter-dot { width: 8px; height: 8px; border-radius: 999px; background: #64748b; flex: 0 0 auto; }
+.tone-present .filter-dot { background: #16a34a; }
+.tone-late .filter-dot, .tone-pending .filter-dot { background: #d97706; }
+.tone-outside .filter-dot, .tone-absent .filter-dot, .tone-alert .filter-dot { background: #dc2626; }
+.tone-exit .filter-dot { background: #7c3aed; }
 .responsive-table { width: 100%; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; min-width: 760px; }
 th, td { text-align: left; padding: 12px 10px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: .9rem; }

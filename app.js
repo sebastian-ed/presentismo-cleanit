@@ -23,6 +23,7 @@
     shifts: [],
     events: [],
     dashboardRows: [],
+    liveStatusFilter: "all",
     activeTab: "live"
   };
 
@@ -148,7 +149,13 @@
     if (!entryEvent) return { key: "not_started", label: "Sin entrada", className: "status-pending" };
 
     const minutesAfterEnd = diffMinutes(at, end);
-    if (minutesAfterEnd < 0) return { key: "in_service", label: "En servicio", className: "status-ok" };
+    if (minutesAfterEnd < 0) {
+      // Mientras el operario sigue trabajando, la columna Salida también conserva
+      // visualmente una anomalía de ingreso para evitar que un azul "normal" la oculte.
+      if (entryEvent.is_inside_site === false) return { key: "in_service_outside", label: "En servicio", className: "status-outside" };
+      if (entryEvent.observed_status === "late") return { key: "in_service_late", label: "En servicio", className: "status-late" };
+      return { key: "in_service", label: "En servicio", className: "status-ok" };
+    }
     if (minutesAfterEnd <= grace) return { key: "exit_due", label: "Debe registrar salida", className: "status-late" };
     return { key: "missing_exit", label: "Salida no registrada", className: "status-absent" };
   }
@@ -161,7 +168,11 @@
     const exitStatus = getExitStatus(shift, entryEvent, exitEvent, at);
 
     if (["completed", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(exitStatus.key)) return exitStatus;
-    if (entryEvent && exitStatus.key === "in_service") return { key: "in_service", label: "En servicio", className: "status-present" };
+    if (entryEvent && ["in_service", "in_service_outside", "in_service_late"].includes(exitStatus.key)) {
+      if (entryStatus.key === "outside") return { key: "in_service_outside", label: "En servicio · fuera de radio", className: "status-outside" };
+      if (entryStatus.key === "late") return { key: "in_service_late", label: "En servicio · entrada tarde", className: "status-late" };
+      return { key: "in_service", label: "En servicio", className: "status-present" };
+    }
     return entryStatus;
   }
 
@@ -936,6 +947,43 @@
     });
   }
 
+  function liveStatusFilterDefinitions(rows) {
+    const exitAlertKeys = ["early_exit", "exit_outside", "missing_exit", "exit_due"];
+    const definitions = [
+      { key: "all", label: "Todos", tone: "neutral", matches: () => true },
+      { key: "alerts", label: "Con alerta", tone: "alert", matches: row => hasOperationalAlert(row) },
+      { key: "on_time", label: "En horario", tone: "present", matches: row => row.entryStatus.key === "present" },
+      { key: "late", label: "Llegada tarde", tone: "late", matches: row => row.entryStatus.key === "late" || row.entryEvent?.observed_status === "late" },
+      { key: "outside", label: "Fuera de radio", tone: "outside", matches: row => row.entryStatus.key === "outside" },
+      { key: "absent", label: "Ausentes", tone: "absent", matches: row => row.entryStatus.key === "absent" },
+      { key: "pending", label: "Pendientes", tone: "pending", matches: row => ["scheduled", "on_window"].includes(row.entryStatus.key) },
+      { key: "exit_alert", label: "Alertas de salida", tone: "exit", matches: row => exitAlertKeys.includes(row.exitStatus.key) }
+    ];
+    return definitions.map(def => ({ ...def, count: rows.filter(def.matches).length }));
+  }
+
+  function renderLiveStatusFilters(rows) {
+    const container = $("#liveStatusFilters");
+    if (!container) return;
+    const definitions = liveStatusFilterDefinitions(rows);
+    if (!definitions.some(def => def.key === state.liveStatusFilter)) state.liveStatusFilter = "all";
+    container.innerHTML = `
+      <span class="live-filter-label">Filtrar:</span>
+      ${definitions.map(def => `
+        <button class="status-filter-btn tone-${def.tone} ${state.liveStatusFilter === def.key ? "active" : ""}"
+          type="button" data-live-filter="${def.key}" aria-pressed="${state.liveStatusFilter === def.key ? "true" : "false"}">
+          <span class="filter-dot" aria-hidden="true"></span>
+          <span>${escapeHtml(def.label)}</span>
+          <strong class="filter-count">${def.count}</strong>
+        </button>`).join("")}
+    `;
+  }
+
+  function filteredDashboardRows(rows) {
+    const definition = liveStatusFilterDefinitions(rows).find(def => def.key === state.liveStatusFilter);
+    return definition ? rows.filter(definition.matches) : rows;
+  }
+
   function renderDashboard() {
     const rows = getDashboardRows();
     state.dashboardRows = rows;
@@ -955,7 +1003,10 @@
       ${kpi("Alertas operativas", counts.alerts, counts.alerts ? "status-late" : "status-present", "alerts")}
     `;
 
-    const tableRows = rows.map(row => {
+    renderLiveStatusFilters(rows);
+    const visibleRows = filteredDashboardRows(rows);
+
+    const tableRows = visibleRows.map(row => {
       const { shift, entryEvent, exitEvent, entryStatus, exitStatus, status, lastEvent } = row;
       const operator = byId(state.profiles, shift.operator_id);
       const site = byId(state.sites, shift.site_id);
@@ -986,7 +1037,7 @@
         <thead>
           <tr><th>Operario</th><th>Servicio</th><th>Horario</th><th>Entrada</th><th>Salida</th><th>Estado operativo</th><th>Acción</th></tr>
         </thead>
-        <tbody>${tableRows || `<tr><td colspan="7">No hay cobertura programada para esta fecha.</td></tr>`}</tbody>
+        <tbody>${tableRows || `<tr><td colspan="7">${rows.length ? "No hay personas que coincidan con este filtro." : "No hay cobertura programada para esta fecha."}</td></tr>`}</tbody>
       </table>`;
     $("#lastRefreshLabel").textContent = `Actualizado ${new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })}`;
   }
@@ -1796,6 +1847,12 @@
     $("#kpiGrid").addEventListener("click", (event) => {
       const button = event.target.closest("[data-kpi-detail]");
       if (button) openQuickDetail(button.dataset.kpiDetail);
+    });
+    $("#liveStatusFilters").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-live-filter]");
+      if (!button) return;
+      state.liveStatusFilter = button.dataset.liveFilter || "all";
+      renderDashboard();
     });
     $("#liveTable").addEventListener("click", (event) => {
       const button = event.target.closest("[data-map-event]");
