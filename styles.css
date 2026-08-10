@@ -1150,3 +1150,95 @@ body.modal-open { overflow: hidden; }
   .context-search-result { min-width: 0; text-align: left; }
 }
 #liveTable, #analyticsSummaryTable, #fichajeTable, #coverageGrid, #assignmentsList, #sitesList, #usersList, #recordsTable { scroll-margin-top: 110px; }
+
+/* Control de asignaciones contra Excel · 2026-08-10 */
+.assignment-audit-card { overflow: visible; }
+.assignment-audit-toolbar {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.4fr) minmax(170px, .7fr) auto auto;
+  gap: 12px;
+  align-items: end;
+  margin-top: 14px;
+}
+.assignment-audit-toolbar label { min-width: 0; }
+.assignment-audit-file-field input[type="file"] {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  font: inherit;
+}
+.assignment-audit-file-info { margin-top: 10px; min-height: 18px; }
+.assignment-audit-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 16px 0 12px;
+}
+.assignment-audit-kpi {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: #f8fafc;
+}
+.assignment-audit-kpi strong { display: block; font-size: 1.45rem; line-height: 1; color: #0f172a; }
+.assignment-audit-kpi span { display: block; margin-top: 5px; font-size: .76rem; font-weight: 800; color: #64748b; }
+.assignment-audit-kpi.audit-ok { background: #f0fdf4; border-color: #bbf7d0; }
+.assignment-audit-kpi.audit-alert { background: #fff7ed; border-color: #fed7aa; }
+.assignment-audit-kpi.audit-block { background: #fef2f2; border-color: #fecaca; }
+.assignment-audit-controls {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.assignment-audit-actions { flex-wrap: wrap; }
+.assignment-audit-table { margin-top: 10px; }
+.assignment-audit-table table { min-width: 1180px; }
+.assignment-audit-table th, .assignment-audit-table td { vertical-align: top; }
+.assignment-audit-table .audit-col-select { width: 48px; text-align: center; }
+.assignment-audit-table .audit-col-status { min-width: 155px; }
+.assignment-audit-table .audit-col-service { min-width: 210px; }
+.assignment-audit-table .audit-col-day { min-width: 95px; }
+.assignment-audit-table .audit-col-plan { min-width: 220px; }
+.assignment-audit-table .audit-col-app { min-width: 220px; }
+.assignment-audit-table .audit-col-detail { min-width: 260px; }
+.audit-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  font-size: .72rem;
+  font-weight: 900;
+  white-space: nowrap;
+}
+.audit-status-ok { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
+.audit-status-warning { background: #ffedd5; color: #9a3412; border: 1px solid #fed7aa; }
+.audit-status-blocked { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
+.audit-status-info { background: #e0f2fe; color: #075985; border: 1px solid #bae6fd; }
+.audit-plan-line, .audit-app-line { display: grid; gap: 2px; }
+.audit-plan-line strong, .audit-app-line strong { color: #0f172a; }
+.audit-difference-row > td { background: #fffaf4; }
+.audit-blocked-row > td { background: #fff5f5; }
+.audit-ok-row > td { background: #fbfffc; }
+.assignment-audit-note { margin-top: 10px; }
+.audit-inline-action { margin-top: 6px; }
+.audit-unresolved { color: #b91c1c; font-weight: 800; }
+.audit-muted-line { color: #64748b; font-size: .76rem; }
+.audit-checkbox { width: 17px; height: 17px; accent-color: #0f172a; }
+
+@media (max-width: 980px) {
+  .assignment-audit-toolbar { grid-template-columns: 1fr 1fr; }
+  .assignment-audit-toolbar .primary-btn,
+  .assignment-audit-toolbar .ghost-btn { width: 100%; }
+  .assignment-audit-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 620px) {
+  .assignment-audit-toolbar { grid-template-columns: 1fr; }
+  .assignment-audit-kpis { grid-template-columns: 1fr 1fr; }
+}

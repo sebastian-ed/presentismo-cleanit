@@ -315,6 +315,47 @@
         </section>
 
         <section id="assignmentsTab" class="tab-panel">
+          <div class="data-card assignment-audit-card">
+            <div class="card-title-row">
+              <div>
+                <h3>Controlar asignaciones contra Excel</h3>
+                <p class="muted small no-margin">Subí el Excel del planificador. La app compara servicio, operario, día y horario contra las asignaciones fijas vigentes y marca coincidencias, diferencias y bloqueos.</p>
+              </div>
+            </div>
+            <div class="assignment-audit-toolbar">
+              <label class="assignment-audit-file-field">
+                <span>Archivo Excel</span>
+                <input id="assignmentAuditFile" type="file" accept=".xlsx,.xls" />
+              </label>
+              <label>
+                <span>Comparar / aplicar desde</span>
+                <input id="assignmentAuditEffectiveDate" type="date" />
+              </label>
+              <button class="primary-btn" id="analyzeAssignmentsExcelBtn" type="button">Analizar Excel</button>
+              <button class="ghost-btn" id="clearAssignmentsExcelBtn" type="button">Limpiar análisis</button>
+            </div>
+            <div id="assignmentAuditFileInfo" class="muted small assignment-audit-file-info">Todavía no cargaste un archivo.</div>
+            <div id="assignmentAuditPanel" class="hidden">
+              <div id="assignmentAuditKpis" class="assignment-audit-kpis"></div>
+              <div class="assignment-audit-controls">
+                <div id="assignmentAuditFilters" class="status-filter-row">
+                  <button class="status-filter-btn active" data-audit-filter="alerts" type="button">Solo alertas</button>
+                  <button class="status-filter-btn" data-audit-filter="ok" type="button">Coinciden</button>
+                  <button class="status-filter-btn" data-audit-filter="all" type="button">Todos</button>
+                </div>
+                <div class="selection-actions assignment-audit-actions">
+                  <button class="secondary-btn small-btn" id="selectAuditAlertsBtn" type="button">Seleccionar diferencias</button>
+                  <button class="ghost-btn small-btn" id="clearAuditSelectionBtn" type="button">Limpiar selección</button>
+                  <button class="secondary-btn small-btn" id="applySelectedAuditBtn" type="button">Corregir seleccionadas</button>
+                  <button class="primary-btn small-btn" id="applyAllAuditBtn" type="button">Corregir todas las diferencias</button>
+                </div>
+              </div>
+              <p id="assignmentAuditSelectionSummary" class="muted small no-margin"></p>
+              <div id="assignmentAuditTable" class="responsive-table assignment-audit-table"></div>
+              <p class="muted small assignment-audit-note">Al corregir una diferencia se sincroniza el <strong>servicio + día completo</strong> desde la fecha indicada. Las coberturas y refuerzos extraordinarios no se tocan. El historial anterior a esa fecha se conserva.</p>
+            </div>
+          </div>
+
           <div class="data-card bulk-edit-card">
             <div class="card-title-row">
               <div>
@@ -582,7 +623,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="js/config.js"></script>
-  <script src="js/storage.js?v=20260810-search1"></script>
-  <script src="js/app.js?v=20260810-search1"></script>
+  <script src="js/storage.js?v=20260810-excelsync1"></script>
+  <script src="js/app.js?v=20260810-excelsync1"></script>
 </body>
 </html>

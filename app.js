@@ -43,7 +43,12 @@
     fichajeProfiles: [],
     fichajeSites: [],
     bulkSelectedAssignmentIds: new Set(),
-    bulkSelectedSiteIds: new Set()
+    bulkSelectedSiteIds: new Set(),
+    assignmentAuditFileName: "",
+    assignmentAuditParsed: null,
+    assignmentAuditAnalysis: null,
+    assignmentAuditFilter: "alerts",
+    assignmentAuditSelectedKeys: new Set()
   };
 
   let attendanceMapInstance = null;
@@ -340,8 +345,8 @@
   }
 
   function getScheduledDateTime(shift, field = "scheduled_start") {
-    const time = shift[field] || "00:00";
-    return new Date(`${shift.shift_date}T${time.length === 5 ? `${time}:00` : time}`);
+    const range = scheduledRangeForShift(shift.shift_date, shift.scheduled_start, shift.scheduled_end);
+    return field === "scheduled_end" ? range.end : range.start;
   }
 
   function diffMinutes(dateA, dateB) {
@@ -1417,6 +1422,8 @@
     renderSites();
     renderAssignmentSelectors();
     renderAssignments();
+    if (state.assignmentAuditParsed) analyzeParsedAssignmentAudit();
+    else renderAssignmentAudit();
     renderUsers();
     syncUserFormFields();
     renderRecords();
@@ -2200,7 +2207,7 @@
       const end = document.getElementById(scheduleInputId("assignmentDayEnd", day.id))?.value;
       if (validate) {
         if (!start || !end) throw new Error(`Cargá horario de entrada y salida para ${day.long}.`);
-        if (end <= start) throw new Error(`En ${day.long}, la hora de salida debe ser posterior a la entrada.`);
+        if (end === start) throw new Error(`En ${day.long}, entrada y salida no pueden ser iguales. Los turnos nocturnos, por ejemplo 22:00 a 06:00, sí están permitidos.`);
       }
       rows.push({ day_id: day.id, scheduled_start: start || defaultScheduleStart(), scheduled_end: end || defaultScheduleEnd() });
     }
@@ -2224,6 +2231,785 @@
       ...group,
       days_of_week: group.days_of_week.sort((a, b) => a - b)
     }));
+  }
+
+
+  // ---------------------------------------------------------------------------
+  // Auditoría y sincronización de asignaciones contra Excel
+  // ---------------------------------------------------------------------------
+  function auditEntityKey(value) {
+    return normalizeSearchText(value)
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function auditNameTokens(value) {
+    return auditEntityKey(value).split(" ").filter(Boolean).sort();
+  }
+
+  function auditNameFingerprint(value) {
+    return auditNameTokens(value).join("|");
+  }
+
+  function auditRowValue(row, candidates) {
+    const wanted = new Set((candidates || []).map(auditEntityKey));
+    for (const [key, value] of Object.entries(row || {})) {
+      if (wanted.has(auditEntityKey(key))) return value;
+    }
+    return "";
+  }
+
+  function auditDayId(value) {
+    const key = auditEntityKey(value);
+    const map = {
+      lunes: 1, lun: 1,
+      martes: 2, mar: 2,
+      miercoles: 3, mie: 3,
+      jueves: 4, jue: 4,
+      viernes: 5, vie: 5,
+      sabado: 6, sab: 6,
+      domingo: 7, dom: 7
+    };
+    return map[key] || null;
+  }
+
+  function auditParseSchedule(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return null;
+    const match = raw.match(/(\d{1,2}):(\d{2})[^0-9]+(\d{1,2}):(\d{2})/);
+    if (!match) return null;
+    const startH = Number(match[1]);
+    const startM = Number(match[2]);
+    const endH = Number(match[3]);
+    const endM = Number(match[4]);
+    if ([startH, endH].some(n => !Number.isInteger(n) || n < 0 || n > 23) || [startM, endM].some(n => !Number.isInteger(n) || n < 0 || n > 59)) return null;
+    const start = `${String(startH).padStart(2, "0")}:${String(startM).padStart(2, "0")}`;
+    const end = `${String(endH).padStart(2, "0")}:${String(endM).padStart(2, "0")}`;
+    if (start === end) return null;
+    return { start, end, overnight: end < start, raw };
+  }
+
+  function auditParseCoordinates(value) {
+    const match = String(value || "").replace(/;/g, ",").match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
+    if (!match) return null;
+    const lat = Number(match[1]);
+    const lng = Number(match[2]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng };
+  }
+
+  function auditFindSheet(workbook, expectedName, requiredHeaders = []) {
+    const expected = auditEntityKey(expectedName);
+    const exact = workbook.SheetNames.find(name => auditEntityKey(name) === expected);
+    if (exact) return { name: exact, sheet: workbook.Sheets[exact] };
+    for (const name of workbook.SheetNames) {
+      const sheet = workbook.Sheets[name];
+      const rows = window.XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false, header: 1 });
+      const headers = (rows[0] || []).map(auditEntityKey);
+      if (requiredHeaders.every(header => headers.includes(auditEntityKey(header)))) return { name, sheet };
+    }
+    return null;
+  }
+
+  async function parseAssignmentAuditFile(file) {
+    if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+    if (!file) throw new Error("Seleccioná un archivo Excel.");
+    const buffer = await file.arrayBuffer();
+    const workbook = window.XLSX.read(buffer, { type: "array", cellDates: false });
+    const coverageSheet = auditFindSheet(workbook, "Cobertura por día", ["Servicio", "Día", "Operario", "Horario"]);
+    if (!coverageSheet) throw new Error('No encontré una hoja "Cobertura por día" con las columnas Servicio, Día, Operario y Horario.');
+
+    const coverageRows = window.XLSX.utils.sheet_to_json(coverageSheet.sheet, { defval: "", raw: false });
+    const serviceSheet = auditFindSheet(workbook, "Servicios", ["Servicio", "Dirección"]);
+    const serviceRows = serviceSheet ? window.XLSX.utils.sheet_to_json(serviceSheet.sheet, { defval: "", raw: false }) : [];
+    const serviceMeta = new Map();
+    serviceRows.forEach(row => {
+      const name = String(auditRowValue(row, ["Servicio"]) || "").trim();
+      if (!name) return;
+      const coordinates = auditParseCoordinates(auditRowValue(row, ["Coordenadas", "Coordenada"]));
+      serviceMeta.set(auditEntityKey(name), {
+        name,
+        address: String(auditRowValue(row, ["Dirección", "Direccion"]) || "").trim(),
+        zone: String(auditRowValue(row, ["Zona"]) || "").trim(),
+        supervisor: String(auditRowValue(row, ["Supervisor"]) || "").trim(),
+        frequency: String(auditRowValue(row, ["Frecuencia"]) || "fixed").trim() || "fixed",
+        coordinates
+      });
+    });
+
+    const groups = new Map();
+    const issues = [];
+    let validCoverageRows = 0;
+    let noCoverageRows = 0;
+    let overnightRows = 0;
+
+    coverageRows.forEach((row, index) => {
+      const rowNumber = index + 2;
+      const serviceName = String(auditRowValue(row, ["Servicio"]) || "").trim();
+      const dayRaw = String(auditRowValue(row, ["Día", "Dia"]) || "").trim();
+      const operatorName = String(auditRowValue(row, ["Operario"]) || "").trim();
+      const scheduleRaw = String(auditRowValue(row, ["Horario"]) || "").trim();
+      if (!serviceName && !dayRaw && !operatorName && !scheduleRaw) return;
+      if (!serviceName) {
+        issues.push({ rowNumber, type: "invalid", message: "Falta el servicio.", raw: row });
+        return;
+      }
+      const dayId = auditDayId(dayRaw);
+      if (!dayId) {
+        issues.push({ rowNumber, type: "invalid", message: `Día no reconocido: ${dayRaw || "vacío"}.`, serviceName, raw: row });
+        return;
+      }
+      const serviceKey = auditEntityKey(serviceName);
+      const groupKey = `${serviceKey}|${dayId}`;
+      if (!groups.has(groupKey)) groups.set(groupKey, { groupKey, serviceKey, serviceName, dayId, dayName: dayLabel(dayId, "long"), expectedRows: [], explicitNoCoverage: false, sourceRows: [] });
+      const group = groups.get(groupKey);
+      group.sourceRows.push(rowNumber);
+
+      const noCoverage = !operatorName || auditEntityKey(operatorName) === "sin cobertura";
+      if (noCoverage) {
+        group.explicitNoCoverage = true;
+        noCoverageRows++;
+        return;
+      }
+      const schedule = auditParseSchedule(scheduleRaw);
+      if (!schedule) {
+        group.expectedRows.push({ rowNumber, operatorName, scheduleRaw, invalid: true, message: `Horario no reconocido: ${scheduleRaw || "vacío"}.` });
+        return;
+      }
+      if (schedule.overnight) overnightRows++;
+      validCoverageRows++;
+      group.expectedRows.push({ rowNumber, operatorName, scheduleRaw, start: schedule.start, end: schedule.end, overnight: schedule.overnight, invalid: false });
+    });
+
+    for (const group of groups.values()) {
+      if (group.explicitNoCoverage && group.expectedRows.some(row => !row.invalid)) {
+        issues.push({ type: "invalid", serviceName: group.serviceName, dayId: group.dayId, message: `${group.serviceName} / ${group.dayName}: el Excel mezcla "Sin cobertura" con operarios cargados.` });
+      }
+    }
+
+    return {
+      fileName: file.name,
+      coverageSheetName: coverageSheet.name,
+      serviceSheetName: serviceSheet?.name || null,
+      coverageRowsCount: coverageRows.length,
+      validCoverageRows,
+      noCoverageRows,
+      overnightRows,
+      groups,
+      issues,
+      serviceMeta
+    };
+  }
+
+  function auditMatchSite(serviceName, serviceMeta) {
+    const nameKey = auditEntityKey(serviceName);
+    const direct = state.sites.filter(site => auditEntityKey(site.name) === nameKey);
+    if (direct.length === 1) return { site: direct[0], method: "nombre exacto" };
+
+    const fingerprint = auditNameFingerprint(serviceName);
+    const fpMatches = state.sites.filter(site => auditNameFingerprint(site.name) === fingerprint);
+    if (fpMatches.length === 1) return { site: fpMatches[0], method: "nombre normalizado" };
+
+    const meta = serviceMeta?.get(nameKey);
+    if (meta?.address) {
+      const addressKey = auditEntityKey(meta.address);
+      const addressMatches = state.sites.filter(site => auditEntityKey(site.address) === addressKey);
+      if (addressMatches.length === 1) return { site: addressMatches[0], method: "dirección" };
+    }
+
+    if (meta?.coordinates) {
+      const nearby = state.sites
+        .filter(site => Number.isFinite(Number(site.lat)) && Number.isFinite(Number(site.lng)))
+        .map(site => ({ site, distance: haversineMeters(meta.coordinates.lat, meta.coordinates.lng, Number(site.lat), Number(site.lng)) }))
+        .sort((a, b) => a.distance - b.distance);
+      if (nearby[0] && nearby[0].distance <= 35 && (!nearby[1] || nearby[1].distance - nearby[0].distance >= 20)) {
+        return { site: nearby[0].site, method: `GPS (${Math.round(nearby[0].distance)} m)` };
+      }
+    }
+    return { site: null, method: null };
+  }
+
+  function auditMatchOperator(operatorName) {
+    const operators = state.profiles.filter(profile => String(profile.role).toLowerCase() === "operator" && profile.is_active !== false);
+    const fingerprint = auditNameFingerprint(operatorName);
+    const exact = operators.filter(profile => auditNameFingerprint(profile.full_name) === fingerprint);
+    if (exact.length === 1) return { operator: exact[0], method: "nombre" };
+
+    const sourceTokens = new Set(auditNameTokens(operatorName));
+    const subsetCandidates = operators.filter(profile => {
+      const profileTokens = new Set(auditNameTokens(profile.full_name));
+      const sourceInside = [...sourceTokens].every(token => profileTokens.has(token));
+      const profileInside = [...profileTokens].every(token => sourceTokens.has(token));
+      return sourceTokens.size >= 2 && (sourceInside || profileInside);
+    });
+    if (subsetCandidates.length === 1) return { operator: subsetCandidates[0], method: "nombre compatible" };
+
+    const scored = operators.map(profile => {
+      const profileTokens = new Set(auditNameTokens(profile.full_name));
+      const intersection = [...sourceTokens].filter(token => profileTokens.has(token)).length;
+      const union = new Set([...sourceTokens, ...profileTokens]).size || 1;
+      return { operator: profile, score: intersection / union };
+    }).sort((a, b) => b.score - a.score);
+    if (scored[0]?.score >= .8 && (!scored[1] || scored[0].score - scored[1].score >= .15)) return { operator: scored[0].operator, method: "nombre aproximado" };
+    return { operator: null, method: null };
+  }
+
+  function auditAssignmentActiveOnDate(assignment, dateString) {
+    if (!assignment || assignment.is_active === false) return false;
+    if ((assignment.assignment_type || "fixed") !== "fixed") return false;
+    if (assignment.valid_from && assignment.valid_from > dateString) return false;
+    if (assignment.valid_to && assignment.valid_to < dateString) return false;
+    return true;
+  }
+
+  function auditCurrentAtoms(dateString) {
+    const atoms = [];
+    state.assignments.filter(a => auditAssignmentActiveOnDate(a, dateString)).forEach(assignment => {
+      (assignment.days_of_week || []).map(Number).forEach(dayId => atoms.push({
+        assignment,
+        assignmentId: assignment.id,
+        siteId: assignment.site_id,
+        operatorId: assignment.operator_id,
+        dayId,
+        start: formatTime(assignment.scheduled_start),
+        end: formatTime(assignment.scheduled_end)
+      }));
+    });
+    return atoms;
+  }
+
+  function auditSameAtom(expected, current) {
+    return expected.operatorId === current.operatorId && expected.start === current.start && expected.end === current.end;
+  }
+
+  function auditPairScore(expected, current) {
+    let score = 0;
+    if (expected.operatorId && expected.operatorId === current.operatorId) score += 4;
+    if (expected.start === current.start && expected.end === current.end) score += 3;
+    return score;
+  }
+
+  function auditExpectedText(row) {
+    if (!row) return "—";
+    const name = row.operatorName || row.operator?.full_name || "—";
+    const schedule = row.start && row.end ? `${row.start}–${row.end}${row.end < row.start ? " (+1 día)" : ""}` : (row.scheduleRaw || "—");
+    return `${name} · ${schedule}`;
+  }
+
+  function auditCurrentText(atom) {
+    if (!atom) return "—";
+    const op = byId(state.profiles, atom.operatorId);
+    return `${op?.full_name || "Operario no disponible"} · ${atom.start}–${atom.end}${atom.end < atom.start ? " (+1 día)" : ""}`;
+  }
+
+  function buildAssignmentAuditAnalysis(parsed, dateString) {
+    const currentAtoms = auditCurrentAtoms(dateString);
+    const currentBySiteDay = new Map();
+    currentAtoms.forEach(atom => {
+      const key = `${atom.siteId}|${atom.dayId}`;
+      if (!currentBySiteDay.has(key)) currentBySiteDay.set(key, []);
+      currentBySiteDay.get(key).push(atom);
+    });
+
+    const results = [];
+    const syncPlans = new Map();
+    const siteMatches = new Map();
+    const operatorMatches = new Map();
+
+    (parsed.issues || []).forEach((issue, index) => {
+      results.push({
+        id: `issue-${index}`,
+        severity: "blocked",
+        status: "invalid",
+        statusLabel: "Dato inválido",
+        serviceName: issue.serviceName || "Excel",
+        dayId: issue.dayId || null,
+        expectedText: issue.rowNumber ? `Fila ${issue.rowNumber}` : "—",
+        currentText: "—",
+        detail: issue.message,
+        canSync: false,
+        syncKey: null
+      });
+    });
+
+    for (const group of parsed.groups.values()) {
+      const siteMatch = auditMatchSite(group.serviceName, parsed.serviceMeta);
+      siteMatches.set(group.serviceKey, siteMatch);
+      if (!siteMatch.site) {
+        results.push({
+          id: `site-${group.groupKey}`,
+          severity: "blocked",
+          status: "unknown_site",
+          statusLabel: "Servicio no encontrado",
+          serviceName: group.serviceName,
+          serviceKey: group.serviceKey,
+          dayId: group.dayId,
+          expectedText: group.expectedRows.length ? `${group.expectedRows.length} cobertura${group.expectedRows.length === 1 ? "" : "s"} en Excel` : "Sin cobertura",
+          currentText: "—",
+          detail: "El servicio del Excel no pudo vincularse con un servicio activo de Presentismo.",
+          canSync: false,
+          syncKey: null,
+          canCreateSite: Boolean(parsed.serviceMeta?.get(group.serviceKey)?.address && parsed.serviceMeta?.get(group.serviceKey)?.coordinates)
+        });
+        continue;
+      }
+
+      const siteId = siteMatch.site.id;
+      const syncKey = `${siteId}|${group.dayId}`;
+      const current = [...(currentBySiteDay.get(syncKey) || [])];
+      const expected = [];
+      const unresolvedOperators = [];
+      let invalidGroup = false;
+
+      group.expectedRows.forEach(source => {
+        if (source.invalid) {
+          invalidGroup = true;
+          results.push({
+            id: `invalid-${group.groupKey}-${source.rowNumber}`,
+            severity: "blocked",
+            status: "invalid_schedule",
+            statusLabel: "Horario inválido",
+            serviceName: group.serviceName,
+            siteId,
+            dayId: group.dayId,
+            expectedText: `${source.operatorName || "—"} · ${source.scheduleRaw || "—"}`,
+            currentText: "—",
+            detail: `${source.message} Fila ${source.rowNumber}.`,
+            canSync: false,
+            syncKey
+          });
+          return;
+        }
+        const operatorKey = auditNameFingerprint(source.operatorName);
+        let operatorMatch = operatorMatches.get(operatorKey);
+        if (!operatorMatch) {
+          operatorMatch = auditMatchOperator(source.operatorName);
+          operatorMatches.set(operatorKey, operatorMatch);
+        }
+        if (!operatorMatch.operator) {
+          unresolvedOperators.push(source.operatorName);
+          results.push({
+            id: `operator-${group.groupKey}-${source.rowNumber}`,
+            severity: "blocked",
+            status: "unknown_operator",
+            statusLabel: "Operario no encontrado",
+            serviceName: group.serviceName,
+            siteId,
+            dayId: group.dayId,
+            operatorName: source.operatorName,
+            expectedText: auditExpectedText(source),
+            currentText: "—",
+            detail: "El nombre del Excel no coincide de forma segura con un operario activo de Presentismo.",
+            canSync: false,
+            syncKey
+          });
+          return;
+        }
+        expected.push({ ...source, siteId, operatorId: operatorMatch.operator.id, operator: operatorMatch.operator, operatorMatchMethod: operatorMatch.method });
+      });
+
+      const groupBlocked = invalidGroup || unresolvedOperators.length > 0 || (group.explicitNoCoverage && expected.length > 0);
+      const plan = { syncKey, siteId, site: siteMatch.site, siteMatchMethod: siteMatch.method, serviceName: group.serviceName, dayId: group.dayId, dayName: group.dayName, expectedAtoms: expected, currentAtoms: current, blocked: groupBlocked, unresolvedOperators };
+      syncPlans.set(syncKey, plan);
+
+      const expectedLeft = [...expected];
+      const currentLeft = [...current];
+
+      // Sacar primero coincidencias exactas como multiconjunto.
+      for (let i = expectedLeft.length - 1; i >= 0; i--) {
+        const expectedAtom = expectedLeft[i];
+        const currentIndex = currentLeft.findIndex(currentAtom => auditSameAtom(expectedAtom, currentAtom));
+        if (currentIndex === -1) continue;
+        const currentAtom = currentLeft[currentIndex];
+        results.push({
+          id: `match-${group.groupKey}-${expectedAtom.rowNumber}-${currentAtom.assignmentId}`,
+          severity: "ok",
+          status: "match",
+          statusLabel: "Coincide",
+          serviceName: group.serviceName,
+          siteId,
+          dayId: group.dayId,
+          expectedText: auditExpectedText(expectedAtom),
+          currentText: auditCurrentText(currentAtom),
+          detail: `Servicio, operario, día y horario coinciden (${siteMatch.method}).`,
+          canSync: false,
+          syncKey
+        });
+        expectedLeft.splice(i, 1);
+        currentLeft.splice(currentIndex, 1);
+      }
+
+      // Emparejar diferencias que claramente corresponden al mismo puesto.
+      while (expectedLeft.length && currentLeft.length) {
+        let best = null;
+        for (let ei = 0; ei < expectedLeft.length; ei++) {
+          for (let ci = 0; ci < currentLeft.length; ci++) {
+            const score = auditPairScore(expectedLeft[ei], currentLeft[ci]);
+            if (!best || score > best.score) best = { ei, ci, score };
+          }
+        }
+        if (!best || (best.score === 0 && !(expectedLeft.length === 1 && currentLeft.length === 1))) break;
+        const expectedAtom = expectedLeft.splice(best.ei, 1)[0];
+        const currentAtom = currentLeft.splice(best.ci, 1)[0];
+        const sameOperator = expectedAtom.operatorId === currentAtom.operatorId;
+        const sameSchedule = expectedAtom.start === currentAtom.start && expectedAtom.end === currentAtom.end;
+        const status = sameOperator ? "time_mismatch" : sameSchedule ? "operator_mismatch" : "operator_time_mismatch";
+        const label = sameOperator ? "Horario distinto" : sameSchedule ? "Operario distinto" : "Operario y horario distintos";
+        results.push({
+          id: `mismatch-${group.groupKey}-${expectedAtom.rowNumber}-${currentAtom.assignmentId}`,
+          severity: "warning",
+          status,
+          statusLabel: label,
+          serviceName: group.serviceName,
+          siteId,
+          dayId: group.dayId,
+          expectedText: auditExpectedText(expectedAtom),
+          currentText: auditCurrentText(currentAtom),
+          detail: "La planificación del Excel y la asignación fija vigente no coinciden.",
+          canSync: !groupBlocked,
+          syncKey
+        });
+      }
+
+      expectedLeft.forEach(expectedAtom => results.push({
+        id: `missing-${group.groupKey}-${expectedAtom.rowNumber}`,
+        severity: "warning",
+        status: "missing_assignment",
+        statusLabel: "Falta en Presentismo",
+        serviceName: group.serviceName,
+        siteId,
+        dayId: group.dayId,
+        expectedText: auditExpectedText(expectedAtom),
+        currentText: "Sin asignación equivalente",
+        detail: "El Excel espera esta cobertura pero no existe una asignación fija equivalente.",
+        canSync: !groupBlocked,
+        syncKey
+      }));
+
+      currentLeft.forEach(currentAtom => results.push({
+        id: `extra-${group.groupKey}-${currentAtom.assignmentId}-${currentAtom.dayId}-${currentAtom.operatorId}`,
+        severity: "warning",
+        status: "extra_assignment",
+        statusLabel: "Sobra en Presentismo",
+        serviceName: group.serviceName,
+        siteId,
+        dayId: group.dayId,
+        expectedText: expected.length ? "No figura esta cobertura" : "Sin cobertura",
+        currentText: auditCurrentText(currentAtom),
+        detail: expected.length ? "Hay una asignación fija adicional que no figura en el Excel." : "El Excel indica que ese día no debería haber cobertura fija.",
+        canSync: !groupBlocked,
+        syncKey
+      }));
+
+      if (!expected.length && !current.length && group.explicitNoCoverage && !groupBlocked) {
+        results.push({
+          id: `nocoverage-${group.groupKey}`,
+          severity: "ok",
+          status: "no_coverage_match",
+          statusLabel: "Sin cobertura · coincide",
+          serviceName: group.serviceName,
+          siteId,
+          dayId: group.dayId,
+          expectedText: "Sin cobertura",
+          currentText: "Sin asignación fija",
+          detail: "El Excel y Presentismo coinciden: no hay cobertura fija para ese día.",
+          canSync: false,
+          syncKey
+        });
+      }
+    }
+
+    const stats = {
+      ok: results.filter(row => row.severity === "ok").length,
+      warnings: results.filter(row => row.severity === "warning").length,
+      blocked: results.filter(row => row.severity === "blocked").length,
+      total: results.length,
+      syncableKeys: new Set(results.filter(row => row.severity === "warning" && row.canSync && row.syncKey).map(row => row.syncKey)).size
+    };
+    return { dateString, results, syncPlans, siteMatches, operatorMatches, stats };
+  }
+
+  function auditStatusClass(row) {
+    if (row.severity === "ok") return "audit-status-ok";
+    if (row.severity === "blocked") return "audit-status-blocked";
+    return "audit-status-warning";
+  }
+
+  function auditRowClass(row) {
+    if (row.severity === "ok") return "audit-ok-row";
+    if (row.severity === "blocked") return "audit-blocked-row";
+    return "audit-difference-row";
+  }
+
+  function assignmentAuditFilteredRows() {
+    const analysis = state.assignmentAuditAnalysis;
+    if (!analysis) return [];
+    const filter = state.assignmentAuditFilter || "alerts";
+    if (filter === "ok") return analysis.results.filter(row => row.severity === "ok");
+    if (filter === "alerts") return analysis.results.filter(row => row.severity !== "ok");
+    return analysis.results;
+  }
+
+  function auditSyncableAlertKeys() {
+    const analysis = state.assignmentAuditAnalysis;
+    if (!analysis) return [];
+    return [...new Set(analysis.results.filter(row => row.severity === "warning" && row.canSync && row.syncKey).map(row => row.syncKey))];
+  }
+
+  function renderAssignmentAudit() {
+    const panel = $("#assignmentAuditPanel");
+    const info = $("#assignmentAuditFileInfo");
+    const analysis = state.assignmentAuditAnalysis;
+    if (!panel || !info) return;
+
+    if (!analysis || !state.assignmentAuditParsed) {
+      panel.classList.add("hidden");
+      if (!state.assignmentAuditFileName) info.textContent = "Todavía no cargaste un archivo.";
+      return;
+    }
+    panel.classList.remove("hidden");
+    const parsed = state.assignmentAuditParsed;
+    info.textContent = `${parsed.fileName} · hoja ${parsed.coverageSheetName} · ${parsed.coverageRowsCount} filas leídas · ${parsed.validCoverageRows} coberturas con operario · ${parsed.noCoverageRows} filas sin cobertura${parsed.overnightRows ? ` · ${parsed.overnightRows} turnos nocturnos` : ""}.`;
+
+    const stats = analysis.stats;
+    $("#assignmentAuditKpis").innerHTML = `
+      <div class="assignment-audit-kpi"><strong>${parsed.validCoverageRows}</strong><span>Coberturas del Excel</span></div>
+      <div class="assignment-audit-kpi audit-ok"><strong>${stats.ok}</strong><span>Coincidencias</span></div>
+      <div class="assignment-audit-kpi audit-alert"><strong>${stats.warnings}</strong><span>Diferencias</span></div>
+      <div class="assignment-audit-kpi audit-block"><strong>${stats.blocked}</strong><span>Bloqueos a revisar</span></div>`;
+
+    $$("[data-audit-filter]").forEach(button => button.classList.toggle("active", button.dataset.auditFilter === state.assignmentAuditFilter));
+    const rows = assignmentAuditFilteredRows();
+    const table = $("#assignmentAuditTable");
+    table.innerHTML = `
+      <table>
+        <thead><tr>
+          <th class="audit-col-select"></th>
+          <th class="audit-col-status">Estado</th>
+          <th class="audit-col-service">Servicio</th>
+          <th class="audit-col-day">Día</th>
+          <th class="audit-col-plan">Excel</th>
+          <th class="audit-col-app">Presentismo</th>
+          <th class="audit-col-detail">Detalle / acción</th>
+        </tr></thead>
+        <tbody>${rows.map(row => {
+          const selected = row.syncKey && state.assignmentAuditSelectedKeys.has(row.syncKey);
+          const selectCell = row.severity === "warning" && row.canSync ? `<input class="audit-checkbox" data-audit-select="${escapeHtml(row.syncKey)}" type="checkbox" ${selected ? "checked" : ""} title="Sincronizar este servicio y día" />` : "";
+          let action = "";
+          if (row.severity === "warning" && row.canSync) action = `<button class="secondary-btn small-btn audit-inline-action" data-audit-apply-key="${escapeHtml(row.syncKey)}" type="button">Corregir este día</button>`;
+          if (row.status === "unknown_site" && row.canCreateSite) action = `<button class="secondary-btn small-btn audit-inline-action" data-audit-create-site="${escapeHtml(row.serviceKey)}" type="button">Crear servicio desde Excel</button>`;
+          if (row.status === "unknown_operator") action = `<button class="ghost-btn small-btn audit-inline-action" data-audit-find-user="${escapeHtml(row.operatorName || "")}" type="button">Buscar / crear en Usuarios</button>`;
+          return `<tr class="${auditRowClass(row)}">
+            <td class="audit-col-select">${selectCell}</td>
+            <td><span class="audit-status-pill ${auditStatusClass(row)}">${escapeHtml(row.statusLabel)}</span></td>
+            <td><strong>${escapeHtml(row.serviceName || "—")}</strong></td>
+            <td>${escapeHtml(row.dayId ? dayLabel(row.dayId, "long") : "—")}</td>
+            <td><div class="audit-plan-line">${escapeHtml(row.expectedText || "—")}</div></td>
+            <td><div class="audit-app-line">${escapeHtml(row.currentText || "—")}</div></td>
+            <td><div>${escapeHtml(row.detail || "")}</div>${action}</td>
+          </tr>`;
+        }).join("") || `<tr><td colspan="7" class="muted">No hay resultados para este filtro.</td></tr>`}</tbody>
+      </table>`;
+
+    const selectedCount = state.assignmentAuditSelectedKeys.size;
+    $("#assignmentAuditSelectionSummary").textContent = `${selectedCount} servicio${selectedCount === 1 ? "" : "s"} + día seleccionado${selectedCount === 1 ? "" : "s"}. Hay ${stats.syncableKeys} día${stats.syncableKeys === 1 ? "" : "s"} con diferencias corregibles automáticamente.`;
+
+    table.querySelectorAll("[data-audit-select]").forEach(input => input.addEventListener("change", () => {
+      const key = input.dataset.auditSelect;
+      if (input.checked) state.assignmentAuditSelectedKeys.add(key);
+      else state.assignmentAuditSelectedKeys.delete(key);
+      renderAssignmentAudit();
+    }));
+    table.querySelectorAll("[data-audit-apply-key]").forEach(button => button.addEventListener("click", () => applyAssignmentAuditKeys([button.dataset.auditApplyKey]).catch(error => toast(error.message || "No se pudo sincronizar la asignación."))));
+    table.querySelectorAll("[data-audit-create-site]").forEach(button => button.addEventListener("click", () => createMissingAuditSite(button.dataset.auditCreateSite).catch(error => toast(error.message || "No se pudo crear el servicio."))));
+    table.querySelectorAll("[data-audit-find-user]").forEach(button => button.addEventListener("click", () => {
+      renderTab("users");
+      state.sectionSearch.users = button.dataset.auditFindUser || "";
+      syncContextSearchUI("users");
+      renderUsers();
+      focusCurrentSearchResults();
+    }));
+  }
+
+  function clearAssignmentAudit() {
+    state.assignmentAuditFileName = "";
+    state.assignmentAuditParsed = null;
+    state.assignmentAuditAnalysis = null;
+    state.assignmentAuditSelectedKeys.clear();
+    state.assignmentAuditFilter = "alerts";
+    if ($("#assignmentAuditFile")) $("#assignmentAuditFile").value = "";
+    if ($("#assignmentAuditFileInfo")) $("#assignmentAuditFileInfo").textContent = "Todavía no cargaste un archivo.";
+    renderAssignmentAudit();
+  }
+
+  function analyzeParsedAssignmentAudit() {
+    if (!state.assignmentAuditParsed) return;
+    const dateString = $("#assignmentAuditEffectiveDate")?.value || todayISO();
+    state.assignmentAuditAnalysis = buildAssignmentAuditAnalysis(state.assignmentAuditParsed, dateString);
+    const validKeys = new Set(state.assignmentAuditAnalysis.syncPlans.keys());
+    state.assignmentAuditSelectedKeys = new Set([...state.assignmentAuditSelectedKeys].filter(key => validKeys.has(key)));
+    renderAssignmentAudit();
+  }
+
+  async function analyzeAssignmentAuditFile() {
+    const file = $("#assignmentAuditFile")?.files?.[0];
+    const parsed = await parseAssignmentAuditFile(file);
+    state.assignmentAuditFileName = file.name;
+    state.assignmentAuditParsed = parsed;
+    state.assignmentAuditSelectedKeys.clear();
+    state.assignmentAuditFilter = "alerts";
+    analyzeParsedAssignmentAudit();
+    const differences = state.assignmentAuditAnalysis?.stats?.warnings || 0;
+    const blocked = state.assignmentAuditAnalysis?.stats?.blocked || 0;
+    toast(differences || blocked ? `Análisis listo: ${differences} diferencia${differences === 1 ? "" : "s"} y ${blocked} bloqueo${blocked === 1 ? "" : "s"}.` : "El Excel coincide con las asignaciones vigentes.", differences || blocked ? "" : "success");
+  }
+
+  async function createMissingAuditSite(serviceKey) {
+    const parsed = state.assignmentAuditParsed;
+    if (!parsed) throw new Error("Volvé a cargar el Excel.");
+    const meta = parsed.serviceMeta?.get(serviceKey);
+    if (!meta?.address || !meta?.coordinates) throw new Error("El Excel no tiene dirección y coordenadas suficientes para crear este servicio automáticamente.");
+    const existing = state.sites.find(site => auditEntityKey(site.name) === serviceKey);
+    if (existing) throw new Error("Ese servicio ya existe. Volvé a analizar el Excel.");
+    if (!window.confirm(`¿Crear el servicio "${meta.name}" usando dirección y coordenadas del Excel? El radio GPS inicial será 120 m y luego podés cambiarlo en Servicios.`)) return;
+    await store.upsertSite({
+      name: meta.name,
+      address: meta.address,
+      zone: meta.zone || null,
+      supervisor_name: meta.supervisor || null,
+      service_type: meta.frequency || "fixed",
+      lat: meta.coordinates.lat,
+      lng: meta.coordinates.lng,
+      gps_radius_m: 120,
+      is_active: true
+    });
+    await refreshBaseData($("#dashboardDate")?.value || todayISO());
+    renderSites();
+    renderAssignmentSelectors();
+    analyzeParsedAssignmentAudit();
+    toast("Servicio creado desde el Excel. El análisis fue recalculado.", "success");
+  }
+
+  function auditTemplateForExpected(expectedAtom, currentAtoms) {
+    const exact = currentAtoms.find(atom => auditSameAtom(expectedAtom, atom));
+    if (exact) return exact.assignment;
+    const sameOperator = currentAtoms.find(atom => atom.operatorId === expectedAtom.operatorId);
+    if (sameOperator) return sameOperator.assignment;
+    const sameSchedule = currentAtoms.find(atom => atom.start === expectedAtom.start && atom.end === expectedAtom.end);
+    if (sameSchedule) return sameSchedule.assignment;
+    return currentAtoms[0]?.assignment || null;
+  }
+
+  function auditAssignmentContinuationPayload(assignment, days, validFrom) {
+    return {
+      operator_id: assignment.operator_id,
+      site_id: assignment.site_id,
+      days_of_week: days,
+      scheduled_start: formatTime(assignment.scheduled_start),
+      scheduled_end: formatTime(assignment.scheduled_end),
+      grace_minutes: Number(assignment.grace_minutes ?? 10),
+      absence_after_minutes: Number(assignment.absence_after_minutes ?? 30),
+      valid_from: validFrom,
+      valid_to: assignment.valid_to || null,
+      notes: assignment.notes || null,
+      assignment_type: "fixed",
+      created_by: assignment.created_by || state.currentProfile?.id || null,
+      suppress_regular_assignments: false,
+      is_active: true
+    };
+  }
+
+  function buildAssignmentAuditSyncPayload(syncKeys, effectiveDate) {
+    const analysis = state.assignmentAuditAnalysis;
+    if (!analysis) throw new Error("Primero analizá el Excel.");
+    const keys = [...new Set(syncKeys || [])].filter(Boolean);
+    if (!keys.length) throw new Error("Seleccioná al menos una diferencia para corregir.");
+    const plans = keys.map(key => analysis.syncPlans.get(key)).filter(Boolean);
+    const blocked = plans.filter(plan => plan.blocked);
+    if (blocked.length) throw new Error(`Hay ${blocked.length} servicio/día bloqueado por datos sin resolver. Corregí primero esos nombres u horarios.`);
+
+    const selectedDaysBySite = new Map();
+    plans.forEach(plan => {
+      if (!selectedDaysBySite.has(plan.siteId)) selectedDaysBySite.set(plan.siteId, new Set());
+      selectedDaysBySite.get(plan.siteId).add(Number(plan.dayId));
+    });
+
+    const updates = [];
+    const inserts = [];
+    const activeFixed = state.assignments.filter(a => auditAssignmentActiveOnDate(a, effectiveDate));
+
+    // Cerrar o recortar las asignaciones actuales solamente desde la fecha elegida.
+    activeFixed.forEach(assignment => {
+      const selectedDays = selectedDaysBySite.get(assignment.site_id);
+      if (!selectedDays) return;
+      const days = (assignment.days_of_week || []).map(Number);
+      const affectedDays = days.filter(day => selectedDays.has(day));
+      if (!affectedDays.length) return;
+      const remainingDays = days.filter(day => !selectedDays.has(day));
+      const validFrom = assignment.valid_from || effectiveDate;
+      if (validFrom < effectiveDate) {
+        updates.push({ id: assignment.id, patch: { valid_to: addDaysISO(effectiveDate, -1) } });
+        if (remainingDays.length) inserts.push(auditAssignmentContinuationPayload(assignment, remainingDays, effectiveDate));
+      } else {
+        if (remainingDays.length) updates.push({ id: assignment.id, patch: { days_of_week: remainingDays } });
+        else updates.push({ id: assignment.id, patch: { is_active: false } });
+      }
+    });
+
+    // Crear la versión que dicta el Excel para cada servicio/día seleccionado.
+    const desiredRaw = [];
+    plans.forEach(plan => {
+      plan.expectedAtoms.forEach(expectedAtom => {
+        const template = auditTemplateForExpected(expectedAtom, plan.currentAtoms);
+        desiredRaw.push({
+          operator_id: expectedAtom.operatorId,
+          site_id: plan.siteId,
+          days_of_week: [Number(plan.dayId)],
+          scheduled_start: expectedAtom.start,
+          scheduled_end: expectedAtom.end,
+          grace_minutes: Number(template?.grace_minutes ?? 10),
+          absence_after_minutes: Number(template?.absence_after_minutes ?? 30),
+          valid_from: effectiveDate,
+          valid_to: template?.valid_to && template.valid_to >= effectiveDate ? template.valid_to : null,
+          notes: template?.notes || `Sincronizado desde Excel ${state.assignmentAuditFileName || "de planificación"}`,
+          assignment_type: "fixed",
+          created_by: state.currentProfile?.id || null,
+          suppress_regular_assignments: false,
+          is_active: true
+        });
+      });
+    });
+
+    // Agrupar días iguales para no llenar la base con una fila por día cuando no hace falta.
+    const grouped = new Map();
+    desiredRaw.forEach(payload => {
+      const key = [payload.operator_id, payload.site_id, payload.scheduled_start, payload.scheduled_end, payload.grace_minutes, payload.absence_after_minutes, payload.valid_to || "", payload.notes || ""].join("|");
+      if (!grouped.has(key)) grouped.set(key, { ...payload, days_of_week: [] });
+      grouped.get(key).days_of_week.push(...payload.days_of_week);
+    });
+    grouped.forEach(payload => {
+      payload.days_of_week = [...new Set(payload.days_of_week.map(Number))].sort((a, b) => a - b);
+      inserts.push(payload);
+    });
+
+    return { updates, inserts, plans };
+  }
+
+  async function applyAssignmentAuditKeys(syncKeys) {
+    const effectiveDate = $("#assignmentAuditEffectiveDate")?.value || todayISO();
+    const payload = buildAssignmentAuditSyncPayload(syncKeys, effectiveDate);
+    const daysCount = payload.plans.length;
+    const coverageCount = payload.plans.reduce((sum, plan) => sum + plan.expectedAtoms.length, 0);
+    const noCoverageCount = payload.plans.filter(plan => plan.expectedAtoms.length === 0).length;
+    const message = `¿Sincronizar ${daysCount} servicio/día desde ${effectiveDate}? Se crearán o ajustarán ${coverageCount} cobertura${coverageCount === 1 ? "" : "s"}${noCoverageCount ? ` y ${noCoverageCount} día${noCoverageCount === 1 ? "" : "s"} quedará${noCoverageCount === 1 ? "" : "n"} sin cobertura fija` : ""}. El historial anterior se conserva.`;
+    if (!window.confirm(message)) return;
+
+    await store.applyAssignmentSync(payload);
+    state.assignmentAuditSelectedKeys.clear();
+    await renderSupervisorView();
+    analyzeParsedAssignmentAudit();
+    toast("Asignaciones sincronizadas con el Excel.", "success");
   }
 
   function updateBulkSelectionSummaries() {
@@ -2335,7 +3121,7 @@
     const suppressRegular = Boolean($("#extraSuppressRegular")?.checked);
 
     if (!operatorId || !siteId || !date || !start || !end) throw new Error("Completá operario, servicio, fecha y horario.");
-    if (end <= start) throw new Error("La hora de salida debe ser posterior a la entrada.");
+    if (end === start) throw new Error("Entrada y salida no pueden ser iguales. Los turnos nocturnos, por ejemplo 22:00 a 06:00, sí están permitidos.");
     if (absent <= grace) throw new Error("El margen de ausencia debe ser posterior a la tolerancia de demora.");
     const day = (() => { const d = new Date(`${date}T12:00:00`).getDay(); return d === 0 ? 7 : d; })();
 
@@ -3776,6 +4562,42 @@
     $("#bulkAssignmentScope").addEventListener("change", updateBulkSelectionSummaries);
     $("#applyBulkAssignmentsBtn").addEventListener("click", () => applyBulkAssignmentSettings().catch(error => toast(error.message || "No se pudieron actualizar las tolerancias.")));
 
+    $("#assignmentAuditFile")?.addEventListener("change", (event) => {
+      const file = event.target.files?.[0];
+      state.assignmentAuditFileName = file?.name || "";
+      state.assignmentAuditParsed = null;
+      state.assignmentAuditAnalysis = null;
+      state.assignmentAuditSelectedKeys.clear();
+      if ($("#assignmentAuditFileInfo")) $("#assignmentAuditFileInfo").textContent = file ? `${file.name} listo para analizar.` : "Todavía no cargaste un archivo.";
+      renderAssignmentAudit();
+    });
+    $("#assignmentAuditEffectiveDate")?.addEventListener("change", () => {
+      if (state.assignmentAuditParsed) analyzeParsedAssignmentAudit();
+    });
+    $("#analyzeAssignmentsExcelBtn")?.addEventListener("click", () => analyzeAssignmentAuditFile().catch(error => toast(error.message || "No se pudo analizar el Excel.")));
+    $("#clearAssignmentsExcelBtn")?.addEventListener("click", clearAssignmentAudit);
+    $("#assignmentAuditFilters")?.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-audit-filter]");
+      if (!button) return;
+      state.assignmentAuditFilter = button.dataset.auditFilter || "alerts";
+      renderAssignmentAudit();
+    });
+    $("#selectAuditAlertsBtn")?.addEventListener("click", () => {
+      state.assignmentAuditSelectedKeys = new Set(auditSyncableAlertKeys());
+      renderAssignmentAudit();
+    });
+    $("#clearAuditSelectionBtn")?.addEventListener("click", () => {
+      state.assignmentAuditSelectedKeys.clear();
+      renderAssignmentAudit();
+    });
+    $("#applySelectedAuditBtn")?.addEventListener("click", () => applyAssignmentAuditKeys([...state.assignmentAuditSelectedKeys]).catch(error => toast(error.message || "No se pudieron sincronizar las diferencias seleccionadas.")));
+    $("#applyAllAuditBtn")?.addEventListener("click", () => {
+      const keys = auditSyncableAlertKeys();
+      const blocked = state.assignmentAuditAnalysis?.stats?.blocked || 0;
+      if (!keys.length) return toast(blocked ? "No hay diferencias corregibles automáticamente hasta resolver los bloqueos." : "No hay diferencias para corregir.");
+      applyAssignmentAuditKeys(keys).catch(error => toast(error.message || "No se pudieron sincronizar todas las diferencias."));
+    });
+
     $("#userForm").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
@@ -3818,6 +4640,7 @@
     renderAssignmentSchedule();
     $("#dashboardDate").value = todayISO();
     $("#assignmentValidFrom").value = todayISO();
+    if ($("#assignmentAuditEffectiveDate")) $("#assignmentAuditEffectiveDate").value = todayISO();
     if ($("#extraAssignmentDate")) $("#extraAssignmentDate").value = todayISO();
     syncPeriodControls("live", false);
     syncPeriodControls("records", false);

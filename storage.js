@@ -397,6 +397,41 @@
       return uniqueIds.length;
     }
 
+    async applyAssignmentSync(payload = {}) {
+      const updates = Array.isArray(payload.updates) ? payload.updates : [];
+      const inserts = Array.isArray(payload.inserts) ? payload.inserts : [];
+
+      // Las actualizaciones tienen patches distintos, por eso se ejecutan por lotes chicos.
+      const updateChunkSize = 20;
+      for (let i = 0; i < updates.length; i += updateChunkSize) {
+        const chunk = updates.slice(i, i + updateChunkSize);
+        const results = await Promise.all(chunk.map(async item => {
+          if (!item?.id) throw new Error("Falta identificar una asignación a actualizar.");
+          const patch = this.clean(item.patch || {});
+          if (!Object.keys(patch).length) return true;
+          const { error } = await this.client
+            .from("assignments")
+            .update(patch)
+            .eq("id", item.id);
+          if (error) throw error;
+          return true;
+        }));
+        if (results.some(result => result !== true)) throw new Error("No se pudo completar la actualización de asignaciones.");
+      }
+
+      const insertChunkSize = 100;
+      for (let i = 0; i < inserts.length; i += insertChunkSize) {
+        const chunk = inserts.slice(i, i + insertChunkSize).map(item => this.clean(item));
+        if (!chunk.length) continue;
+        const { error } = await this.client
+          .from("assignments")
+          .insert(chunk);
+        if (error) throw error;
+      }
+
+      return { updated: updates.length, inserted: inserts.length };
+    }
+
     async deleteAssignment(id) {
       const { error } = await this.client
         .from("assignments")
