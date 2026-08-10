@@ -36,6 +36,12 @@
     analyticsProfiles: [],
     analyticsPeriodResolved: null,
     activeTab: "live",
+    sectionSearch: { live: "", analytics: "", fichaje: "", coverage: "", assignments: "", sites: "", users: "", records: "" },
+    searchCounts: {},
+    fichajeLoaded: false,
+    fichajeEvents: [],
+    fichajeProfiles: [],
+    fichajeSites: [],
     bulkSelectedAssignmentIds: new Set(),
     bulkSelectedSiteIds: new Set()
   };
@@ -54,6 +60,92 @@
   const normalizePhone = (raw) => String(raw || "").replace(/[^0-9]/g, "");
   const escapeHtml = (str) => String(str ?? "").replace(/[&<>'"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c]));
   const dayLabel = (id, variant = "short") => DAYS.find(d => d.id === Number(id))?.[variant] || id;
+
+  const TAB_SEARCH_META = {
+    live: { label: "En vivo", placeholder: "Buscar operario o servicio...", noun: "coberturas", target: "#liveTable" },
+    analytics: { label: "Análisis", placeholder: "Buscar operario o servicio...", noun: "coberturas", target: "#analyticsSummaryTable" },
+    fichaje: { label: "Fichaje", placeholder: "Buscar operario o servicio...", noun: "fichajes", target: "#fichajeTable" },
+    coverage: { label: "Cobertura", placeholder: "Buscar servicio, zona u operario...", noun: "servicios", target: "#coverageGrid" },
+    assignments: { label: "Asignaciones", placeholder: "Buscar operario, servicio o tipo de asignación...", noun: "asignaciones", target: "#assignmentsList" },
+    sites: { label: "Servicios", placeholder: "Buscar servicio, dirección o zona...", noun: "servicios", target: "#sitesList" },
+    users: { label: "Usuarios", placeholder: "Buscar nombre, usuario, email o rol...", noun: "usuarios", target: "#usersList" },
+    records: { label: "Registros", placeholder: "Buscar operario, servicio o estado...", noun: "marcaciones", target: "#recordsTable" }
+  };
+
+  function normalizeSearchText(value) {
+    return String(value ?? "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function sectionSearchTerm(tab = state.activeTab) {
+    return normalizeSearchText(state.sectionSearch?.[tab] || "");
+  }
+
+  function valuesMatchSearch(term, ...values) {
+    const q = normalizeSearchText(term);
+    if (!q) return true;
+    const words = q.split(" ").filter(Boolean);
+    const haystack = normalizeSearchText(values.flat(Infinity).filter(value => value != null).join(" "));
+    return words.every(word => haystack.includes(word));
+  }
+
+  function objectMatchesSearch(term, object) {
+    return valuesMatchSearch(term, ...Object.values(object || {}));
+  }
+
+  function updateSectionSearchCount(tab, visible, total) {
+    state.searchCounts[tab] = { visible: Number(visible || 0), total: Number(total || 0) };
+    if (state.activeTab !== tab) return;
+    const label = $("#contextSearchResultLabel");
+    if (!label) return;
+    const meta = TAB_SEARCH_META[tab] || { noun: "resultados" };
+    const hasSearch = Boolean(sectionSearchTerm(tab));
+    label.textContent = hasSearch ? `${visible} de ${total} ${meta.noun}` : `${total} ${meta.noun}`;
+  }
+
+  function syncContextSearchUI(tab = state.activeTab) {
+    const input = $("#contextSearchInput");
+    const sectionLabel = $("#contextSearchSectionLabel");
+    const clear = $("#clearContextSearchBtn");
+    if (!input || !sectionLabel || !clear) return;
+    const meta = TAB_SEARCH_META[tab] || TAB_SEARCH_META.live;
+    sectionLabel.textContent = meta.label;
+    input.placeholder = meta.placeholder;
+    input.value = state.sectionSearch?.[tab] || "";
+    clear.classList.toggle("hidden", !String(input.value || "").trim());
+    const counts = state.searchCounts[tab];
+    if (counts) updateSectionSearchCount(tab, counts.visible, counts.total);
+    else $("#contextSearchResultLabel").textContent = "";
+  }
+
+  function renderSectionForContextSearch(tab = state.activeTab) {
+    if (tab === "live") return renderDashboard();
+    if (tab === "analytics") return renderAnalyticsFromState();
+    if (tab === "fichaje") {
+      if (state.fichajeLoaded) return renderFichaje(state.fichajeEvents, state.fichajeProfiles, state.fichajeSites);
+      return renderFichaje();
+    }
+    if (tab === "coverage") return renderCoverage();
+    if (tab === "assignments") return renderAssignments();
+    if (tab === "sites") return renderSites();
+    if (tab === "users") return renderUsers();
+    if (tab === "records") return renderRecords();
+  }
+
+  function focusCurrentSearchResults() {
+    const tab = state.activeTab;
+    const meta = TAB_SEARCH_META[tab];
+    const target = meta?.target ? $(meta.target) : null;
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    target.classList.remove("search-target-flash");
+    requestAnimationFrame(() => target.classList.add("search-target-flash"));
+    window.setTimeout(() => target.classList.remove("search-target-flash"), 1200);
+  }
 
   function dateToISO(date) {
     const y = date.getFullYear();
@@ -1180,7 +1272,10 @@
     const operators = sourceProfiles.filter(p => p.role === "operator").sort((a, b) => a.full_name.localeCompare(b.full_name));
     select.innerHTML = `<option value="">Todos</option>` + operators.map(op => `<option value="${op.id}" ${op.id === currentVal ? "selected" : ""}>${escapeHtml(op.full_name)}</option>`).join("");
 
-    const rows = buildFichajeRows(dateFrom, dateTo, operatorFilter, sourceEvents, sourceProfiles, sourceSites);
+    const allRows = buildFichajeRows(dateFrom, dateTo, operatorFilter, sourceEvents, sourceProfiles, sourceSites);
+    const searchTerm = sectionSearchTerm("fichaje");
+    const rows = searchTerm ? allRows.filter(row => valuesMatchSearch(searchTerm, row.operator_name, row.site_name, row.work_type_label, row.estado, row.shift_date, row.validation_label)) : allRows;
+    updateSectionSearchCount("fichaje", rows.length, allRows.length);
 
     // Summary totals per operator
     const totals = new Map();
@@ -1202,7 +1297,7 @@
     `;
 
     const tableRows = rows.map(row => `
-      <tr>
+      <tr class="${searchTerm ? "search-match-row" : ""}">
         <td>${escapeHtml(row.shift_date)}</td>
         <td><strong>${escapeHtml(row.operator_name)}</strong></td>
         <td>${escapeHtml(row.site_name)}</td>
@@ -1231,6 +1326,10 @@
       store.listAllProfiles(),
       store.listAllSites()
     ]);
+    state.fichajeEvents = events;
+    state.fichajeProfiles = profiles;
+    state.fichajeSites = sites;
+    state.fichajeLoaded = true;
     renderFichaje(events, profiles, sites);
     return { events, profiles, sites, dateFrom, dateTo };
   }
@@ -1328,6 +1427,7 @@
     $$(".tab-btn").forEach(btn => btn.classList.toggle("active", btn.dataset.tab === tab));
     $$(".tab-panel").forEach(panel => panel.classList.remove("active"));
     $(`#${tab}Tab`).classList.add("active");
+    syncContextSearchUI(tab);
   }
 
   function statusDetailCell(status, event, emptyText) {
@@ -1571,7 +1671,21 @@
     `;
 
     renderLiveStatusFilters(rows);
-    const visibleRows = filteredDashboardRows(rows);
+    const statusFilteredRows = filteredDashboardRows(rows);
+    const searchTerm = sectionSearchTerm("live");
+    const visibleRows = searchTerm ? statusFilteredRows.filter(row => {
+      const operator = byId(state.profiles, row.shift.operator_id);
+      const site = byId(state.sites, row.shift.site_id);
+      return valuesMatchSearch(
+        searchTerm,
+        operator?.full_name, operator?.phone,
+        site?.name, site?.address, site?.zone, site?.supervisor_name,
+        row.entryStatus?.label, row.exitStatus?.label, row.status?.label,
+        assignmentTypeLabel(row.shift.assignment_type || row.extraWorkType || "fixed"),
+        row.entryEvent?.notes, row.exitEvent?.notes
+      );
+    }) : statusFilteredRows;
+    updateSectionSearchCount("live", visibleRows.length, statusFilteredRows.length);
 
     const tableRows = visibleRows.map(row => {
       const { shift, entryEvent, exitEvent, entryStatus, exitStatus, status, lastEvent } = row;
@@ -1590,7 +1704,7 @@
       ].filter(Boolean).join("");
 
       return `
-        <tr>
+        <tr class="${searchTerm ? "search-match-row" : ""}">
           <td><strong>${escapeHtml(operator?.full_name || "—")}</strong><br><span class="muted small">${escapeHtml(operator?.phone || "")}</span></td>
           <td><strong>${escapeHtml(site?.name || "—")}</strong><br>${typeBadge ? `${typeBadge}<br>` : ""}<span class="muted small">${escapeHtml(site?.address || "")}</span></td>
           <td>${row.isSelfReportedExtra ? `<span class="extra-schedule-label">Sin horario previo</span>` : `${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`}</td>
@@ -1835,19 +1949,21 @@
 
   function assignmentMatchesSearch(site, assignments, term) {
     if (!term) return true;
-    const haystack = [
+    return valuesMatchSearch(
+      term,
       site.name, site.address, site.zone, site.supervisor_name, site.service_type,
       ...assignments.map(a => byId(state.profiles, a.operator_id)?.full_name || "")
-    ].join(" ").toLowerCase();
-    return haystack.includes(term.toLowerCase());
+    );
   }
 
   function renderCoverage() {
-    const term = $("#coverageSearch")?.value?.trim() || "";
+    const term = sectionSearchTerm("coverage");
     const grid = $("#coverageGrid");
-    const html = state.sites
-      .map(site => ({ site, assignments: state.assignments.filter(a => a.site_id === site.id && (a.assignment_type || "fixed") === "fixed") }))
-      .filter(group => assignmentMatchesSearch(group.site, group.assignments, term))
+    const groups = state.sites
+      .map(site => ({ site, assignments: state.assignments.filter(a => a.site_id === site.id && (a.assignment_type || "fixed") === "fixed") }));
+    const visibleGroups = groups.filter(group => assignmentMatchesSearch(group.site, group.assignments, term));
+    updateSectionSearchCount("coverage", visibleGroups.length, groups.length);
+    const html = visibleGroups
       .map(({ site, assignments }) => {
         const dayCards = DAYS.map(day => {
           const dayAssignments = assignments.filter(a => (a.days_of_week || []).map(Number).includes(day.id));
@@ -1859,7 +1975,7 @@
         }).join("");
 
         return `
-          <article class="service-card">
+          <article class="service-card ${term ? "search-match-card" : ""}">
             <div class="service-card-head">
               <div>
                 <h3>${escapeHtml(site.name)}</h3>
@@ -1881,9 +1997,12 @@
     const list = $("#sitesList");
     const validIds = new Set(state.sites.map(site => site.id));
     state.bulkSelectedSiteIds = new Set([...state.bulkSelectedSiteIds].filter(id => validIds.has(id)));
+    const searchTerm = sectionSearchTerm("sites");
+    const visibleSites = searchTerm ? state.sites.filter(site => valuesMatchSearch(searchTerm, site.name, site.address, site.zone, site.supervisor_name, site.service_type, site.whatsapp_name, site.whatsapp_phone)) : state.sites;
+    updateSectionSearchCount("sites", visibleSites.length, state.sites.length);
 
-    list.innerHTML = state.sites.map(site => `
-      <div class="list-item ${state.bulkSelectedSiteIds.has(site.id) ? "bulk-selected-item" : ""}">
+    list.innerHTML = visibleSites.map(site => `
+      <div class="list-item ${state.bulkSelectedSiteIds.has(site.id) ? "bulk-selected-item" : ""} ${searchTerm ? "search-match-card" : ""}">
         <div class="bulk-select-line">
           <label class="bulk-select-control">
             <input type="checkbox" data-select-site="${site.id}" ${state.bulkSelectedSiteIds.has(site.id) ? "checked" : ""} />
@@ -2255,8 +2374,16 @@
       const siteB = byId(state.sites, b.site_id)?.name || "";
       return `${siteA} ${a.scheduled_start}`.localeCompare(`${siteB} ${b.scheduled_start}`);
     });
+    const searchTerm = sectionSearchTerm("assignments");
+    const visibleAssignments = searchTerm ? sorted.filter(assignment => {
+      const op = byId(state.profiles, assignment.operator_id);
+      const site = byId(state.sites, assignment.site_id);
+      const coveredOp = assignment.covered_operator_id ? byId(state.profiles, assignment.covered_operator_id) : null;
+      return valuesMatchSearch(searchTerm, op?.full_name, site?.name, site?.address, site?.zone, coveredOp?.full_name, assignmentTypeLabel(assignment.assignment_type || "fixed"), assignment.notes, assignment.scheduled_start, assignment.scheduled_end);
+    }) : sorted;
+    updateSectionSearchCount("assignments", visibleAssignments.length, sorted.length);
 
-    list.innerHTML = sorted.map(assignment => {
+    list.innerHTML = visibleAssignments.map(assignment => {
       const op = byId(state.profiles, assignment.operator_id);
       const site = byId(state.sites, assignment.site_id);
       const coveredOp = assignment.covered_operator_id ? byId(state.profiles, assignment.covered_operator_id) : null;
@@ -2265,7 +2392,7 @@
       const vigencia = `${assignment.valid_from || "—"}${assignment.valid_to ? ` a ${assignment.valid_to}` : " en adelante"}`;
       const selected = state.bulkSelectedAssignmentIds.has(assignment.id);
       return `
-        <div class="list-item ${selected ? "bulk-selected-item" : ""}">
+        <div class="list-item ${selected ? "bulk-selected-item" : ""} ${searchTerm ? "search-match-card" : ""}">
           <div class="bulk-select-line">
             <label class="bulk-select-control">
               <input type="checkbox" data-select-assignment="${assignment.id}" ${selected ? "checked" : ""} />
@@ -2379,12 +2506,15 @@
 
   function renderUsers() {
     const list = $("#usersList");
-    list.innerHTML = state.profiles.map(user => {
+    const searchTerm = sectionSearchTerm("users");
+    const visibleUsers = searchTerm ? state.profiles.filter(user => valuesMatchSearch(searchTerm, user.full_name, user.username, user.email, user.phone, roleLabel(user.role), user.notes)) : state.profiles;
+    updateSectionSearchCount("users", visibleUsers.length, state.profiles.length);
+    list.innerHTML = visibleUsers.map(user => {
       const manageable = canManageAccountUser(user);
       const username = user.username || (String(user.email || "").toLowerCase().endsWith("@cleanit.ar") ? String(user.email).split("@")[0] : "Sin usuario");
       const recoveryEmail = hasRealRecoveryEmail(user) ? user.email : "Sin email real de recuperación";
       return `
-      <div class="list-item">
+      <div class="list-item ${searchTerm ? "search-match-card" : ""}">
         <div class="list-item-title">${escapeHtml(user.full_name)}</div>
         <div class="muted small">${escapeHtml(roleLabel(user.role).replace(/^./, c => c.toUpperCase()))} · Usuario: <strong>${escapeHtml(username)}</strong></div>
         <div class="muted small ${hasRealRecoveryEmail(user) ? "" : "warning-text"}">Email recuperación: ${escapeHtml(recoveryEmail)}</div>
@@ -3221,9 +3351,12 @@
   function renderAnalyticsFromState() {
     const service = $("#analyticsService")?.value || "";
     const allRows = state.analyticsAllRows || [];
-    const rows = service ? allRows.filter(row => analyticsServiceValue(row) === service) : allRows;
-    const summary = buildAnalyticsSummary(rows, state.analyticsProfiles || [], !service);
+    const serviceRows = service ? allRows.filter(row => analyticsServiceValue(row) === service) : allRows;
+    const searchTerm = sectionSearchTerm("analytics");
+    const rows = searchTerm ? serviceRows.filter(row => objectMatchesSearch(searchTerm, row)) : serviceRows;
+    const summary = buildAnalyticsSummary(rows, state.analyticsProfiles || [], !service && !searchTerm);
     const daily = operationalHoursByOperatorDate(rows);
+    updateSectionSearchCount("analytics", rows.length, serviceRows.length);
     state.analyticsRows = rows;
     state.analyticsSummary = summary;
     state.analyticsDaily = daily;
@@ -3253,7 +3386,7 @@
     renderAnalyticsRanking("#analyticsOutsideRanking", summary, "Fichajes fuera de radio", value => String(value));
 
     const rowsHtml = [...summary].sort((a, b) => a.Operario.localeCompare(b.Operario, "es")).map(item => `
-      <tr>
+      <tr class="${searchTerm ? "search-match-row" : ""}">
         <td><strong>${escapeHtml(item.Operario)}</strong></td>
         <td><strong>${escapeHtml(item["Horas confirmadas"])}</strong><br><span class="muted small">${Number(item["Horas confirmadas (decimal)"] || 0).toFixed(2)} h</span></td>
         <td>${escapeHtml(item["Horas pendientes validar"])}</td>
@@ -3425,15 +3558,22 @@
 
   function renderRecords() {
     const events = state.recordsLoaded ? state.recordsEvents : state.events;
-    const displayLimit = 1000;
-    const displayEvents = events.slice(0, displayLimit);
     const profileSource = state.recordsLoaded ? state.recordsProfiles : state.profiles;
     const siteSource = state.recordsLoaded ? state.recordsSites : state.sites;
+    const searchTerm = sectionSearchTerm("records");
+    const filteredEvents = searchTerm ? events.filter(event => {
+      const op = byId(profileSource, event.operator_id);
+      const site = byId(siteSource, event.site_id);
+      return valuesMatchSearch(searchTerm, op?.full_name, site?.name, site?.address, site?.zone, workTypeLabel(event.work_type || "regular"), eventTypeLabel(event.event_type), observedStatusLabel(event.observed_status), event.notes, event.shift_date);
+    }) : events;
+    updateSectionSearchCount("records", filteredEvents.length, events.length);
+    const displayLimit = 1000;
+    const displayEvents = filteredEvents.slice(0, displayLimit);
     const rows = displayEvents.map(event => {
       const op = byId(profileSource, event.operator_id);
       const site = byId(siteSource, event.site_id);
       return `
-        <tr>
+        <tr class="${searchTerm ? "search-match-row" : ""}">
           <td>${formatDateTime(eventTimestamp(event) || event.created_at)}</td>
           <td>${escapeHtml(event.shift_date || "—")}</td>
           <td>${escapeHtml(op?.full_name || event.operator_id || "—")}</td>
@@ -3461,8 +3601,9 @@
         const period = resolvePeriod("records");
         label = period.isAll ? "historial completo" : period.from === period.to ? formatOperationalDate(period.from) : `${formatOperationalDate(period.from)} al ${formatOperationalDate(period.to)}`;
       } catch (_) { /* conserva etiqueta genérica */ }
-      const displayNote = events.length > displayLimit ? ` · mostrando ${displayLimit} en pantalla; la exportación incluye las ${events.length}` : "";
-      summary.textContent = `${events.length} marcación${events.length === 1 ? "" : "es"} · ${label}${displayNote}`;
+      const displayNote = filteredEvents.length > displayLimit ? ` · mostrando ${displayLimit} coincidencias en pantalla` : "";
+      const searchNote = searchTerm ? ` · ${filteredEvents.length} coincidencia${filteredEvents.length === 1 ? "" : "s"} de ${events.length}` : "";
+      summary.textContent = `${events.length} marcación${events.length === 1 ? "" : "es"} · ${label}${searchNote}${displayNote}`;
     }
   }
 
@@ -3517,6 +3658,24 @@
     $("#operatorLogoutBtn").addEventListener("click", logout);
     $("#refreshOperatorBtn")?.addEventListener("click", () => renderOperatorView().catch(error => toast(error.message || "No se pudieron actualizar los servicios.")));
     $("#supervisorLogoutBtn").addEventListener("click", logout);
+    $("#contextSearchInput")?.addEventListener("input", (event) => {
+      const tab = state.activeTab;
+      state.sectionSearch[tab] = event.target.value || "";
+      syncContextSearchUI(tab);
+      renderSectionForContextSearch(tab);
+    });
+    $("#contextSearchInput")?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      focusCurrentSearchResults();
+    });
+    $("#clearContextSearchBtn")?.addEventListener("click", () => {
+      const tab = state.activeTab;
+      state.sectionSearch[tab] = "";
+      syncContextSearchUI(tab);
+      renderSectionForContextSearch(tab);
+      $("#contextSearchInput")?.focus();
+    });
     $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => {
       renderTab(btn.dataset.tab);
       if (btn.dataset.tab === "records") loadRecordsPeriod().catch(error => toast(error.message || "No se pudieron cargar los registros."));
@@ -3566,9 +3725,6 @@
       if (!$("#locationModal").classList.contains("hidden")) closeModal("locationModal");
       else if (!$("#quickDetailModal").classList.contains("hidden")) closeModal("quickDetailModal");
     });
-    $("#coverageSearch").addEventListener("input", renderCoverage);
-    $("#clearCoverageSearchBtn").addEventListener("click", () => { $("#coverageSearch").value = ""; renderCoverage(); });
-
     $("#siteForm").addEventListener("submit", async (event) => {
       event.preventDefault();
       await store.upsertSite(sitePayloadFromForm());

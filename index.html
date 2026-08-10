@@ -126,6 +126,21 @@
           <button class="tab-btn" data-tab="records" type="button">Registros</button>
         </nav>
 
+        <div id="contextSearchBar" class="context-search-bar" role="search" aria-label="Buscador de la sección actual">
+          <div class="context-search-copy">
+            <span class="context-search-label">Buscar en <strong id="contextSearchSectionLabel">En vivo</strong></span>
+            <span class="muted small">Operario, servicio u otro dato visible de esta sección.</span>
+          </div>
+          <div class="context-search-controls">
+            <div class="context-search-input-wrap">
+              <span class="context-search-icon" aria-hidden="true">⌕</span>
+              <input id="contextSearchInput" type="search" autocomplete="off" placeholder="Buscar operario o servicio..." aria-label="Buscar en la sección actual" />
+              <button class="ghost-btn small-btn context-search-clear hidden" id="clearContextSearchBtn" type="button">Limpiar</button>
+            </div>
+            <span id="contextSearchResultLabel" class="context-search-result muted small" aria-live="polite"></span>
+          </div>
+        </div>
+
         <section id="fichajeTab" class="tab-panel">
           <div class="data-card">
             <div class="card-title-row">
@@ -288,13 +303,6 @@
         </section>
 
         <section id="coverageTab" class="tab-panel">
-          <div class="toolbar-card compact-toolbar">
-            <label>
-              <span>Buscar servicio, zona u operario</span>
-              <input id="coverageSearch" placeholder="Ej. Colegiales, Chaves, Alvarez Thomas" />
-            </label>
-            <button class="secondary-btn" id="clearCoverageSearchBtn" type="button">Limpiar</button>
-          </div>
           <div class="data-card">
             <div class="card-title-row">
               <div>
@@ -574,7 +582,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="js/config.js"></script>
-  <script src="js/storage.js?v=20260810-analytics1"></script>
-  <script src="js/app.js?v=20260810-analytics1"></script>
+  <script src="js/storage.js?v=20260810-search1"></script>
+  <script src="js/app.js?v=20260810-search1"></script>
 </body>
 </html>
