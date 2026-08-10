@@ -1584,69 +1584,212 @@
     return definition ? rows.filter(definition.matches) : rows;
   }
 
-  let liveScrollSyncLock = false;
+  let managedTableScrollSyncLock = false;
+  let managedTableActiveScrollWrap = null;
+  let managedTableActiveHeaderWrap = null;
+  let managedTableObserver = null;
+  let managedTableRefreshFrame = 0;
+  let managedHeaderNeedsRebuild = true;
 
-  function refreshLiveFloatingScrollbar() {
-    const tableWrap = $("#liveTable");
-    const proxy = $("#liveTableScrollProxy");
-    if (!tableWrap || !proxy) return;
-    const inner = proxy.querySelector(".floating-h-scroll-inner");
-    if (!inner) return;
+  function ensureManagedTableHelpers() {
+    let scrollProxy = $("#globalTableScrollProxy");
+    if (!scrollProxy) {
+      scrollProxy = document.createElement("div");
+      scrollProxy.id = "globalTableScrollProxy";
+      scrollProxy.className = "floating-h-scroll hidden";
+      scrollProxy.setAttribute("aria-hidden", "true");
+      scrollProxy.innerHTML = '<div class="floating-h-scroll-inner"></div>';
+      document.body.appendChild(scrollProxy);
+    }
 
-    const hasOverflow = tableWrap.scrollWidth > tableWrap.clientWidth + 2;
-    const rect = tableWrap.getBoundingClientRect();
+    let headerProxy = $("#globalTableHeaderProxy");
+    if (!headerProxy) {
+      headerProxy = document.createElement("div");
+      headerProxy.id = "globalTableHeaderProxy";
+      headerProxy.className = "floating-table-header hidden";
+      headerProxy.setAttribute("aria-hidden", "true");
+      headerProxy.innerHTML = '<div class="floating-table-header-scroll"></div>';
+      document.body.appendChild(headerProxy);
+    }
+
+    if (scrollProxy.dataset.bound !== "1") {
+      scrollProxy.dataset.bound = "1";
+      scrollProxy.addEventListener("scroll", () => {
+        const target = managedTableActiveScrollWrap;
+        if (!target || managedTableScrollSyncLock) return;
+        managedTableScrollSyncLock = true;
+        target.scrollLeft = scrollProxy.scrollLeft;
+        const headerScroll = headerProxy.querySelector(".floating-table-header-scroll");
+        if (managedTableActiveHeaderWrap === target && headerScroll) headerScroll.scrollLeft = scrollProxy.scrollLeft;
+        managedTableScrollSyncLock = false;
+      }, { passive: true });
+    }
+    return { scrollProxy, headerProxy };
+  }
+
+  function visibleResponsiveTables() {
+    return $$(".responsive-table").filter(wrap => {
+      if (!wrap.querySelector("table")) return false;
+      const style = window.getComputedStyle(wrap);
+      return style.display !== "none" && style.visibility !== "hidden" && wrap.getClientRects().length > 0;
+    });
+  }
+
+  function managedStickyTop() {
+    let top = 8;
+    [$(".topbar"), $("#contextSearchBar")].filter(Boolean).forEach(element => {
+      const rect = element.getBoundingClientRect();
+      // Solo cuenta como obstrucción cuando realmente está pegado a la parte superior.
+      if (rect.bottom > 0 && rect.top <= 18) top = Math.max(top, rect.bottom + 6);
+    });
+    return Math.min(top, Math.max(8, (window.innerHeight || 0) - 120));
+  }
+
+  function bindManagedTableWrap(wrap) {
+    if (wrap.dataset.managedTableBound === "1") return;
+    wrap.dataset.managedTableBound = "1";
+    wrap.addEventListener("scroll", () => {
+      const { scrollProxy, headerProxy } = ensureManagedTableHelpers();
+      if (!managedTableScrollSyncLock && managedTableActiveScrollWrap === wrap) {
+        managedTableScrollSyncLock = true;
+        scrollProxy.scrollLeft = wrap.scrollLeft;
+        managedTableScrollSyncLock = false;
+      }
+      if (managedTableActiveHeaderWrap === wrap) {
+        const headerScroll = headerProxy.querySelector(".floating-table-header-scroll");
+        if (headerScroll) headerScroll.scrollLeft = wrap.scrollLeft;
+      }
+    }, { passive: true });
+  }
+
+  function rebuildFloatingTableHeader(wrap, headerProxy) {
+    const sourceTable = wrap?.querySelector("table");
+    const sourceHead = sourceTable?.querySelector("thead");
+    const holder = headerProxy.querySelector(".floating-table-header-scroll");
+    if (!sourceTable || !sourceHead || !holder) return false;
+
+    const clonedHead = sourceHead.cloneNode(true);
+    clonedHead.querySelectorAll("[id]").forEach(element => element.removeAttribute("id"));
+    clonedHead.querySelectorAll("input, button, select, a").forEach(element => element.setAttribute("tabindex", "-1"));
+
+    const floatingTable = document.createElement("table");
+    floatingTable.setAttribute("aria-hidden", "true");
+    const sourceWidth = Math.max(sourceTable.scrollWidth, sourceTable.getBoundingClientRect().width, wrap.scrollWidth);
+    floatingTable.style.width = `${sourceWidth}px`;
+    floatingTable.style.minWidth = `${sourceWidth}px`;
+    floatingTable.appendChild(clonedHead);
+    holder.replaceChildren(floatingTable);
+
+    const sourceCells = Array.from(sourceHead.querySelectorAll("tr:first-child > th"));
+    const cloneCells = Array.from(clonedHead.querySelectorAll("tr:first-child > th"));
+    sourceCells.forEach((cell, index) => {
+      const clone = cloneCells[index];
+      if (!clone) return;
+      const width = cell.getBoundingClientRect().width;
+      clone.style.width = `${width}px`;
+      clone.style.minWidth = `${width}px`;
+      clone.style.maxWidth = `${width}px`;
+    });
+    managedHeaderNeedsRebuild = false;
+    return true;
+  }
+
+  function refreshManagedTableUX() {
+    managedTableRefreshFrame = 0;
+    const { scrollProxy, headerProxy } = ensureManagedTableHelpers();
+    const scrollInner = scrollProxy.querySelector(".floating-h-scroll-inner");
+    const wraps = visibleResponsiveTables();
+    wraps.forEach(bindManagedTableWrap);
+
     const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-    const tableIsOnScreen = rect.bottom > 0 && rect.top < viewportHeight;
-    const nativeBottomScrollbarIsBelowViewport = rect.bottom > viewportHeight - 2;
-    const shouldFloat = hasOverflow && tableIsOnScreen && nativeBottomScrollbarIsBelowViewport;
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+    const stickyTop = managedStickyTop();
 
-    inner.style.width = `${Math.max(tableWrap.scrollWidth, tableWrap.clientWidth)}px`;
+    // 1) Scrollbar horizontal: controla la tabla que atraviesa el borde inferior del viewport.
+    const scrollCandidates = wraps
+      .filter(wrap => wrap.scrollWidth > wrap.clientWidth + 2)
+      .map(wrap => ({ wrap, rect: wrap.getBoundingClientRect() }))
+      .filter(item => item.rect.top < viewportHeight - 8 && item.rect.bottom > viewportHeight - 2)
+      .sort((a, b) => b.rect.top - a.rect.top);
+    const scrollTarget = scrollCandidates[0]?.wrap || null;
 
-    if (!shouldFloat) {
-      proxy.classList.add("hidden");
-      return;
+    if (!scrollTarget || !scrollInner) {
+      managedTableActiveScrollWrap = null;
+      scrollProxy.classList.add("hidden");
+    } else {
+      const rect = scrollTarget.getBoundingClientRect();
+      const left = Math.max(8, rect.left);
+      const right = Math.min(viewportWidth - 8, rect.right);
+      if (right - left < 120) {
+        managedTableActiveScrollWrap = null;
+        scrollProxy.classList.add("hidden");
+      } else {
+        managedTableActiveScrollWrap = scrollTarget;
+        scrollInner.style.width = `${Math.max(scrollTarget.scrollWidth, scrollTarget.clientWidth)}px`;
+        scrollProxy.style.left = `${left}px`;
+        scrollProxy.style.width = `${right - left}px`;
+        scrollProxy.style.bottom = "8px";
+        scrollProxy.classList.remove("hidden");
+        if (!managedTableScrollSyncLock && Math.abs(scrollProxy.scrollLeft - scrollTarget.scrollLeft) > 1) {
+          scrollProxy.scrollLeft = scrollTarget.scrollLeft;
+        }
+      }
     }
 
-    const left = Math.max(8, rect.left);
-    const right = Math.min(window.innerWidth - 8, rect.right);
-    const width = Math.max(120, right - left);
-    proxy.style.left = `${left}px`;
-    proxy.style.width = `${width}px`;
-    proxy.style.bottom = "8px";
-    proxy.classList.remove("hidden");
+    // 2) Encabezado flotante: conserva los títulos de columna al bajar por cualquier tabla larga.
+    const headerCandidates = wraps.map(wrap => {
+      const table = wrap.querySelector("table");
+      const thead = table?.querySelector("thead");
+      return thead ? { wrap, table, thead, rect: wrap.getBoundingClientRect(), headRect: thead.getBoundingClientRect() } : null;
+    }).filter(Boolean)
+      .filter(item => item.rect.top < stickyTop && item.rect.bottom > stickyTop + 44 && item.headRect.bottom <= stickyTop + 2)
+      .sort((a, b) => b.rect.top - a.rect.top);
+    const headerTarget = headerCandidates[0]?.wrap || null;
 
-    if (!liveScrollSyncLock && Math.abs(proxy.scrollLeft - tableWrap.scrollLeft) > 1) {
-      proxy.scrollLeft = tableWrap.scrollLeft;
+    if (!headerTarget) {
+      managedTableActiveHeaderWrap = null;
+      headerProxy.classList.add("hidden");
+    } else {
+      const rect = headerTarget.getBoundingClientRect();
+      const left = Math.max(8, rect.left);
+      const right = Math.min(viewportWidth - 8, rect.right);
+      const targetChanged = managedTableActiveHeaderWrap !== headerTarget;
+      if (targetChanged) managedHeaderNeedsRebuild = true;
+      managedTableActiveHeaderWrap = headerTarget;
+      if (managedHeaderNeedsRebuild || targetChanged || !headerProxy.querySelector("thead")) {
+        rebuildFloatingTableHeader(headerTarget, headerProxy);
+      }
+      const headerScroll = headerProxy.querySelector(".floating-table-header-scroll");
+      headerProxy.style.left = `${left}px`;
+      headerProxy.style.width = `${Math.max(120, right - left)}px`;
+      headerProxy.style.top = `${stickyTop}px`;
+      headerProxy.classList.remove("hidden");
+      if (headerScroll) headerScroll.scrollLeft = headerTarget.scrollLeft;
     }
   }
 
-  function setupLiveFloatingScrollbar() {
-    const tableWrap = $("#liveTable");
-    const proxy = $("#liveTableScrollProxy");
-    if (!tableWrap || !proxy || proxy.dataset.bound === "1") {
-      refreshLiveFloatingScrollbar();
-      return;
-    }
-    proxy.dataset.bound = "1";
-
-    tableWrap.addEventListener("scroll", () => {
-      if (liveScrollSyncLock) return;
-      liveScrollSyncLock = true;
-      proxy.scrollLeft = tableWrap.scrollLeft;
-      liveScrollSyncLock = false;
-    }, { passive: true });
-
-    proxy.addEventListener("scroll", () => {
-      if (liveScrollSyncLock) return;
-      liveScrollSyncLock = true;
-      tableWrap.scrollLeft = proxy.scrollLeft;
-      liveScrollSyncLock = false;
-    }, { passive: true });
-
-    window.addEventListener("scroll", refreshLiveFloatingScrollbar, { passive: true });
-    window.addEventListener("resize", refreshLiveFloatingScrollbar, { passive: true });
-    refreshLiveFloatingScrollbar();
+  function scheduleManagedTableRefresh(rebuildHeader = false) {
+    if (rebuildHeader) managedHeaderNeedsRebuild = true;
+    if (managedTableRefreshFrame) return;
+    managedTableRefreshFrame = window.requestAnimationFrame(refreshManagedTableUX);
   }
+
+  function setupManagedTableUX() {
+    ensureManagedTableHelpers();
+    visibleResponsiveTables().forEach(bindManagedTableWrap);
+    if (!managedTableObserver) {
+      const root = $("#supervisorView") || document.body;
+      managedTableObserver = new MutationObserver(() => scheduleManagedTableRefresh(true));
+      managedTableObserver.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style"] });
+      window.addEventListener("scroll", () => scheduleManagedTableRefresh(false), { passive: true });
+      window.addEventListener("resize", () => scheduleManagedTableRefresh(true), { passive: true });
+    }
+    scheduleManagedTableRefresh(true);
+  }
+
+  // Compatibilidad con llamadas existentes de En vivo. Ahora el comportamiento es global.
+  function refreshLiveFloatingScrollbar() { scheduleManagedTableRefresh(false); }
+  function setupLiveFloatingScrollbar() { setupManagedTableUX(); }
 
   async function updateExtraValidation(shiftId, status) {
     if (!isManagementProfile()) return toast("No tenés permisos para validar este registro.");
@@ -4464,6 +4607,7 @@
     });
     $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => {
       renderTab(btn.dataset.tab);
+      scheduleManagedTableRefresh(true);
       if (btn.dataset.tab === "records") loadRecordsPeriod().catch(error => toast(error.message || "No se pudieron cargar los registros."));
       if (btn.dataset.tab === "analytics" && !state.analyticsLoaded) loadAnalyticsData().catch(error => toast(error.message || "No se pudo generar el análisis."));
       if (btn.dataset.tab === "fichaje") loadFichajePeriod().catch(error => toast(error.message || "No se pudo cargar el fichaje del período."));
@@ -4646,6 +4790,7 @@
     syncPeriodControls("records", false);
     syncPeriodControls("analytics", false);
     bindEvents();
+    setupManagedTableUX();
 
     store.onAuthStateChange((event, session) => {
       if (event === "PASSWORD_RECOVERY") {

@@ -350,10 +350,17 @@ input:focus, select:focus, textarea:focus { border-color: var(--primary); box-sh
 .tone-absent .filter-dot { background: #dc2626; }
 .tone-alert .filter-dot { background: #ea580c; }
 .tone-exit .filter-dot { background: #7c3aed; }
-.responsive-table { width: 100%; overflow-x: auto; }
+.responsive-table {
+  width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-gutter: stable;
+}
 
-/* Barra horizontal flotante para tablas anchas: permanece visible mientras
-   el usuario está recorriendo verticalmente Estado por servicio. */
+/* UX global para tablas anchas · 2026-08-10
+   - encabezado flotante mientras se recorre verticalmente una tabla;
+   - scrollbar horizontal flotante cuando la barra nativa quedó debajo del viewport.
+   Se aplica a TODAS las .responsive-table del panel. */
 .floating-h-scroll {
   position: fixed;
   z-index: 85;
@@ -372,6 +379,33 @@ input:focus, select:focus, textarea:focus { border-color: var(--primary); box-sh
 .floating-h-scroll::-webkit-scrollbar-track { background: #e2e8f0; border-radius: 999px; }
 .floating-h-scroll::-webkit-scrollbar-thumb { background: #64748b; border-radius: 999px; border: 2px solid #e2e8f0; }
 .floating-h-scroll-inner { height: 1px; }
+
+.floating-table-header {
+  position: fixed;
+  z-index: 34;
+  overflow: hidden;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: rgba(248, 250, 252, .985);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, .13);
+  pointer-events: none;
+}
+.floating-table-header-scroll {
+  width: 100%;
+  overflow: hidden;
+}
+.floating-table-header table {
+  margin: 0;
+  border-collapse: collapse;
+  table-layout: fixed;
+  background: #f8fafc;
+}
+.floating-table-header th {
+  background: #f8fafc;
+  color: #475569;
+  border-bottom: 0;
+  box-shadow: inset 0 -1px 0 #cbd5e1;
+}
 table { width: 100%; border-collapse: collapse; min-width: 760px; }
 th, td { text-align: left; padding: 12px 10px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: .9rem; }
 th { color: var(--muted); font-size: .76rem; text-transform: uppercase; letter-spacing: .08em; }
