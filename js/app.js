@@ -984,6 +984,70 @@
     return definition ? rows.filter(definition.matches) : rows;
   }
 
+  let liveScrollSyncLock = false;
+
+  function refreshLiveFloatingScrollbar() {
+    const tableWrap = $("#liveTable");
+    const proxy = $("#liveTableScrollProxy");
+    if (!tableWrap || !proxy) return;
+    const inner = proxy.querySelector(".floating-h-scroll-inner");
+    if (!inner) return;
+
+    const hasOverflow = tableWrap.scrollWidth > tableWrap.clientWidth + 2;
+    const rect = tableWrap.getBoundingClientRect();
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+    const tableIsOnScreen = rect.bottom > 0 && rect.top < viewportHeight;
+    const nativeBottomScrollbarIsBelowViewport = rect.bottom > viewportHeight - 2;
+    const shouldFloat = hasOverflow && tableIsOnScreen && nativeBottomScrollbarIsBelowViewport;
+
+    inner.style.width = `${Math.max(tableWrap.scrollWidth, tableWrap.clientWidth)}px`;
+
+    if (!shouldFloat) {
+      proxy.classList.add("hidden");
+      return;
+    }
+
+    const left = Math.max(8, rect.left);
+    const right = Math.min(window.innerWidth - 8, rect.right);
+    const width = Math.max(120, right - left);
+    proxy.style.left = `${left}px`;
+    proxy.style.width = `${width}px`;
+    proxy.style.bottom = "8px";
+    proxy.classList.remove("hidden");
+
+    if (!liveScrollSyncLock && Math.abs(proxy.scrollLeft - tableWrap.scrollLeft) > 1) {
+      proxy.scrollLeft = tableWrap.scrollLeft;
+    }
+  }
+
+  function setupLiveFloatingScrollbar() {
+    const tableWrap = $("#liveTable");
+    const proxy = $("#liveTableScrollProxy");
+    if (!tableWrap || !proxy || proxy.dataset.bound === "1") {
+      refreshLiveFloatingScrollbar();
+      return;
+    }
+    proxy.dataset.bound = "1";
+
+    tableWrap.addEventListener("scroll", () => {
+      if (liveScrollSyncLock) return;
+      liveScrollSyncLock = true;
+      proxy.scrollLeft = tableWrap.scrollLeft;
+      liveScrollSyncLock = false;
+    }, { passive: true });
+
+    proxy.addEventListener("scroll", () => {
+      if (liveScrollSyncLock) return;
+      liveScrollSyncLock = true;
+      tableWrap.scrollLeft = proxy.scrollLeft;
+      liveScrollSyncLock = false;
+    }, { passive: true });
+
+    window.addEventListener("scroll", refreshLiveFloatingScrollbar, { passive: true });
+    window.addEventListener("resize", refreshLiveFloatingScrollbar, { passive: true });
+    refreshLiveFloatingScrollbar();
+  }
+
   function renderDashboard() {
     const rows = getDashboardRows();
     state.dashboardRows = rows;
@@ -1040,6 +1104,8 @@
         <tbody>${tableRows || `<tr><td colspan="7">${rows.length ? "No hay personas que coincidan con este filtro." : "No hay cobertura programada para esta fecha."}</td></tr>`}</tbody>
       </table>`;
     $("#lastRefreshLabel").textContent = `Actualizado ${new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })}`;
+    setupLiveFloatingScrollbar();
+    requestAnimationFrame(refreshLiveFloatingScrollbar);
   }
 
   function kpi(label, value, className = "", detailKey = "") {

@@ -351,6 +351,27 @@ input:focus, select:focus, textarea:focus { border-color: var(--primary); box-sh
 .tone-alert .filter-dot { background: #ea580c; }
 .tone-exit .filter-dot { background: #7c3aed; }
 .responsive-table { width: 100%; overflow-x: auto; }
+
+/* Barra horizontal flotante para tablas anchas: permanece visible mientras
+   el usuario está recorriendo verticalmente Estado por servicio. */
+.floating-h-scroll {
+  position: fixed;
+  z-index: 85;
+  height: 20px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: rgba(248, 250, 252, .98);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, .16);
+  scrollbar-width: auto;
+  scrollbar-color: #64748b #e2e8f0;
+}
+.floating-h-scroll::-webkit-scrollbar { height: 14px; }
+.floating-h-scroll::-webkit-scrollbar-track { background: #e2e8f0; border-radius: 999px; }
+.floating-h-scroll::-webkit-scrollbar-thumb { background: #64748b; border-radius: 999px; border: 2px solid #e2e8f0; }
+.floating-h-scroll-inner { height: 1px; }
 table { width: 100%; border-collapse: collapse; min-width: 760px; }
 th, td { text-align: left; padding: 12px 10px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: .9rem; }
 th { color: var(--muted); font-size: .76rem; text-transform: uppercase; letter-spacing: .08em; }
