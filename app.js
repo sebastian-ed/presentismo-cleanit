@@ -380,6 +380,12 @@
       await renderOperatorView();
     } else {
       setView("#supervisorView");
+      const managementRoleLabel = $("#managementRoleLabel");
+      if (managementRoleLabel) {
+        managementRoleLabel.textContent = String(state.currentProfile?.role || "").toLowerCase() === "admin"
+          ? "Vista administrador"
+          : "Vista supervisor";
+      }
       $("#dashboardDate").value = todayISO();
       $("#assignmentValidFrom").value = todayISO();
       await renderSupervisorView();
@@ -1552,8 +1558,11 @@
 
   function canManageAccountUser(user) {
     const currentRole = String(state.currentProfile?.role || "").toLowerCase();
+    const targetRole = String(user?.role || "").toLowerCase();
     if (currentRole === "admin") return true;
-    return currentRole === "supervisor" && String(user?.role || "").toLowerCase() === "operator";
+    // Un supervisor puede gestionar operarios y otros supervisores,
+    // pero nunca crear/editar/eliminar administradores.
+    return currentRole === "supervisor" && ["operator", "supervisor"].includes(targetRole);
   }
 
   function hasRealRecoveryEmail(user) {
@@ -1588,13 +1597,25 @@
   }
 
   function syncUserRolePermissions() {
-    const isAdmin = String(state.currentProfile?.role || "").toLowerCase() === "admin";
+    const currentRole = String(state.currentProfile?.role || "").toLowerCase();
+    const isAdmin = currentRole === "admin";
+    const isSupervisor = currentRole === "supervisor";
     const select = $("#userRole");
     if (!select) return;
+
     Array.from(select.options).forEach(option => {
-      option.disabled = !isAdmin && option.value !== "operator";
+      if (isAdmin) {
+        option.disabled = false;
+      } else if (isSupervisor) {
+        option.disabled = !["operator", "supervisor"].includes(option.value);
+      } else {
+        option.disabled = option.value !== "operator";
+      }
     });
-    if (!isAdmin && !$("#userId").value) select.value = "operator";
+
+    // Si el valor actual quedó fuera de los permisos del usuario, vuelve a Operario.
+    const selected = select.options[select.selectedIndex];
+    if (selected?.disabled) select.value = "operator";
   }
 
   function syncUserFormFields() {

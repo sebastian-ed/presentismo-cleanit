@@ -133,7 +133,9 @@ Deno.serve(async (req) => {
 
   function callerCanManage(callerRole: Role, targetRole: Role) {
     if (callerRole === "admin") return true;
-    return callerRole === "supervisor" && targetRole === "operator";
+    // Supervisores pueden administrar operarios y otros supervisores,
+    // pero no pueden crear ni elevar cuentas a administrador.
+    return callerRole === "supervisor" && ["operator", "supervisor"].includes(targetRole);
   }
 
   try {

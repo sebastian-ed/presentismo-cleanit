@@ -83,6 +83,9 @@ Deno.serve(async (req) => {
     if (!password || password.length < 6) return jsonResponse({ error: "La contraseña debe tener al menos 6 caracteres." }, 400);
     if (!fullName) return jsonResponse({ error: "Cargá nombre y apellido." }, 400);
     if (!['operator', 'supervisor', 'admin'].includes(role)) return jsonResponse({ error: "Rol inválido." }, 400);
+    if (callerProfile.role === 'supervisor' && role === 'admin') {
+      return jsonResponse({ error: "Un supervisor no puede crear administradores." }, 403);
+    }
 
     const adminClient = createClient(supabaseUrl, serviceRoleKey, {
       auth: { persistSession: false, autoRefreshToken: false },
