@@ -836,3 +836,62 @@ body.modal-open { overflow: hidden; }
   .export-period-grid { grid-template-columns: minmax(180px, 1.2fr) minmax(145px, .8fr) minmax(145px, .8fr) auto; }
   .records-export-toolbar { grid-template-columns: minmax(170px, 1fr) minmax(145px, .8fr) minmax(145px, .8fr) auto; }
 }
+
+
+/* Edición masiva de tolerancias y radio GPS · 2026-08-10 */
+.bulk-edit-card {
+  margin-bottom: 14px;
+  border-color: #cbd5e1;
+  background: linear-gradient(135deg, #ffffff, #f8fafc);
+}
+.bulk-edit-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  align-items: end;
+  margin-top: 12px;
+}
+.bulk-edit-grid .primary-btn { min-height: 46px; }
+.bulk-edit-foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 16px;
+  margin-top: 10px;
+}
+.bulk-list-head { gap: 12px; align-items: flex-start; }
+.selection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  justify-content: flex-end;
+}
+.bulk-select-line {
+  display: flex;
+  justify-content: flex-start;
+  margin: -2px 0 8px;
+}
+.bulk-select-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: #475569;
+  font-size: .76rem;
+  font-weight: 800;
+}
+.bulk-select-control input {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  accent-color: #0f172a;
+}
+.list-item.bulk-selected-item {
+  border-color: #94a3b8;
+  box-shadow: inset 4px 0 0 #0f172a;
+  background: #f8fafc;
+}
+@media (min-width: 760px) {
+  .bulk-edit-grid-assignments { grid-template-columns: minmax(180px, 1fr) minmax(170px, .85fr) minmax(170px, .85fr) auto; }
+  .bulk-edit-grid-sites { grid-template-columns: minmax(200px, 1fr) minmax(210px, 1fr) auto; }
+}

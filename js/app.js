@@ -28,7 +28,9 @@
     recordsProfiles: [],
     recordsSites: [],
     recordsLoaded: false,
-    activeTab: "live"
+    activeTab: "live",
+    bulkSelectedAssignmentIds: new Set(),
+    bulkSelectedSiteIds: new Set()
   };
 
   let attendanceMapInstance = null;
@@ -1522,8 +1524,17 @@
 
   function renderSites() {
     const list = $("#sitesList");
+    const validIds = new Set(state.sites.map(site => site.id));
+    state.bulkSelectedSiteIds = new Set([...state.bulkSelectedSiteIds].filter(id => validIds.has(id)));
+
     list.innerHTML = state.sites.map(site => `
-      <div class="list-item">
+      <div class="list-item ${state.bulkSelectedSiteIds.has(site.id) ? "bulk-selected-item" : ""}">
+        <div class="bulk-select-line">
+          <label class="bulk-select-control">
+            <input type="checkbox" data-select-site="${site.id}" ${state.bulkSelectedSiteIds.has(site.id) ? "checked" : ""} />
+            <span>Seleccionar para cambio masivo</span>
+          </label>
+        </div>
         <div class="list-item-head">
           <div>
             <div class="list-item-title">${escapeHtml(site.name)}</div>
@@ -1539,8 +1550,15 @@
         </div>
       </div>`).join("") || `<p class="muted">No hay servicios cargados.</p>`;
 
+    list.querySelectorAll("[data-select-site]").forEach(input => input.addEventListener("change", () => {
+      if (input.checked) state.bulkSelectedSiteIds.add(input.dataset.selectSite);
+      else state.bulkSelectedSiteIds.delete(input.dataset.selectSite);
+      input.closest(".list-item")?.classList.toggle("bulk-selected-item", input.checked);
+      updateBulkSelectionSummaries();
+    }));
     list.querySelectorAll("[data-edit-site]").forEach(btn => btn.addEventListener("click", () => editSite(btn.dataset.editSite)));
     list.querySelectorAll("[data-delete-site]").forEach(btn => btn.addEventListener("click", () => deleteSite(btn.dataset.deleteSite)));
+    updateBulkSelectionSummaries();
   }
 
   function sitePayloadFromForm() {
@@ -1729,8 +1747,104 @@
     }));
   }
 
+  function updateBulkSelectionSummaries() {
+    const assignmentCount = state.bulkSelectedAssignmentIds.size;
+    const siteCount = state.bulkSelectedSiteIds.size;
+    if ($("#bulkAssignmentSelectionSummary")) {
+      $("#bulkAssignmentSelectionSummary").textContent = `${assignmentCount} asignación${assignmentCount === 1 ? "" : "es"} seleccionada${assignmentCount === 1 ? "" : "s"} de ${state.assignments.length}.`;
+    }
+    if ($("#bulkSiteSelectionSummary")) {
+      $("#bulkSiteSelectionSummary").textContent = `${siteCount} servicio${siteCount === 1 ? "" : "s"} seleccionado${siteCount === 1 ? "" : "s"} de ${state.sites.length}.`;
+    }
+  }
+
+  function selectedAssignmentTargets() {
+    const scope = $("#bulkAssignmentScope")?.value || "all";
+    if (scope === "selected") return state.assignments.filter(a => state.bulkSelectedAssignmentIds.has(a.id));
+    return [...state.assignments];
+  }
+
+  function selectedSiteTargets() {
+    const scope = $("#bulkSiteScope")?.value || "all";
+    if (scope === "selected") return state.sites.filter(site => state.bulkSelectedSiteIds.has(site.id));
+    return [...state.sites];
+  }
+
+  async function applyBulkAssignmentSettings() {
+    const graceRaw = $("#bulkAssignmentGrace").value.trim();
+    const absentRaw = $("#bulkAssignmentAbsent").value.trim();
+    if (!graceRaw && !absentRaw) throw new Error("Ingresá al menos un valor para demora o ausencia.");
+
+    const patch = {};
+    if (graceRaw) {
+      const grace = Number(graceRaw);
+      if (!Number.isFinite(grace) || grace < 0 || grace > 120) throw new Error("La tolerancia de demora debe estar entre 0 y 120 minutos.");
+      patch.grace_minutes = Math.round(grace);
+    }
+    if (absentRaw) {
+      const absent = Number(absentRaw);
+      if (!Number.isFinite(absent) || absent < 1 || absent > 240) throw new Error("El margen de ausencia debe estar entre 1 y 240 minutos.");
+      patch.absence_after_minutes = Math.round(absent);
+    }
+
+    const targets = selectedAssignmentTargets();
+    if (!targets.length) throw new Error($("#bulkAssignmentScope").value === "selected" ? "Seleccioná al menos una asignación." : "No hay asignaciones activas para modificar.");
+
+    const invalid = targets.filter(a => {
+      const nextGrace = patch.grace_minutes ?? Number(a.grace_minutes ?? 10);
+      const nextAbsent = patch.absence_after_minutes ?? Number(a.absence_after_minutes ?? 30);
+      return nextAbsent <= nextGrace;
+    });
+    if (invalid.length) {
+      throw new Error(`La ausencia debe quedar después de la tolerancia de demora. Hay ${invalid.length} asignación${invalid.length === 1 ? "" : "es"} que quedarían con valores incompatibles.`);
+    }
+
+    const changes = [
+      patch.grace_minutes !== undefined ? `demora ${patch.grace_minutes} min` : null,
+      patch.absence_after_minutes !== undefined ? `ausencia ${patch.absence_after_minutes} min` : null
+    ].filter(Boolean).join(" · ");
+    const scopeLabel = $("#bulkAssignmentScope").value === "selected" ? "seleccionadas" : "activas";
+    if (!window.confirm(`¿Aplicar ${changes} a ${targets.length} asignación${targets.length === 1 ? "" : "es"} ${scopeLabel}? El cambio también puede modificar las alertas del día en curso.`)) return;
+
+    const button = $("#applyBulkAssignmentsBtn");
+    button.disabled = true;
+    try {
+      await store.bulkUpdateAssignments(targets.map(a => a.id), patch);
+      $("#bulkAssignmentGrace").value = "";
+      $("#bulkAssignmentAbsent").value = "";
+      toast(`${targets.length} asignación${targets.length === 1 ? "" : "es"} actualizada${targets.length === 1 ? "" : "s"}.`, "success");
+      await renderSupervisorView();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function applyBulkSiteRadius() {
+    const radius = Number($("#bulkSiteRadius").value);
+    if (!Number.isFinite(radius) || radius < 10 || radius > 1000) throw new Error("El radio GPS debe estar entre 10 y 1000 metros.");
+    const roundedRadius = Math.round(radius);
+    const targets = selectedSiteTargets();
+    if (!targets.length) throw new Error($("#bulkSiteScope").value === "selected" ? "Seleccioná al menos un servicio." : "No hay servicios activos para modificar.");
+
+    const scopeLabel = $("#bulkSiteScope").value === "selected" ? "seleccionados" : "activos";
+    if (!window.confirm(`¿Establecer un radio GPS de ${roundedRadius} m en ${targets.length} servicio${targets.length === 1 ? "" : "s"} ${scopeLabel}?`)) return;
+
+    const button = $("#applyBulkSitesBtn");
+    button.disabled = true;
+    try {
+      await store.bulkUpdateSites(targets.map(site => site.id), { gps_radius_m: roundedRadius });
+      $("#bulkSiteRadius").value = "";
+      toast(`${targets.length} servicio${targets.length === 1 ? "" : "s"} actualizado${targets.length === 1 ? "" : "s"} a ${roundedRadius} m.`, "success");
+      await renderSupervisorView();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
   function renderAssignments() {
     const list = $("#assignmentsList");
+    const validIds = new Set(state.assignments.map(assignment => assignment.id));
+    state.bulkSelectedAssignmentIds = new Set([...state.bulkSelectedAssignmentIds].filter(id => validIds.has(id)));
     const sorted = [...state.assignments].sort((a, b) => {
       const siteA = byId(state.sites, a.site_id)?.name || "";
       const siteB = byId(state.sites, b.site_id)?.name || "";
@@ -1742,8 +1856,15 @@
       const site = byId(state.sites, assignment.site_id);
       const days = (assignment.days_of_week || []).map(d => dayLabel(d)).join(", ");
       const vigencia = `${assignment.valid_from || "—"}${assignment.valid_to ? ` a ${assignment.valid_to}` : " en adelante"}`;
+      const selected = state.bulkSelectedAssignmentIds.has(assignment.id);
       return `
-        <div class="list-item">
+        <div class="list-item ${selected ? "bulk-selected-item" : ""}">
+          <div class="bulk-select-line">
+            <label class="bulk-select-control">
+              <input type="checkbox" data-select-assignment="${assignment.id}" ${selected ? "checked" : ""} />
+              <span>Seleccionar para cambio masivo</span>
+            </label>
+          </div>
           <div class="list-item-title">${escapeHtml(site?.name || "—")}</div>
           <div class="muted small"><strong>${escapeHtml(op?.full_name || "—")}</strong> · ${formatTime(assignment.scheduled_start)} a ${formatTime(assignment.scheduled_end)}</div>
           <div class="muted small">Días: ${escapeHtml(days || "—")} · Vigencia: ${escapeHtml(vigencia)}</div>
@@ -1756,8 +1877,15 @@
         </div>`;
     }).join("") || `<p class="muted">No hay asignaciones cargadas.</p>`;
 
+    list.querySelectorAll("[data-select-assignment]").forEach(input => input.addEventListener("change", () => {
+      if (input.checked) state.bulkSelectedAssignmentIds.add(input.dataset.selectAssignment);
+      else state.bulkSelectedAssignmentIds.delete(input.dataset.selectAssignment);
+      input.closest(".list-item")?.classList.toggle("bulk-selected-item", input.checked);
+      updateBulkSelectionSummaries();
+    }));
     list.querySelectorAll("[data-edit-assignment]").forEach(btn => btn.addEventListener("click", () => editAssignment(btn.dataset.editAssignment)));
     list.querySelectorAll("[data-delete-assignment]").forEach(btn => btn.addEventListener("click", () => deleteAssignment(btn.dataset.deleteAssignment)));
+    updateBulkSelectionSummaries();
   }
 
   function assignmentPayloadsFromForm() {
@@ -2540,6 +2668,16 @@
       await renderSupervisorView();
     });
     $("#cancelSiteEditBtn").addEventListener("click", resetSiteForm);
+    $("#selectAllSitesBtn").addEventListener("click", () => {
+      state.bulkSelectedSiteIds = new Set(state.sites.map(site => site.id));
+      renderSites();
+    });
+    $("#clearSelectedSitesBtn").addEventListener("click", () => {
+      state.bulkSelectedSiteIds.clear();
+      renderSites();
+    });
+    $("#bulkSiteScope").addEventListener("change", updateBulkSelectionSummaries);
+    $("#applyBulkSitesBtn").addEventListener("click", () => applyBulkSiteRadius().catch(error => toast(error.message || "No se pudo actualizar el radio GPS.")));
 
     $("#assignmentForm").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -2560,6 +2698,16 @@
     $("#presetAllDaysBtn").addEventListener("click", applyAllDaysPreset);
     $("#copyFirstScheduleBtn").addEventListener("click", copyFirstScheduleToActiveDays);
     $("#clearScheduleBtn").addEventListener("click", clearAssignmentSchedule);
+    $("#selectAllAssignmentsBtn").addEventListener("click", () => {
+      state.bulkSelectedAssignmentIds = new Set(state.assignments.map(assignment => assignment.id));
+      renderAssignments();
+    });
+    $("#clearSelectedAssignmentsBtn").addEventListener("click", () => {
+      state.bulkSelectedAssignmentIds.clear();
+      renderAssignments();
+    });
+    $("#bulkAssignmentScope").addEventListener("change", updateBulkSelectionSummaries);
+    $("#applyBulkAssignmentsBtn").addEventListener("click", () => applyBulkAssignmentSettings().catch(error => toast(error.message || "No se pudieron actualizar las tolerancias.")));
 
     $("#userForm").addEventListener("submit", async (event) => {
       event.preventDefault();

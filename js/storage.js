@@ -304,6 +304,25 @@
       return data;
     }
 
+    async bulkUpdateSites(ids, patch) {
+      const uniqueIds = [...new Set((ids || []).filter(Boolean))];
+      if (!uniqueIds.length) return 0;
+      const cleanPatch = this.clean(patch || {});
+      if (!Object.keys(cleanPatch).length) throw new Error("No hay cambios para aplicar a los servicios.");
+
+      const chunkSize = 150;
+      for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+        const chunk = uniqueIds.slice(i, i + chunkSize);
+        const { error } = await this.client
+          .from("sites")
+          .update(cleanPatch)
+          .in("id", chunk)
+          .eq("is_active", true);
+        if (error) throw error;
+      }
+      return uniqueIds.length;
+    }
+
     async deleteSite(id) {
       const { error: siteError } = await this.client
         .from("sites")
@@ -327,6 +346,25 @@
 
       if (error) throw error;
       return data;
+    }
+
+    async bulkUpdateAssignments(ids, patch) {
+      const uniqueIds = [...new Set((ids || []).filter(Boolean))];
+      if (!uniqueIds.length) return 0;
+      const cleanPatch = this.clean(patch || {});
+      if (!Object.keys(cleanPatch).length) throw new Error("No hay cambios para aplicar a las asignaciones.");
+
+      const chunkSize = 150;
+      for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+        const chunk = uniqueIds.slice(i, i + chunkSize);
+        const { error } = await this.client
+          .from("assignments")
+          .update(cleanPatch)
+          .in("id", chunk)
+          .eq("is_active", true);
+        if (error) throw error;
+      }
+      return uniqueIds.length;
     }
 
     async deleteAssignment(id) {
