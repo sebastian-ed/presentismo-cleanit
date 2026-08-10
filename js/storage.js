@@ -226,6 +226,62 @@
       return data || [];
     }
 
+    async listAllProfiles() {
+      const { data, error } = await this.client
+        .from("profiles")
+        .select("*")
+        .order("full_name", { ascending: true });
+
+      if (error) throw error;
+      return data || [];
+    }
+
+    async listAllSites() {
+      const { data, error } = await this.client
+        .from("sites")
+        .select("*")
+        .order("name", { ascending: true });
+
+      if (error) throw error;
+      return data || [];
+    }
+
+    async listAllAssignments() {
+      const { data, error } = await this.client
+        .from("assignments")
+        .select("*")
+        .order("valid_from", { ascending: true });
+
+      if (error) throw error;
+      return data || [];
+    }
+
+    async listEventsRange(dateFrom = null, dateTo = null) {
+      const pageSize = 1000;
+      const rows = [];
+      let offset = 0;
+
+      while (true) {
+        let query = this.client
+          .from("attendance_events")
+          .select("*")
+          .order("created_at", { ascending: false });
+
+        if (dateFrom) query = query.gte("shift_date", dateFrom);
+        if (dateTo) query = query.lte("shift_date", dateTo);
+        query = query.range(offset, offset + pageSize - 1);
+
+        const { data, error } = await query;
+        if (error) throw error;
+        const page = data || [];
+        rows.push(...page);
+        if (page.length < pageSize) break;
+        offset += pageSize;
+      }
+
+      return rows;
+    }
+
     async createEvent(payload) {
       const { data, error } = await this.client
         .from("attendance_events")

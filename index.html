@@ -162,6 +162,39 @@
             <button class="secondary-btn" id="refreshDashboardBtn" type="button">Actualizar</button>
           </div>
 
+          <div class="export-panel" aria-label="Exportar estado operativo">
+            <div class="export-panel-copy">
+              <strong>Exportar estado operativo</strong>
+              <span>Para RRHH: día mostrado, otro día, semana, mes, rango personalizado o historial completo.</span>
+            </div>
+            <div class="export-period-grid">
+              <label>
+                <span>Período</span>
+                <select id="liveExportPeriod">
+                  <option value="shown">Día mostrado</option>
+                  <option value="yesterday">Ayer</option>
+                  <option value="last7">Últimos 7 días</option>
+                  <option value="month">Mes de la fecha mostrada</option>
+                  <option value="lastmonth">Mes anterior</option>
+                  <option value="custom">Rango personalizado</option>
+                  <option value="all">Todo el historial</option>
+                </select>
+              </label>
+              <label>
+                <span>Desde</span>
+                <input id="liveExportFrom" type="date" />
+              </label>
+              <label>
+                <span>Hasta</span>
+                <input id="liveExportTo" type="date" />
+              </label>
+              <div class="export-actions">
+                <button class="secondary-btn small-btn" id="exportLiveCsvBtn" type="button">Descargar CSV</button>
+                <button class="primary-btn small-btn" id="exportLiveExcelBtn" type="button">Descargar Excel</button>
+              </div>
+            </div>
+          </div>
+
           <div class="kpi-grid" id="kpiGrid"></div>
           <div class="data-card">
             <div class="card-title-row">
@@ -305,9 +338,39 @@
         <section id="recordsTab" class="tab-panel">
           <div class="data-card">
             <div class="card-title-row">
-              <h3>Historial de marcaciones</h3>
-              <button class="secondary-btn small-btn" id="exportCsvBtn" type="button">Exportar CSV</button>
+              <div>
+                <h3>Historial de marcaciones</h3>
+                <p class="muted small no-margin">Filtrá el período que querés consultar y descargalo en CSV o Excel.</p>
+              </div>
             </div>
+            <div class="records-export-toolbar">
+              <label>
+                <span>Período</span>
+                <select id="recordsPeriod">
+                  <option value="today">Hoy</option>
+                  <option value="yesterday">Ayer</option>
+                  <option value="last7">Últimos 7 días</option>
+                  <option value="month" selected>Mes actual</option>
+                  <option value="lastmonth">Mes anterior</option>
+                  <option value="custom">Rango personalizado</option>
+                  <option value="all">Todo el historial</option>
+                </select>
+              </label>
+              <label>
+                <span>Desde</span>
+                <input id="recordsFrom" type="date" />
+              </label>
+              <label>
+                <span>Hasta</span>
+                <input id="recordsTo" type="date" />
+              </label>
+              <div class="export-actions records-actions">
+                <button class="secondary-btn small-btn" id="applyRecordsBtn" type="button">Ver período</button>
+                <button class="secondary-btn small-btn" id="exportCsvBtn" type="button">Exportar CSV</button>
+                <button class="primary-btn small-btn" id="exportRecordsExcelBtn" type="button">Exportar Excel</button>
+              </div>
+            </div>
+            <div id="recordsRangeSummary" class="muted small records-range-summary"></div>
             <div id="recordsTable" class="responsive-table"></div>
           </div>
         </section>
@@ -355,7 +418,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="js/config.js"></script>
-  <script src="js/storage.js"></script>
-  <script src="js/app.js?v=20260810-scroll1"></script>
+  <script src="js/storage.js?v=20260810-export1"></script>
+  <script src="js/app.js?v=20260810-export1"></script>
 </body>
 </html>

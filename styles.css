@@ -793,3 +793,46 @@ body.modal-open { overflow: hidden; }
 }
 .text-btn:hover { opacity: .72; }
 .warning-text { color: #92400e !important; font-weight: 800; }
+
+/* Exportaciones RRHH · 2026-08-10 */
+.export-panel {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(255,255,255,.98), rgba(248,250,252,.96));
+  box-shadow: 0 8px 24px rgba(15,23,42,.04);
+}
+.export-panel-copy { display: grid; gap: 3px; }
+.export-panel-copy strong { font-size: .92rem; }
+.export-panel-copy span { color: var(--muted); font-size: .78rem; font-weight: 650; }
+.export-period-grid,
+.records-export-toolbar {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 9px;
+  align-items: end;
+}
+.export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.export-actions .small-btn { min-height: 42px; }
+.records-export-toolbar {
+  margin: 12px 0 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #f8fafc;
+}
+.records-range-summary { min-height: 22px; margin: 2px 2px 10px; font-weight: 750; }
+.export-loading { opacity: .68; pointer-events: none; }
+
+@media (min-width: 760px) {
+  .export-period-grid { grid-template-columns: minmax(180px, 1.2fr) minmax(145px, .8fr) minmax(145px, .8fr) auto; }
+  .records-export-toolbar { grid-template-columns: minmax(170px, 1fr) minmax(145px, .8fr) minmax(145px, .8fr) auto; }
+}

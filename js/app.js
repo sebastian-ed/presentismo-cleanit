@@ -24,6 +24,10 @@
     events: [],
     dashboardRows: [],
     liveStatusFilter: "all",
+    recordsEvents: [],
+    recordsProfiles: [],
+    recordsSites: [],
+    recordsLoaded: false,
     activeTab: "live"
   };
 
@@ -41,6 +45,149 @@
   const normalizePhone = (raw) => String(raw || "").replace(/[^0-9]/g, "");
   const escapeHtml = (str) => String(str ?? "").replace(/[&<>'"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c]));
   const dayLabel = (id, variant = "short") => DAYS.find(d => d.id === Number(id))?.[variant] || id;
+
+  function dateToISO(date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const d = String(date.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+
+  function parseISODate(dateString) {
+    return new Date(`${dateString}T12:00:00`);
+  }
+
+  function addDaysISO(dateString, days) {
+    const d = parseISODate(dateString);
+    d.setDate(d.getDate() + Number(days || 0));
+    return dateToISO(d);
+  }
+
+  function monthStartISO(dateString) {
+    const d = parseISODate(dateString);
+    d.setDate(1);
+    return dateToISO(d);
+  }
+
+  function monthEndISO(dateString) {
+    const d = parseISODate(dateString);
+    d.setMonth(d.getMonth() + 1, 0);
+    return dateToISO(d);
+  }
+
+  function minISO(values) {
+    return values.filter(Boolean).sort()[0] || null;
+  }
+
+  function maxISO(values) {
+    const filtered = values.filter(Boolean).sort();
+    return filtered[filtered.length - 1] || null;
+  }
+
+  function periodElements(kind) {
+    if (kind === "live") {
+      return { period: $("#liveExportPeriod"), from: $("#liveExportFrom"), to: $("#liveExportTo") };
+    }
+    return { period: $("#recordsPeriod"), from: $("#recordsFrom"), to: $("#recordsTo") };
+  }
+
+  function periodAnchor(kind) {
+    return kind === "live" ? ($("#dashboardDate")?.value || todayISO()) : todayISO();
+  }
+
+  function syncPeriodControls(kind, preserveCustom = true) {
+    const { period, from, to } = periodElements(kind);
+    if (!period || !from || !to) return;
+    const value = period.value;
+    const anchorDate = periodAnchor(kind);
+    const custom = value === "custom";
+    const all = value === "all";
+
+    if (all) {
+      from.value = "";
+      to.value = "";
+    } else if (!custom || !preserveCustom || !from.value || !to.value) {
+      let rangeFrom = anchorDate;
+      let rangeTo = anchorDate;
+      if (value === "yesterday") rangeFrom = rangeTo = addDaysISO(anchorDate, -1);
+      if (value === "last7") rangeFrom = addDaysISO(anchorDate, -6);
+      if (value === "month") {
+        rangeFrom = monthStartISO(anchorDate);
+        rangeTo = kind === "live" ? minISO([monthEndISO(anchorDate), todayISO()]) || anchorDate : todayISO();
+      }
+      if (value === "lastmonth") {
+        const previousMonthEnd = addDaysISO(monthStartISO(anchorDate), -1);
+        rangeFrom = monthStartISO(previousMonthEnd);
+        rangeTo = monthEndISO(previousMonthEnd);
+      }
+      if (value === "today") rangeFrom = rangeTo = todayISO();
+      if (value === "shown") rangeFrom = rangeTo = anchorDate;
+      from.value = rangeFrom;
+      to.value = rangeTo;
+    }
+
+    from.disabled = all || !custom;
+    to.disabled = all || !custom;
+  }
+
+  function resolvePeriod(kind) {
+    const { period, from, to } = periodElements(kind);
+    const value = period?.value || (kind === "live" ? "shown" : "month");
+    syncPeriodControls(kind, true);
+    if (value === "all") return { mode: value, from: null, to: null, isAll: true, label: "historial-completo" };
+    const rangeFrom = from?.value || periodAnchor(kind);
+    const rangeTo = to?.value || rangeFrom;
+    if (rangeFrom > rangeTo) throw new Error("La fecha Desde no puede ser posterior a Hasta.");
+    return { mode: value, from: rangeFrom, to: rangeTo, isAll: false, label: rangeFrom === rangeTo ? rangeFrom : `${rangeFrom}-al-${rangeTo}` };
+  }
+
+  function formatClock(value) {
+    if (!value) return "";
+    try {
+      return new Date(value).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" });
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function csvEscape(value) {
+    return `"${String(value ?? "").replace(/"/g, '""')}"`;
+  }
+
+  function downloadCsvObjects(rows, headers, filename) {
+    const lines = [headers.map(h => csvEscape(h)).join(",")];
+    rows.forEach(row => lines.push(headers.map(header => csvEscape(row[header])).join(",")));
+    const blob = new Blob(["\ufeff" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function applyWorksheetUsability(ws, widths = []) {
+    if (!ws) return;
+    if (widths.length) ws["!cols"] = widths.map(wch => ({ wch }));
+    if (ws["!ref"]) ws["!autofilter"] = { ref: ws["!ref"] };
+  }
+
+  async function withExportButton(button, busyText, callback) {
+    if (!button) return callback();
+    const previous = button.textContent;
+    button.disabled = true;
+    button.textContent = busyText;
+    button.closest(".export-panel, .data-card")?.classList.add("export-loading");
+    try {
+      return await callback();
+    } finally {
+      button.disabled = false;
+      button.textContent = previous;
+      button.closest(".export-panel, .data-card")?.classList.remove("export-loading");
+    }
+  }
 
   function toast(message, type = "default") {
     const el = $("#toast");
@@ -399,6 +546,7 @@
       }
       $("#dashboardDate").value = todayISO();
       $("#assignmentValidFrom").value = todayISO();
+      syncPeriodControls("live", false);
       await renderSupervisorView();
     }
   }
@@ -407,6 +555,10 @@
     await store.signOut();
     state.currentUser = null;
     state.currentProfile = null;
+    state.recordsEvents = [];
+    state.recordsProfiles = [];
+    state.recordsSites = [];
+    state.recordsLoaded = false;
     setView("#loginView");
   }
 
@@ -1832,20 +1984,442 @@
     }
   }
 
+  function eventTimestamp(event) {
+    return event?.client_time || event?.created_at || null;
+  }
+
+  function latestEventFromList(events, type) {
+    const allowed = Array.isArray(type) ? type : [type];
+    return [...events]
+      .filter(event => allowed.includes(event.event_type))
+      .sort((a, b) => new Date(eventTimestamp(b) || 0) - new Date(eventTimestamp(a) || 0))[0] || null;
+  }
+
+  function assignmentHistoricalEnd(assignment) {
+    if (assignment.valid_to) return assignment.valid_to;
+    if (assignment.is_active === false) {
+      const changed = assignment.updated_at || assignment.created_at;
+      return changed ? String(changed).slice(0, 10) : null;
+    }
+    return null;
+  }
+
+  function assignmentAppliesHistorically(assignment, dateString) {
+    const day = (() => { const d = parseISODate(dateString).getDay(); return d === 0 ? 7 : d; })();
+    const days = Array.isArray(assignment.days_of_week) ? assignment.days_of_week.map(Number) : [];
+    if (!days.includes(day)) return false;
+    const start = assignment.valid_from || String(assignment.created_at || "").slice(0, 10);
+    const end = assignmentHistoricalEnd(assignment);
+    if (start && start > dateString) return false;
+    if (end && end < dateString) return false;
+    return true;
+  }
+
+  function scheduledRangeForShift(dateString, startTime, endTime) {
+    const start = new Date(`${dateString}T${String(startTime || "00:00").slice(0, 5)}:00`);
+    let end = new Date(`${dateString}T${String(endTime || "00:00").slice(0, 5)}:00`);
+    if (end.getTime() <= start.getTime()) end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
+    return { start, end };
+  }
+
+  function eventInsideLabel(event) {
+    if (!event) return "";
+    return event.is_inside_site === true ? "Sí" : event.is_inside_site === false ? "No" : "";
+  }
+
+  function getHistoricalShiftEvaluation(shift, events, now = new Date()) {
+    const entry = latestEventFromList(events, "present");
+    const exit = latestEventFromList(events, "checkout");
+    const absentEvent = latestEventFromList(events, "absent");
+    const lateEvent = latestEventFromList(events, "late");
+    const { start, end } = scheduledRangeForShift(shift.shift_date, shift.scheduled_start, shift.scheduled_end);
+    const grace = Number(shift.grace_minutes ?? 10);
+    const absentAfter = Number(shift.absence_after_minutes ?? 30);
+    const isFuture = now.getTime() < start.getTime();
+    const absenceDue = now.getTime() > start.getTime() + absentAfter * 60000;
+    const exitDue = now.getTime() > end.getTime() + grace * 60000;
+
+    let entryStatus = "Pendiente";
+    let entryKey = "pending";
+    let source = "Programación";
+    if (entry) {
+      source = "Marcación";
+      if (entry.is_inside_site === false) { entryStatus = "Entrada fuera de radio"; entryKey = "outside"; }
+      else if (entry.observed_status === "late" || new Date(eventTimestamp(entry)).getTime() > start.getTime() + grace * 60000) { entryStatus = "Entrada tarde"; entryKey = "late"; }
+      else { entryStatus = "Entrada correcta"; entryKey = "present"; }
+    } else if (absentEvent) {
+      entryStatus = "Ausente registrado";
+      entryKey = "absent";
+      source = "Ausencia registrada";
+    } else if (!isFuture && absenceDue) {
+      entryStatus = "Sin entrada / ausencia inferida";
+      entryKey = "absent";
+      source = "Inferido por programación";
+    } else if (lateEvent) {
+      entryStatus = "Demora informada";
+      entryKey = "late";
+      source = "Demora registrada";
+    }
+
+    let exitStatus = "Sin entrada";
+    let exitKey = "not_started";
+    if (exit) {
+      source = source === "Programación" ? "Marcación" : source;
+      if (exit.is_inside_site === false) { exitStatus = "Salida fuera de radio"; exitKey = "exit_outside"; }
+      else if (exit.observed_status === "early_exit" || new Date(eventTimestamp(exit)).getTime() < end.getTime() - grace * 60000) { exitStatus = "Salida anticipada"; exitKey = "early_exit"; }
+      else { exitStatus = "Salida correcta"; exitKey = "completed"; }
+    } else if (entry) {
+      if (exitDue) { exitStatus = "Salida no registrada"; exitKey = "missing_exit"; }
+      else {
+        exitStatus = entryKey === "outside" ? "En servicio · entrada fuera de radio" : entryKey === "late" ? "En servicio · entrada tarde" : "En servicio";
+        exitKey = "in_service";
+      }
+    }
+
+    const alerts = [];
+    const entryIsLate = Boolean(entry) && (entry.observed_status === "late" || new Date(eventTimestamp(entry)).getTime() > start.getTime() + grace * 60000);
+    if (entryKey === "late" || entryIsLate) alerts.push("Llegada tarde");
+    if (entryKey === "outside") alerts.push("Entrada fuera de radio");
+    if (entryKey === "absent") alerts.push("Ausencia / sin entrada");
+    if (exitKey === "early_exit") alerts.push("Salida anticipada");
+    if (exitKey === "exit_outside") alerts.push("Salida fuera de radio");
+    if (exitKey === "missing_exit") alerts.push("Salida no registrada");
+
+    let operational = "Pendiente";
+    if (entryKey === "absent") operational = entryStatus;
+    else if (entry && !exit) operational = exitStatus;
+    else if (entry && exit) {
+      if (exitKey === "early_exit") operational = "Jornada con salida anticipada";
+      else if (exitKey === "exit_outside") operational = "Jornada · salida fuera de radio";
+      else if (entryKey === "outside") operational = "Jornada completa · entrada fuera de radio";
+      else if (entryKey === "late") operational = "Jornada completa · entrada tarde";
+      else operational = "Jornada completa";
+    } else if (isFuture) operational = "Programado";
+
+    const entryMoment = entry ? new Date(eventTimestamp(entry)) : null;
+    const exitMoment = exit ? new Date(eventTimestamp(exit)) : null;
+    const rawLateMinutes = entryMoment ? Math.max(0, Math.round((entryMoment.getTime() - start.getTime()) / 60000)) : null;
+    const rawEarlyExitMinutes = exitMoment ? Math.max(0, Math.round((end.getTime() - exitMoment.getTime()) / 60000)) : null;
+    const lateMinutes = entryMoment ? (entryIsLate ? rawLateMinutes : 0) : null;
+    const earlyExitMinutes = exitMoment ? (exitKey === "early_exit" ? rawEarlyExitMinutes : 0) : null;
+
+    return { entry, exit, absentEvent, lateEvent, entryStatus, entryKey, exitStatus, exitKey, operational, alerts, source, lateMinutes, earlyExitMinutes, start, end };
+  }
+
+  async function fetchReportContext(period) {
+    const [profiles, sites, assignments, events] = await Promise.all([
+      store.listAllProfiles(),
+      store.listAllSites(),
+      store.listAllAssignments(),
+      store.listEventsRange(period.from, period.to)
+    ]);
+    return { profiles, sites, assignments, events };
+  }
+
+  function resolveCompleteOperationalPeriod(period, context) {
+    if (!period.isAll) return period;
+    const starts = [
+      ...context.assignments.map(a => a.valid_from || String(a.created_at || "").slice(0, 10)),
+      ...context.events.map(e => e.shift_date)
+    ];
+    const earliest = minISO(starts) || todayISO();
+    return { ...period, from: earliest, to: todayISO(), label: `${earliest}-al-${todayISO()}` };
+  }
+
+  function buildOperationalExportRows(period, context) {
+    const resolved = resolveCompleteOperationalPeriod(period, context);
+    const profilesById = new Map(context.profiles.map(item => [item.id, item]));
+    const sitesById = new Map(context.sites.map(item => [item.id, item]));
+    const eventsByShift = new Map();
+    const eventsByAssignmentDate = new Map();
+    context.events.forEach(event => {
+      if (!eventsByShift.has(event.shift_id)) eventsByShift.set(event.shift_id, []);
+      eventsByShift.get(event.shift_id).push(event);
+      if (event.assignment_id && event.shift_date) {
+        const key = `${event.assignment_id}__${event.shift_date}`;
+        if (!eventsByAssignmentDate.has(key)) eventsByAssignmentDate.set(key, []);
+        eventsByAssignmentDate.get(key).push(event);
+      }
+    });
+
+    const rows = [];
+    const matchedShiftIds = new Set();
+    const reportNow = new Date();
+
+    for (const assignment of context.assignments) {
+      let date = maxISO([resolved.from, assignment.valid_from || String(assignment.created_at || "").slice(0, 10)]) || resolved.from;
+      const assignmentEnd = assignmentHistoricalEnd(assignment);
+      const endDate = minISO([resolved.to, assignmentEnd]) || resolved.to;
+      if (!date || !endDate || date > endDate) continue;
+
+      while (date <= endDate) {
+        if (assignmentAppliesHistorically(assignment, date)) {
+          const shiftId = `${assignment.id}__${date}`;
+          const shift = {
+            id: shiftId,
+            shift_date: date,
+            assignment_id: assignment.id,
+            operator_id: assignment.operator_id,
+            site_id: assignment.site_id,
+            scheduled_start: assignment.scheduled_start,
+            scheduled_end: assignment.scheduled_end,
+            grace_minutes: assignment.grace_minutes ?? 10,
+            absence_after_minutes: assignment.absence_after_minutes ?? 30,
+            notes: assignment.notes || ""
+          };
+          const shiftEvents = eventsByShift.get(shiftId) || eventsByAssignmentDate.get(`${assignment.id}__${date}`) || [];
+          shiftEvents.forEach(e => matchedShiftIds.add(e.shift_id));
+          const evalResult = getHistoricalShiftEvaluation(shift, shiftEvents, reportNow);
+          const operator = profilesById.get(assignment.operator_id);
+          const site = sitesById.get(assignment.site_id);
+          const notes = [assignment.notes, evalResult.absentEvent?.notes, evalResult.lateEvent?.notes, evalResult.entry?.notes, evalResult.exit?.notes].filter(Boolean).join(" | ");
+
+          rows.push({
+            "Fecha": date,
+            "Operario": operator?.full_name || assignment.operator_id || "",
+            "Servicio": site?.name || assignment.site_id || "",
+            "Dirección": site?.address || "",
+            "Horario programado": `${String(assignment.scheduled_start || "").slice(0, 5)} - ${String(assignment.scheduled_end || "").slice(0, 5)}`,
+            "Hora entrada": evalResult.entry ? formatClock(eventTimestamp(evalResult.entry)) : "",
+            "Estado entrada": evalResult.entryStatus,
+            "Minutos demora": evalResult.lateMinutes ?? "",
+            "Entrada dentro radio": eventInsideLabel(evalResult.entry),
+            "Distancia entrada (m)": evalResult.entry?.distance_m != null ? Math.round(Number(evalResult.entry.distance_m)) : "",
+            "Precisión entrada (m)": evalResult.entry?.gps_accuracy_m != null ? Math.round(Number(evalResult.entry.gps_accuracy_m)) : "",
+            "Lat entrada": evalResult.entry?.lat ?? "",
+            "Lng entrada": evalResult.entry?.lng ?? "",
+            "Hora salida": evalResult.exit ? formatClock(eventTimestamp(evalResult.exit)) : "",
+            "Estado salida": evalResult.exitStatus,
+            "Minutos salida anticipada": evalResult.earlyExitMinutes ?? "",
+            "Salida dentro radio": eventInsideLabel(evalResult.exit),
+            "Distancia salida (m)": evalResult.exit?.distance_m != null ? Math.round(Number(evalResult.exit.distance_m)) : "",
+            "Precisión salida (m)": evalResult.exit?.gps_accuracy_m != null ? Math.round(Number(evalResult.exit.gps_accuracy_m)) : "",
+            "Lat salida": evalResult.exit?.lat ?? "",
+            "Lng salida": evalResult.exit?.lng ?? "",
+            "Estado operativo": evalResult.operational,
+            "Alertas RRHH": evalResult.alerts.join(" | "),
+            "Origen del estado": evalResult.source,
+            "Observaciones": notes,
+            "Assignment ID": assignment.id,
+            "Shift ID": shiftId
+          });
+        }
+        date = addDaysISO(date, 1);
+      }
+    }
+
+    // No se pierden fichajes excepcionales que no puedan reconstruirse desde una asignación vigente/histórica.
+    const groupedUnmatched = new Map();
+    context.events.forEach(event => {
+      if (matchedShiftIds.has(event.shift_id)) return;
+      const key = event.shift_id || `${event.operator_id}_${event.shift_date}`;
+      if (!groupedUnmatched.has(key)) groupedUnmatched.set(key, []);
+      groupedUnmatched.get(key).push(event);
+    });
+    groupedUnmatched.forEach(events => {
+      const sample = events[0];
+      const entry = latestEventFromList(events, "present");
+      const exit = latestEventFromList(events, "checkout");
+      const operator = profilesById.get(sample.operator_id);
+      const site = sitesById.get(sample.site_id);
+      const alerts = [];
+      if (entry?.observed_status === "late") alerts.push("Llegada tarde");
+      if (entry?.is_inside_site === false) alerts.push("Entrada fuera de radio");
+      if (exit?.observed_status === "early_exit") alerts.push("Salida anticipada");
+      if (exit?.is_inside_site === false) alerts.push("Salida fuera de radio");
+      rows.push({
+        "Fecha": sample.shift_date || "",
+        "Operario": operator?.full_name || sample.operator_id || "",
+        "Servicio": site?.name || sample.site_id || "",
+        "Dirección": site?.address || "",
+        "Horario programado": "No reconstruido",
+        "Hora entrada": entry ? formatClock(eventTimestamp(entry)) : "",
+        "Estado entrada": entry ? (entry.is_inside_site === false ? "Entrada fuera de radio" : entry.observed_status === "late" ? "Entrada tarde" : "Entrada registrada") : "Sin entrada",
+        "Minutos demora": "",
+        "Entrada dentro radio": eventInsideLabel(entry),
+        "Distancia entrada (m)": entry?.distance_m != null ? Math.round(Number(entry.distance_m)) : "",
+        "Precisión entrada (m)": entry?.gps_accuracy_m != null ? Math.round(Number(entry.gps_accuracy_m)) : "",
+        "Lat entrada": entry?.lat ?? "",
+        "Lng entrada": entry?.lng ?? "",
+        "Hora salida": exit ? formatClock(eventTimestamp(exit)) : "",
+        "Estado salida": exit ? (exit.is_inside_site === false ? "Salida fuera de radio" : exit.observed_status === "early_exit" ? "Salida anticipada" : "Salida registrada") : "",
+        "Minutos salida anticipada": "",
+        "Salida dentro radio": eventInsideLabel(exit),
+        "Distancia salida (m)": exit?.distance_m != null ? Math.round(Number(exit.distance_m)) : "",
+        "Precisión salida (m)": exit?.gps_accuracy_m != null ? Math.round(Number(exit.gps_accuracy_m)) : "",
+        "Lat salida": exit?.lat ?? "",
+        "Lng salida": exit?.lng ?? "",
+        "Estado operativo": entry ? (exit ? "Jornada con fichajes" : "En servicio / sin salida") : eventTypeLabel(sample.event_type),
+        "Alertas RRHH": alerts.join(" | "),
+        "Origen del estado": "Marcación sin turno reconstruido",
+        "Observaciones": events.map(e => e.notes).filter(Boolean).join(" | "),
+        "Assignment ID": sample.assignment_id || "",
+        "Shift ID": sample.shift_id || ""
+      });
+    });
+
+    rows.sort((a, b) => `${a.Fecha}|${a.Operario}|${a.Servicio}`.localeCompare(`${b.Fecha}|${b.Operario}|${b.Servicio}`));
+    return { rows, period: resolved };
+  }
+
+  function operationalSummaryByOperator(rows) {
+    const map = new Map();
+    rows.forEach(row => {
+      const key = row.Operario || "Sin identificar";
+      if (!map.has(key)) map.set(key, { "Operario": key, "Coberturas": 0, "Ingresos correctos": 0, "Llegadas tarde": 0, "Fuera de radio": 0, "Ausencias / sin entrada": 0, "Ausencias registradas": 0, "Sin entrada inferido": 0, "Salidas anticipadas": 0, "Salidas no registradas": 0 });
+      const item = map.get(key);
+      item["Coberturas"]++;
+      if (row["Estado entrada"] === "Entrada correcta") item["Ingresos correctos"]++;
+      if (String(row["Estado entrada"]).includes("tarde") || String(row["Alertas RRHH"]).includes("Llegada tarde")) item["Llegadas tarde"]++;
+      if (String(row["Alertas RRHH"]).includes("fuera de radio")) item["Fuera de radio"]++;
+      if (String(row["Alertas RRHH"]).includes("Ausencia / sin entrada")) item["Ausencias / sin entrada"]++;
+      if (row["Origen del estado"] === "Ausencia registrada") item["Ausencias registradas"]++;
+      if (row["Origen del estado"] === "Inferido por programación") item["Sin entrada inferido"]++;
+      if (String(row["Alertas RRHH"]).includes("Salida anticipada")) item["Salidas anticipadas"]++;
+      if (String(row["Alertas RRHH"]).includes("Salida no registrada")) item["Salidas no registradas"]++;
+    });
+    return Array.from(map.values()).sort((a, b) => a.Operario.localeCompare(b.Operario));
+  }
+
+  function operationalSummaryByDate(rows) {
+    const map = new Map();
+    rows.forEach(row => {
+      const key = row.Fecha || "Sin fecha";
+      if (!map.has(key)) map.set(key, { "Fecha": key, "Coberturas": 0, "Ingresos correctos": 0, "Llegadas tarde": 0, "Fuera de radio": 0, "Ausencias / sin entrada": 0, "Ausencias registradas": 0, "Sin entrada inferido": 0, "Alertas de salida": 0 });
+      const item = map.get(key);
+      item["Coberturas"]++;
+      if (row["Estado entrada"] === "Entrada correcta") item["Ingresos correctos"]++;
+      if (String(row["Alertas RRHH"]).includes("Llegada tarde")) item["Llegadas tarde"]++;
+      if (String(row["Alertas RRHH"]).includes("fuera de radio")) item["Fuera de radio"]++;
+      if (String(row["Alertas RRHH"]).includes("Ausencia / sin entrada")) item["Ausencias / sin entrada"]++;
+      if (row["Origen del estado"] === "Ausencia registrada") item["Ausencias registradas"]++;
+      if (row["Origen del estado"] === "Inferido por programación") item["Sin entrada inferido"]++;
+      if (/Salida anticipada|Salida no registrada|Salida fuera de radio/.test(String(row["Alertas RRHH"]))) item["Alertas de salida"]++;
+    });
+    return Array.from(map.values()).sort((a, b) => a.Fecha.localeCompare(b.Fecha));
+  }
+
+  async function getOperationalExportData() {
+    const requested = resolvePeriod("live");
+    const context = await fetchReportContext(requested);
+    return buildOperationalExportRows(requested, context);
+  }
+
+  async function exportLiveCsv() {
+    const button = $("#exportLiveCsvBtn");
+    await withExportButton(button, "Generando...", async () => {
+      const { rows, period } = await getOperationalExportData();
+      const headers = rows.length ? Object.keys(rows[0]) : ["Fecha", "Operario", "Servicio", "Estado operativo", "Alertas RRHH"];
+      downloadCsvObjects(rows, headers, `estado-operativo-cleanit-${period.label}.csv`);
+      toast(`${rows.length} cobertura${rows.length === 1 ? "" : "s"} exportada${rows.length === 1 ? "" : "s"} a CSV.`, "success");
+    });
+  }
+
+  async function exportLiveExcel() {
+    const button = $("#exportLiveExcelBtn");
+    await withExportButton(button, "Generando...", async () => {
+      if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+      const { rows, period } = await getOperationalExportData();
+      const wb = window.XLSX.utils.book_new();
+      const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Sin datos": "No hay coberturas o registros en el período seleccionado." }]);
+      applyWorksheetUsability(ws, [12, 28, 30, 34, 19, 13, 27, 15, 18, 20, 20, 14, 14, 13, 28, 23, 18, 20, 20, 14, 14, 38, 40, 28, 38, 38, 42]);
+      window.XLSX.utils.book_append_sheet(wb, ws, "Estado operativo");
+
+      const byOperator = operationalSummaryByOperator(rows);
+      const wsOperators = window.XLSX.utils.json_to_sheet(byOperator.length ? byOperator : [{ "Operario": "Sin datos" }]);
+      applyWorksheetUsability(wsOperators, [28, 13, 18, 16, 16, 22, 20, 20, 20, 23]);
+      window.XLSX.utils.book_append_sheet(wb, wsOperators, "Resumen por operario");
+
+      const byDate = operationalSummaryByDate(rows);
+      const wsDates = window.XLSX.utils.json_to_sheet(byDate.length ? byDate : [{ "Fecha": "Sin datos" }]);
+      applyWorksheetUsability(wsDates, [14, 13, 18, 16, 16, 22, 20, 20, 18]);
+      window.XLSX.utils.book_append_sheet(wb, wsDates, "Resumen por día");
+
+      window.XLSX.writeFile(wb, `estado-operativo-cleanit-${period.label}.xlsx`);
+      toast(`${rows.length} cobertura${rows.length === 1 ? "" : "s"} exportada${rows.length === 1 ? "" : "s"} a Excel.`, "success");
+    });
+  }
+
+  function recordExportObject(event, profiles = state.profiles, sites = state.sites) {
+    const op = byId(profiles, event.operator_id);
+    const site = byId(sites, event.site_id);
+    return {
+      "Fecha y hora": eventTimestamp(event) || event.created_at || "",
+      "Fecha servicio": event.shift_date || "",
+      "Operario": op?.full_name || event.operator_id || "",
+      "Servicio": site?.name || event.site_id || "",
+      "Dirección": site?.address || "",
+      "Tipo": event.event_type || "",
+      "Tipo legible": eventTypeLabel(event.event_type),
+      "Estado": event.observed_status || "",
+      "Estado legible": observedStatusLabel(event.observed_status),
+      "Lat": event.lat ?? "",
+      "Lng": event.lng ?? "",
+      "Precisión (m)": event.gps_accuracy_m ?? "",
+      "Distancia (m)": event.distance_m ?? "",
+      "Dentro radio": event.is_inside_site === true ? "Sí" : event.is_inside_site === false ? "No" : "",
+      "Observación": event.notes || "",
+      "Assignment ID": event.assignment_id || "",
+      "Shift ID": event.shift_id || ""
+    };
+  }
+
+  async function fetchRecordsForSelectedPeriod() {
+    const period = resolvePeriod("records");
+    const [events, profiles, sites] = await Promise.all([
+      store.listEventsRange(period.from, period.to),
+      store.listAllProfiles(),
+      store.listAllSites()
+    ]);
+    return { period, events, profiles, sites };
+  }
+
+  async function loadRecordsPeriod() {
+    const button = $("#applyRecordsBtn");
+    await withExportButton(button, "Cargando...", async () => {
+      const result = await fetchRecordsForSelectedPeriod();
+      state.recordsEvents = result.events;
+      state.recordsProfiles = result.profiles;
+      state.recordsSites = result.sites;
+      state.recordsLoaded = true;
+      renderRecords();
+    });
+  }
+
+  async function exportRecordsExcel() {
+    const button = $("#exportRecordsExcelBtn");
+    await withExportButton(button, "Generando...", async () => {
+      if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+      const { period, events, profiles, sites } = await fetchRecordsForSelectedPeriod();
+      const rows = events.map(event => recordExportObject(event, profiles, sites));
+      const wb = window.XLSX.utils.book_new();
+      const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Sin datos": "No hay marcaciones en el período seleccionado." }]);
+      applyWorksheetUsability(ws, [22, 14, 28, 30, 34, 14, 16, 16, 18, 14, 14, 15, 15, 15, 38, 38, 42]);
+      window.XLSX.utils.book_append_sheet(wb, ws, "Marcaciones");
+      window.XLSX.writeFile(wb, `marcaciones-cleanit-${period.label}.xlsx`);
+      toast(`${rows.length} marcación${rows.length === 1 ? "" : "es"} exportada${rows.length === 1 ? "" : "s"} a Excel.`, "success");
+    });
+  }
+
   function renderRecords() {
-    const rows = state.events.map(event => {
-      const op = byId(state.profiles, event.operator_id);
-      const site = byId(state.sites, event.site_id);
+    const events = state.recordsLoaded ? state.recordsEvents : state.events;
+    const displayLimit = 1000;
+    const displayEvents = events.slice(0, displayLimit);
+    const profileSource = state.recordsLoaded ? state.recordsProfiles : state.profiles;
+    const siteSource = state.recordsLoaded ? state.recordsSites : state.sites;
+    const rows = displayEvents.map(event => {
+      const op = byId(profileSource, event.operator_id);
+      const site = byId(siteSource, event.site_id);
       return `
         <tr>
-          <td>${formatDateTime(event.created_at)}</td>
+          <td>${formatDateTime(eventTimestamp(event) || event.created_at)}</td>
           <td>${escapeHtml(event.shift_date || "—")}</td>
           <td>${escapeHtml(op?.full_name || event.operator_id || "—")}</td>
           <td>${escapeHtml(site?.name || event.site_id || "—")}</td>
           <td><strong>${escapeHtml(eventTypeLabel(event.event_type))}</strong><br><span class="muted small">${escapeHtml(observedStatusLabel(event.observed_status))}</span></td>
-          <td>${event.lat ? `${Number(event.lat).toFixed(6)}, ${Number(event.lng).toFixed(6)}` : "—"}</td>
-          <td>${event.gps_accuracy_m ? `${Math.round(event.gps_accuracy_m)} m` : "—"}</td>
-          <td>${event.distance_m ? `${Math.round(event.distance_m)} m` : "—"}</td>
+          <td>${event.lat != null ? `${Number(event.lat).toFixed(6)}, ${Number(event.lng).toFixed(6)}` : "—"}</td>
+          <td>${event.gps_accuracy_m != null ? `${Math.round(Number(event.gps_accuracy_m))} m` : "—"}</td>
+          <td>${event.distance_m != null ? `${Math.round(Number(event.distance_m))} m` : "—"}</td>
           <td>${event.is_inside_site === true ? "Sí" : event.is_inside_site === false ? "No" : "—"}</td>
           <td>${escapeHtml(event.notes || "")}</td>
         </tr>`;
@@ -1854,42 +2428,51 @@
     $("#recordsTable").innerHTML = `
       <table>
         <thead><tr><th>Hora registro</th><th>Fecha servicio</th><th>Operario</th><th>Servicio</th><th>Tipo</th><th>GPS</th><th>Precisión</th><th>Distancia</th><th>Dentro radio</th><th>Obs.</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="10">Todavía no hay marcaciones.</td></tr>`}</tbody>
+        <tbody>${rows || `<tr><td colspan="10">No hay marcaciones para el período seleccionado.</td></tr>`}</tbody>
       </table>`;
+
+    const summary = $("#recordsRangeSummary");
+    if (summary) {
+      let label = "registros cargados";
+      try {
+        const period = resolvePeriod("records");
+        label = period.isAll ? "historial completo" : period.from === period.to ? formatOperationalDate(period.from) : `${formatOperationalDate(period.from)} al ${formatOperationalDate(period.to)}`;
+      } catch (_) { /* conserva etiqueta genérica */ }
+      const displayNote = events.length > displayLimit ? ` · mostrando ${displayLimit} en pantalla; la exportación incluye las ${events.length}` : "";
+      summary.textContent = `${events.length} marcación${events.length === 1 ? "" : "es"} · ${label}${displayNote}`;
+    }
   }
 
-  function exportCsv() {
-    const header = ["fecha_hora", "fecha_servicio", "operario", "servicio", "tipo", "tipo_legible", "estado", "estado_legible", "lat", "lng", "precision_m", "distancia_m", "dentro_radio", "observacion", "assignment_id", "shift_id"];
-    const lines = state.events.map(event => {
-      const op = byId(state.profiles, event.operator_id);
-      const site = byId(state.sites, event.site_id);
-      const values = [
-        event.created_at,
-        event.shift_date || "",
-        op?.full_name || event.operator_id || "",
-        site?.name || event.site_id || "",
-        event.event_type || "",
-        eventTypeLabel(event.event_type),
-        event.observed_status || "",
-        observedStatusLabel(event.observed_status),
-        event.lat || "",
-        event.lng || "",
-        event.gps_accuracy_m || "",
-        event.distance_m || "",
-        event.is_inside_site === true ? "si" : event.is_inside_site === false ? "no" : "",
-        event.notes || "",
-        event.assignment_id || "",
-        event.shift_id || ""
-      ];
-      return values.map(value => `"${String(value).replace(/"/g, '""')}"`).join(",");
+  async function exportCsv() {
+    const button = $("#exportCsvBtn");
+    await withExportButton(button, "Generando...", async () => {
+      const { period, events, profiles, sites } = await fetchRecordsForSelectedPeriod();
+      const headers = ["fecha_hora", "fecha_servicio", "operario", "servicio", "tipo", "tipo_legible", "estado", "estado_legible", "lat", "lng", "precision_m", "distancia_m", "dentro_radio", "observacion", "assignment_id", "shift_id"];
+      const rows = events.map(event => {
+        const op = byId(profiles, event.operator_id);
+        const site = byId(sites, event.site_id);
+        return {
+          fecha_hora: event.created_at || "",
+          fecha_servicio: event.shift_date || "",
+          operario: op?.full_name || event.operator_id || "",
+          servicio: site?.name || event.site_id || "",
+          tipo: event.event_type || "",
+          tipo_legible: eventTypeLabel(event.event_type),
+          estado: event.observed_status || "",
+          estado_legible: observedStatusLabel(event.observed_status),
+          lat: event.lat ?? "",
+          lng: event.lng ?? "",
+          precision_m: event.gps_accuracy_m ?? "",
+          distancia_m: event.distance_m ?? "",
+          dentro_radio: event.is_inside_site === true ? "si" : event.is_inside_site === false ? "no" : "",
+          observacion: event.notes || "",
+          assignment_id: event.assignment_id || "",
+          shift_id: event.shift_id || ""
+        };
+      });
+      downloadCsvObjects(rows, headers, `presentismo-cleanit-${period.label}.csv`);
+      toast(`${rows.length} marcación${rows.length === 1 ? "" : "es"} exportada${rows.length === 1 ? "" : "s"} a CSV.`, "success");
     });
-    const blob = new Blob([[header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `presentismo-cleanit-${todayISO()}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
   }
 
   function bindEvents() {
@@ -1907,9 +2490,18 @@
     $("#resetPasswordForm").addEventListener("submit", handleResetPassword);
     $("#operatorLogoutBtn").addEventListener("click", logout);
     $("#supervisorLogoutBtn").addEventListener("click", logout);
-    $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => renderTab(btn.dataset.tab)));
+    $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => {
+      renderTab(btn.dataset.tab);
+      if (btn.dataset.tab === "records") loadRecordsPeriod().catch(error => toast(error.message || "No se pudieron cargar los registros."));
+    }));
     $("#refreshDashboardBtn").addEventListener("click", renderSupervisorView);
-    $("#dashboardDate").addEventListener("change", renderSupervisorView);
+    $("#dashboardDate").addEventListener("change", async () => {
+      syncPeriodControls("live", false);
+      await renderSupervisorView();
+    });
+    $("#liveExportPeriod").addEventListener("change", () => syncPeriodControls("live", false));
+    $("#exportLiveCsvBtn").addEventListener("click", () => exportLiveCsv().catch(error => toast(error.message || "No se pudo exportar el estado operativo.")));
+    $("#exportLiveExcelBtn").addEventListener("click", () => exportLiveExcel().catch(error => toast(error.message || "No se pudo exportar el estado operativo.")));
     $("#kpiGrid").addEventListener("click", (event) => {
       const button = event.target.closest("[data-kpi-detail]");
       if (button) openQuickDetail(button.dataset.kpiDetail);
@@ -1988,7 +2580,14 @@
     });
     $("#userRole").addEventListener("change", syncUserFormFields);
     $("#cancelUserEditBtn").addEventListener("click", resetUserForm);
-    $("#exportCsvBtn").addEventListener("click", exportCsv);
+    $("#recordsPeriod").addEventListener("change", () => {
+      syncPeriodControls("records", false);
+      state.recordsLoaded = false;
+      if (state.activeTab === "records") loadRecordsPeriod().catch(error => toast(error.message || "No se pudieron cargar los registros."));
+    });
+    $("#applyRecordsBtn").addEventListener("click", () => loadRecordsPeriod().catch(error => toast(error.message || "No se pudieron cargar los registros.")));
+    $("#exportCsvBtn").addEventListener("click", () => exportCsv().catch(error => toast(error.message || "No se pudo exportar el CSV.")));
+    $("#exportRecordsExcelBtn").addEventListener("click", () => exportRecordsExcel().catch(error => toast(error.message || "No se pudo exportar el Excel.")));
 
     const firstDay = new Date();
     firstDay.setDate(1);
@@ -2004,6 +2603,8 @@
     renderAssignmentSchedule();
     $("#dashboardDate").value = todayISO();
     $("#assignmentValidFrom").value = todayISO();
+    syncPeriodControls("live", false);
+    syncPeriodControls("records", false);
     bindEvents();
 
     store.onAuthStateChange((event, session) => {
