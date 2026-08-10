@@ -93,7 +93,10 @@ h3 { margin-bottom: 12px; font-size: 1.06rem; }
 }
 .status-present { background: #dcfce7; color: var(--success); border-color: #bbf7d0; }
 .status-late, .status-pending { background: #fef3c7; color: var(--warning); border-color: #fde68a; }
-.status-absent, .status-outside { background: #fee2e2; color: var(--danger); border-color: #fecaca; }
+/* Semántica visual: rojo queda reservado para ausencia/incumplimiento crítico.
+   Fuera de radio usa violeta para indicar fichaje existente pero geográficamente atípico. */
+.status-absent { background: #fee2e2; color: #b91c1c; border-color: #fecaca; }
+.status-outside { background: #ede9fe; color: #6d28d9; border-color: #c4b5fd; }
 .status-ok { background: #e0f2fe; color: var(--info); border-color: #bae6fd; }
 
 .hero-card {
@@ -343,7 +346,9 @@ input:focus, select:focus, textarea:focus { border-color: var(--primary); box-sh
 .filter-dot { width: 8px; height: 8px; border-radius: 999px; background: #64748b; flex: 0 0 auto; }
 .tone-present .filter-dot { background: #16a34a; }
 .tone-late .filter-dot, .tone-pending .filter-dot { background: #d97706; }
-.tone-outside .filter-dot, .tone-absent .filter-dot, .tone-alert .filter-dot { background: #dc2626; }
+.tone-outside .filter-dot { background: #7c3aed; }
+.tone-absent .filter-dot { background: #dc2626; }
+.tone-alert .filter-dot { background: #ea580c; }
 .tone-exit .filter-dot { background: #7c3aed; }
 .responsive-table { width: 100%; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; min-width: 760px; }

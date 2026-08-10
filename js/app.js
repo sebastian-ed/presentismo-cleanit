@@ -152,8 +152,8 @@
     if (minutesAfterEnd < 0) {
       // Mientras el operario sigue trabajando, la columna Salida también conserva
       // visualmente una anomalía de ingreso para evitar que un azul "normal" la oculte.
-      if (entryEvent.is_inside_site === false) return { key: "in_service_outside", label: "En servicio", className: "status-outside" };
-      if (entryEvent.observed_status === "late") return { key: "in_service_late", label: "En servicio", className: "status-late" };
+      if (entryEvent.is_inside_site === false) return { key: "in_service_outside", label: "En servicio · entrada fuera de radio", className: "status-outside" };
+      if (entryEvent.observed_status === "late") return { key: "in_service_late", label: "En servicio · entrada tarde", className: "status-late" };
       return { key: "in_service", label: "En servicio", className: "status-ok" };
     }
     if (minutesAfterEnd <= grace) return { key: "exit_due", label: "Debe registrar salida", className: "status-late" };
@@ -169,7 +169,7 @@
 
     if (["completed", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(exitStatus.key)) return exitStatus;
     if (entryEvent && ["in_service", "in_service_outside", "in_service_late"].includes(exitStatus.key)) {
-      if (entryStatus.key === "outside") return { key: "in_service_outside", label: "En servicio · fuera de radio", className: "status-outside" };
+      if (entryStatus.key === "outside") return { key: "in_service_outside", label: "En servicio · entrada fuera de radio", className: "status-outside" };
       if (entryStatus.key === "late") return { key: "in_service_late", label: "En servicio · entrada tarde", className: "status-late" };
       return { key: "in_service", label: "En servicio", className: "status-present" };
     }
@@ -952,7 +952,7 @@
     const definitions = [
       { key: "all", label: "Todos", tone: "neutral", matches: () => true },
       { key: "alerts", label: "Con alerta", tone: "alert", matches: row => hasOperationalAlert(row) },
-      { key: "on_time", label: "En horario", tone: "present", matches: row => row.entryStatus.key === "present" },
+      { key: "on_time", label: "Ingreso correcto", tone: "present", matches: row => row.entryStatus.key === "present" },
       { key: "late", label: "Llegada tarde", tone: "late", matches: row => row.entryStatus.key === "late" || row.entryEvent?.observed_status === "late" },
       { key: "outside", label: "Fuera de radio", tone: "outside", matches: row => row.entryStatus.key === "outside" },
       { key: "absent", label: "Ausentes", tone: "absent", matches: row => row.entryStatus.key === "absent" },
