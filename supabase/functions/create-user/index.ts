@@ -10,7 +10,7 @@ type CreateUserBody = {
   email?: string;
   password?: string;
   full_name?: string;
-  role?: "operator" | "supervisor";
+  role?: "operator" | "supervisor" | "admin";
   phone?: string | null;
   notes?: string | null;
 };
@@ -67,8 +67,8 @@ Deno.serve(async (req) => {
 
     if (profileError) throw profileError;
 
-    if (!callerProfile?.is_active || callerProfile.role !== "supervisor") {
-      return jsonResponse({ error: "Solo un supervisor activo puede crear usuarios." }, 403);
+    if (!callerProfile?.is_active || !['supervisor', 'admin'].includes(callerProfile.role)) {
+      return jsonResponse({ error: "Solo un supervisor o administrador activo puede crear usuarios." }, 403);
     }
 
     const body = (await req.json().catch(() => ({}))) as CreateUserBody;
@@ -82,7 +82,7 @@ Deno.serve(async (req) => {
     if (!email || !email.includes("@")) return jsonResponse({ error: "Email inválido." }, 400);
     if (!password || password.length < 6) return jsonResponse({ error: "La contraseña debe tener al menos 6 caracteres." }, 400);
     if (!fullName) return jsonResponse({ error: "Cargá nombre y apellido." }, 400);
-    if (!['operator', 'supervisor'].includes(role)) return jsonResponse({ error: "Rol inválido." }, 400);
+    if (!['operator', 'supervisor', 'admin'].includes(role)) return jsonResponse({ error: "Rol inválido." }, 400);
 
     const adminClient = createClient(supabaseUrl, serviceRoleKey, {
       auth: { persistSession: false, autoRefreshToken: false },

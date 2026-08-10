@@ -1,18 +1,7 @@
 (function () {
   const CONFIG = window.APP_CONFIG || {};
 
-  const localDateISO = (date = new Date()) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-  const todayISO = () => localDateISO(new Date());
-
-  function addDaysISO(dateString, days) {
-    const d = new Date(`${dateString}T00:00:00`);
-    d.setDate(d.getDate() + days);
-    return localDateISO(d);
-  }
-
-  function isOvernightAssignment(assignment) {
-    return String(assignment?.scheduled_end || "").slice(0, 5) < String(assignment?.scheduled_start || "").slice(0, 5);
-  }
+  const todayISO = () => new Date().toISOString().slice(0, 10);
 
   function isoDay(dateString) {
     const d = new Date(`${dateString}T00:00:00`);
@@ -99,6 +88,62 @@
       return { user: data.user, profile };
     }
 
+    async loginWithIdentifier(identifier, password) {
+      const raw = String(identifier || "").trim().toLowerCase();
+      if (!raw) throw new Error("Ingresá tu usuario o email.");
+
+      // Los emails reales pueden autenticarse directamente. Para nombres de usuario
+      // usamos la Edge Function, que resuelve el email sin exponerlo al navegador.
+      if (raw.includes("@")) return this.loginWithPassword(raw, password);
+
+      const { data, error } = await this.client.functions.invoke("user-auth", {
+        body: { action: "login", identifier: raw, password }
+      });
+
+      if (error || data?.error || !data?.session?.access_token || !data?.session?.refresh_token) {
+        // Compatibilidad transitoria con operarios históricos si todavía no se desplegó user-auth.
+        try {
+          return await this.loginWithPassword(`${raw}@cleanit.ar`, password);
+        } catch (_) {
+          throw new Error(data?.error || await this.functionErrorMessage(error, "Usuario o contraseña incorrectos."));
+        }
+      }
+
+      const { data: sessionData, error: sessionError } = await this.client.auth.setSession({
+        access_token: data.session.access_token,
+        refresh_token: data.session.refresh_token
+      });
+      if (sessionError || !sessionData?.user) throw new Error(sessionError?.message || "No se pudo iniciar la sesión.");
+      const profile = await this.loadProfileForAuthUser(sessionData.user);
+      return { user: sessionData.user, profile };
+    }
+
+    async requestPasswordReset(identifier) {
+      const redirectTo = `${window.location.origin}${window.location.pathname}`;
+      const { data, error } = await this.client.functions.invoke("user-auth", {
+        body: { action: "forgot_password", identifier: String(identifier || "").trim(), redirect_to: redirectTo }
+      });
+      if (error) throw new Error(await this.functionErrorMessage(error, "No se pudo enviar el email de recuperación."));
+      if (data?.error) throw new Error(data.error);
+      return data || { success: true };
+    }
+
+    async updateCurrentPassword(password) {
+      const { data, error } = await this.client.auth.updateUser({ password });
+      if (error) throw new Error(error.message || "No se pudo actualizar la contraseña.");
+      return data?.user || null;
+    }
+
+    onAuthStateChange(callback) {
+      return this.client.auth.onAuthStateChange((event, session) => callback(event, session));
+    }
+
+    async getSession() {
+      const { data, error } = await this.client.auth.getSession();
+      if (error) throw error;
+      return data?.session || null;
+    }
+
     async getCurrentSessionProfile() {
       const { data, error } = await this.client.auth.getSession();
       if (error) throw error;
@@ -167,14 +212,7 @@
 
     async listShifts(date) {
       const assignments = await this.listAssignments();
-      const targetDate = date || todayISO();
-      const previousDate = addDaysISO(targetDate, -1);
-      const previousOvernight = assignments
-        .filter(assignment => isAssignmentActiveForDate(assignment, previousDate) && isOvernightAssignment(assignment))
-        .map(assignment => materializeShift(assignment, previousDate));
-      const current = materializeShifts(assignments, targetDate);
-      return [...previousOvernight, ...current]
-        .sort((a, b) => `${a.shift_date} ${a.scheduled_start} ${a.site_id}`.localeCompare(`${b.shift_date} ${b.scheduled_start} ${b.site_id}`));
+      return materializeShifts(assignments, date || todayISO());
     }
 
     async listEvents() {
@@ -282,22 +320,40 @@
       return error?.message || fallback;
     }
 
-    async createOperator({ username, dni, full_name, phone }) {
-      const { data, error } = await this.client.functions.invoke("create-operator", {
-        body: { action: "create", username, dni, full_name, phone }
+    async createManagedUser(payload) {
+      const { data, error } = await this.client.functions.invoke("user-auth", {
+        body: { action: "create", ...payload }
       });
       if (error) throw new Error(await this.functionErrorMessage(error, "No se pudo crear el usuario."));
       if (data?.error) throw new Error(data.error);
       return data.profile;
     }
 
-    async resetOperatorPassword(profileId, dni) {
-      const { data, error } = await this.client.functions.invoke("create-operator", {
-        body: { action: "reset_password", profile_id: profileId, dni }
+    async updateManagedUser(profileId, payload) {
+      const { data, error } = await this.client.functions.invoke("user-auth", {
+        body: { action: "update", profile_id: profileId, ...payload }
       });
-      if (error) throw new Error(await this.functionErrorMessage(error, "No se pudo restablecer la contraseña."));
+      if (error) throw new Error(await this.functionErrorMessage(error, "No se pudo actualizar el usuario."));
+      if (data?.error) throw new Error(data.error);
+      return data.profile;
+    }
+
+    async setManagedUserPassword(profileId, password) {
+      const { data, error } = await this.client.functions.invoke("user-auth", {
+        body: { action: "set_password", profile_id: profileId, password }
+      });
+      if (error) throw new Error(await this.functionErrorMessage(error, "No se pudo cambiar la contraseña."));
       if (data?.error) throw new Error(data.error);
       return true;
+    }
+
+    // Compatibilidad con código antiguo.
+    async createOperator({ username, dni, full_name, phone, email }) {
+      return this.createManagedUser({ username, email, password: dni, full_name, phone, role: "operator" });
+    }
+
+    async resetOperatorPassword(profileId, password) {
+      return this.setManagedUserPassword(profileId, password);
     }
   }
 

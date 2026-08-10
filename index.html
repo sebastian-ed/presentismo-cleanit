@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0f172a" />
   <title>Clean It · Presentismo GPS</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -36,7 +37,7 @@
 
             <form id="supabaseLoginForm" class="form-stack">
               <label>
-                <span id="loginEmailLabel">Nombre de usuario</span>
+                <span id="loginEmailLabel">Usuario o email</span>
                 <input id="email" type="text" autocomplete="username" placeholder="ej: arielacevedo" required />
               </label>
               <label>
@@ -44,8 +45,48 @@
                 <input id="password" type="password" autocomplete="current-password" placeholder="••••••••" required />
               </label>
               <button id="loginSubmitBtn" class="primary-btn" type="submit">Ingresar como operario</button>
+              <button id="forgotPasswordBtn" class="text-btn" type="button">¿Olvidaste tu contraseña?</button>
             </form>
 
+          </div>
+        </div>
+      </section>
+
+      <section id="forgotPasswordView" class="view">
+        <div class="hero-card">
+          <div class="login-card">
+            <p class="eyebrow">Recuperar acceso</p>
+            <h3>Restablecer contraseña</h3>
+            <p class="muted small">Ingresá tu nombre de usuario o el email asociado a tu cuenta. Te enviaremos un enlace para crear una contraseña nueva.</p>
+            <form id="forgotPasswordForm" class="form-stack">
+              <label>
+                <span>Usuario o email</span>
+                <input id="forgotIdentifier" type="text" autocomplete="username" placeholder="ej: arielacevedo" required />
+              </label>
+              <button class="primary-btn" id="forgotPasswordSubmitBtn" type="submit">Enviar email de recuperación</button>
+              <button class="text-btn" id="backToLoginBtn" type="button">Volver al ingreso</button>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section id="resetPasswordView" class="view">
+        <div class="hero-card">
+          <div class="login-card">
+            <p class="eyebrow">Enlace de recuperación</p>
+            <h3>Crear nueva contraseña</h3>
+            <p id="resetPasswordStatus" class="muted small">Validando el enlace de recuperación…</p>
+            <form id="resetPasswordForm" class="form-stack">
+              <label>
+                <span>Nueva contraseña</span>
+                <input id="newPassword" type="password" autocomplete="new-password" minlength="6" placeholder="Mínimo 6 caracteres" required />
+              </label>
+              <label>
+                <span>Repetir contraseña</span>
+                <input id="newPasswordConfirm" type="password" autocomplete="new-password" minlength="6" placeholder="Repetí la contraseña" required />
+              </label>
+              <button class="primary-btn" id="resetPasswordSubmitBtn" type="submit">Guardar nueva contraseña</button>
+            </form>
           </div>
         </div>
       </section>
@@ -164,7 +205,7 @@
                 <div class="card-title-row compact-row">
                   <div>
                     <span class="field-title">Detalle semanal por día</span>
-                    <p class="muted small no-margin">Activá cada día y cargá su horario real. Si la salida es menor que la entrada, la app lo interpreta como un turno nocturno que termina al día siguiente.</p>
+                    <p class="muted small no-margin">Activá cada día y cargá su horario real. Sirve para casos como lunes a viernes 08:00-12:00 y sábado 08:00-10:00.</p>
                   </div>
                 </div>
                 <div class="schedule-toolbar" aria-label="Atajos de carga semanal">
@@ -239,20 +280,18 @@
                 <button class="ghost-btn small-btn hidden" id="cancelUserEditBtn" type="button">Cancelar edición</button>
               </div>
               <input type="hidden" id="userId" />
-              <label><span>Rol</span><select id="userRole" required><option value="operator">Operario</option><option value="supervisor">Supervisor</option></select></label>
+              <label><span>Rol</span><select id="userRole" required><option value="operator">Operario</option><option value="supervisor">Supervisor</option><option value="admin">Administrador</option></select></label>
               <label><span>Nombre completo</span><input id="userName" required placeholder="Nombre y apellido" /></label>
-              <div id="userOperatorFields">
-                <label><span>Nombre de usuario (login)</span><input id="userUsername" placeholder="ej: arielacevedo" /></label>
-                <label><span>DNI (contraseña)</span><input id="userDni" placeholder="ej: 30111222" /></label>
-                <p class="muted small">El operario va a ingresar con este nombre de usuario y el DNI como contraseña.</p>
-              </div>
-              <div id="userSupervisorFields" class="hidden">
-                <label><span>UUID del usuario en Supabase Auth</span><input id="userAuthId" placeholder="Ej. 00000000-0000-0000-0000-000000000000" /></label>
-                <p class="muted small">Los supervisores se crean primero en Supabase Authentication (alta manual) y se vinculan acá con ese UUID.</p>
-              </div>
+              <label><span>Nombre de usuario (login)</span><input id="userUsername" autocomplete="off" required placeholder="ej: arielacevedo" /></label>
+              <label><span>Email de recuperación</span><input id="userEmail" type="email" autocomplete="off" required placeholder="persona@empresa.com" /></label>
+              <label>
+                <span id="userPasswordLabel">Contraseña inicial</span>
+                <input id="userPassword" type="password" autocomplete="new-password" minlength="6" placeholder="Mínimo 6 caracteres" />
+              </label>
+              <p id="userPasswordHelp" class="muted small">Para operarios podés usar el DNI como contraseña inicial. El email se usa si la persona necesita recuperarla.</p>
               <label><span>Teléfono</span><input id="userPhone" placeholder="+549..." /></label>
               <label><span>Notas</span><textarea id="userNotes" placeholder="Datos internos, reemplazos, observaciones operativas..."></textarea></label>
-              <button class="primary-btn" type="submit">Guardar perfil</button>
+              <button class="primary-btn" type="submit">Guardar usuario</button>
             </form>
             <div class="data-card">
               <h3>Usuarios cargados</h3>
@@ -274,12 +313,47 @@
     </main>
   </div>
 
+  <div id="quickDetailModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="quickDetailTitle">
+    <section class="modal-panel modal-panel-wide">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Estado operativo</p>
+          <h3 id="quickDetailTitle">Detalle del día</h3>
+          <p id="quickDetailSubtitle" class="muted small no-margin"></p>
+        </div>
+        <button class="ghost-btn small-btn modal-close" type="button" data-close-modal="quickDetailModal" aria-label="Cerrar">Cerrar</button>
+      </div>
+      <div id="quickDetailBody" class="quick-detail-list"></div>
+    </section>
+  </div>
+
+  <div id="locationModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="locationModalTitle">
+    <section class="modal-panel modal-panel-map">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Control GPS</p>
+          <h3 id="locationModalTitle">Ubicación del fichaje</h3>
+          <p id="locationModalSubtitle" class="muted small no-margin"></p>
+        </div>
+        <button class="ghost-btn small-btn modal-close" type="button" data-close-modal="locationModal" aria-label="Cerrar">Cerrar</button>
+      </div>
+      <div id="locationSummary" class="location-summary"></div>
+      <div class="map-legend" aria-label="Referencias del mapa">
+        <span><i class="legend-dot legend-checkin"></i> Fichaje</span>
+        <span><i class="legend-dot legend-assigned"></i> Servicio asignado</span>
+        <span><i class="legend-dot legend-other"></i> Otros servicios</span>
+      </div>
+      <div id="attendanceMap" class="attendance-map" aria-label="Mapa de ubicación del fichaje"></div>
+    </section>
+  </div>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-  <script src="js/config.js?v=20260713-nocturnos"></script>
-  <script src="js/storage.js?v=20260713-nocturnos"></script>
-  <script src="js/app.js?v=20260713-nocturnos"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="js/config.js"></script>
+  <script src="js/storage.js"></script>
+  <script src="js/app.js"></script>
 </body>
 </html>

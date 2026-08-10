@@ -1,0 +1,10 @@
+CAMBIOS DE ESTA VERSION
+- Alta de supervisor/admin desde la app sin UUID manual.
+- Usuario + email real + contraseña inicial.
+- Login por usuario o email.
+- Recuperación de contraseña por email.
+- Pantalla de creación de nueva contraseña al volver desde Supabase.
+- Edición de usuarios existentes para agregar email real de recuperación.
+- Supervisor solo administra operarios; admin puede administrar todos los roles.
+
+LEER: ACTUALIZACION_USUARIOS_Y_RECUPERACION.md

@@ -8,8 +8,10 @@ drop view if exists public.attendance_report;
 
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
+  username text,
+  email text,
   full_name text not null,
-  role text not null check (role in ('operator', 'supervisor')),
+  role text not null check (role in ('operator', 'supervisor', 'admin')),
   phone text,
   notes text,
   is_active boolean not null default true,
@@ -49,7 +51,7 @@ create table if not exists public.assignments (
   is_active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  constraint assignments_start_end_different check (scheduled_end <> scheduled_start),
+  constraint assignments_end_after_start check (scheduled_end > scheduled_start),
   constraint assignments_valid_range check (valid_to is null or valid_to >= valid_from),
   constraint assignments_days_valid check (days_of_week <@ array[1,2,3,4,5,6,7])
 );
@@ -74,6 +76,8 @@ create table if not exists public.attendance_events (
 );
 
 create index if not exists idx_profiles_role on public.profiles(role);
+create unique index if not exists idx_profiles_username_unique_lower on public.profiles(lower(username)) where username is not null and btrim(username) <> '';
+create unique index if not exists idx_profiles_email_unique_lower on public.profiles(lower(email)) where email is not null and btrim(email) <> '';
 create index if not exists idx_sites_active on public.sites(is_active);
 create index if not exists idx_assignments_operator on public.assignments(operator_id);
 create index if not exists idx_assignments_site on public.assignments(site_id);
@@ -128,7 +132,7 @@ stable
 security definer
 set search_path = public
 as $$
-  select coalesce(public.current_profile_role() = 'supervisor', false)
+  select coalesce(public.current_profile_role() in ('supervisor', 'admin'), false)
 $$;
 
 alter table public.profiles enable row level security;
