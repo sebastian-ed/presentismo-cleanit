@@ -27,6 +27,14 @@
     return true;
   }
 
+  function assignmentTimesOverlap(a, b) {
+    const aStart = String(a.scheduled_start || "00:00").slice(0, 5);
+    const aEnd = String(a.scheduled_end || "23:59").slice(0, 5);
+    const bStart = String(b.scheduled_start || "00:00").slice(0, 5);
+    const bEnd = String(b.scheduled_end || "23:59").slice(0, 5);
+    return aStart < bEnd && bStart < aEnd;
+  }
+
   function materializeShift(assignment, dateString) {
     return {
       id: `${assignment.id}__${dateString}`,
@@ -39,13 +47,22 @@
       grace_minutes: assignment.grace_minutes ?? 10,
       absence_after_minutes: assignment.absence_after_minutes ?? 30,
       notes: assignment.notes || "",
+      assignment_type: assignment.assignment_type || "fixed",
+      covered_operator_id: assignment.covered_operator_id || null,
+      created_by: assignment.created_by || null,
+      suppress_regular_assignments: assignment.suppress_regular_assignments === true,
       is_active: assignment.is_active !== false
     };
   }
 
   function materializeShifts(assignments, dateString) {
-    return assignments
-      .filter(a => isAssignmentActiveForDate(a, dateString))
+    const active = assignments.filter(a => isAssignmentActiveForDate(a, dateString));
+    const suppressors = active.filter(a => (a.assignment_type || "fixed") !== "fixed" && a.suppress_regular_assignments === true);
+    const effective = active.filter(a => {
+      if ((a.assignment_type || "fixed") !== "fixed") return true;
+      return !suppressors.some(extra => extra.operator_id === a.operator_id && assignmentTimesOverlap(extra, a));
+    });
+    return effective
       .map(a => materializeShift(a, dateString))
       .sort((a, b) => `${a.scheduled_start} ${a.site_id}`.localeCompare(`${b.scheduled_start} ${b.site_id}`));
   }
@@ -291,6 +308,19 @@
 
       if (error) throw error;
       return data;
+    }
+
+    async updateEventsByShift(shiftId, patch) {
+      const cleanPatch = this.clean(patch || {});
+      if (!shiftId) throw new Error("Falta identificar el turno.");
+      if (!Object.keys(cleanPatch).length) throw new Error("No hay cambios para aplicar.");
+      const { data, error } = await this.client
+        .from("attendance_events")
+        .update(cleanPatch)
+        .eq("shift_id", shiftId)
+        .select("*");
+      if (error) throw error;
+      return data || [];
     }
 
     async upsertSite(payload) {

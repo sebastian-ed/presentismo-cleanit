@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#0f172a" />
   <title>Clean It · Presentismo GPS</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20260810-bulk1" />
+  <link rel="stylesheet" href="styles.css?v=20260810-extra1" />
 </head>
 <body>
   <div class="app-shell">
@@ -97,7 +97,10 @@
             <p class="eyebrow">Vista operario</p>
             <h2 id="operatorTitle">Mi servicio de hoy</h2>
           </div>
-          <button class="ghost-btn" id="operatorLogoutBtn" type="button">Salir</button>
+          <div class="operator-head-actions">
+            <button class="secondary-btn small-btn" id="refreshOperatorBtn" type="button">Actualizar servicios</button>
+            <button class="ghost-btn" id="operatorLogoutBtn" type="button">Salir</button>
+          </div>
         </div>
 
         <div id="operatorShiftContainer" class="operator-grid"></div>
@@ -245,6 +248,29 @@
               <span class="muted small">Podés dejar un campo vacío para conservar su valor actual.</span>
             </div>
           </div>
+          <div class="data-card extraordinary-assignment-card">
+            <div class="card-title-row">
+              <div>
+                <h3>Cobertura / refuerzo puntual</h3>
+                <p class="muted small no-margin">Para movimientos excepcionales de un solo día. Al guardar, el servicio le aparece al operario como una tarea extraordinaria y sus horas quedan identificadas para RRHH.</p>
+              </div>
+            </div>
+            <form id="extraAssignmentForm" class="extra-assignment-grid">
+              <label><span>Operario que va</span><select id="extraAssignmentOperator" required></select></label>
+              <label><span>Servicio</span><select id="extraAssignmentSite" required></select></label>
+              <label><span>Tipo</span><select id="extraAssignmentType" required><option value="coverage">Cobertura por ausencia</option><option value="reinforcement">Refuerzo</option></select></label>
+              <label><span>Fecha</span><input id="extraAssignmentDate" type="date" required /></label>
+              <label><span>Entrada</span><input id="extraAssignmentStart" type="time" value="08:00" required /></label>
+              <label><span>Salida</span><input id="extraAssignmentEnd" type="time" value="12:00" required /></label>
+              <label><span>Tolerancia demora (min.)</span><input id="extraAssignmentGrace" type="number" min="0" max="120" value="10" /></label>
+              <label><span>Ausente desde (min.)</span><input id="extraAssignmentAbsent" type="number" min="1" max="240" value="30" /></label>
+              <label><span>Cubre a <small class="muted">(opcional)</small></span><select id="extraCoveredOperator"><option value="">Sin especificar</option></select></label>
+              <label class="extra-notes-field"><span>Motivo / nota</span><input id="extraAssignmentNotes" placeholder="Ej. Cubre ausencia de Juan / refuerzo por carga extraordinaria" /></label>
+              <label class="checkbox-row extra-replace-check"><input id="extraSuppressRegular" type="checkbox" /><span><strong>Reemplaza su asignación habitual en ese horario</strong><br><span class="muted small">Usalo si ese operario normalmente debía ir a otro servicio: evita marcarlo ausente allí mientras está cubriendo este.</span></span></label>
+              <button class="primary-btn" id="saveExtraAssignmentBtn" type="submit">Crear tarea extraordinaria</button>
+            </form>
+          </div>
+
           <div class="split-layout">
             <form id="assignmentForm" class="data-card form-stack">
               <div class="card-title-row">
@@ -471,7 +497,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="js/config.js"></script>
-  <script src="js/storage.js?v=20260810-bulk1"></script>
-  <script src="js/app.js?v=20260810-bulk1"></script>
+  <script src="js/storage.js?v=20260810-extra1"></script>
+  <script src="js/app.js?v=20260810-extra1"></script>
 </body>
 </html>

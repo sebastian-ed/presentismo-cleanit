@@ -895,3 +895,78 @@ body.modal-open { overflow: hidden; }
   .bulk-edit-grid-assignments { grid-template-columns: minmax(180px, 1fr) minmax(170px, .85fr) minmax(170px, .85fr) auto; }
   .bulk-edit-grid-sites { grid-template-columns: minmax(200px, 1fr) minmax(210px, 1fr) auto; }
 }
+
+/* Coberturas y refuerzos extraordinarios */
+.status-extra {
+  background: #e0f2fe;
+  color: #075985;
+  border-color: #7dd3fc;
+}
+.status-rejected {
+  background: #e2e8f0;
+  color: #334155;
+  border-color: #cbd5e1;
+}
+.status-filter-btn.tone-extra .filter-dot { background: #0284c7; }
+.status-filter-btn.tone-extra.active { background: #075985; border-color: #075985; color: #fff; }
+
+.operator-head-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.operator-empty-card { border-style: dashed; background: rgba(248,250,252,.78); }
+.extra-duty-start-card { border: 1px solid #bae6fd; background: linear-gradient(180deg, #f0f9ff 0%, #fff 100%); }
+.extra-self-card { border-color: #7dd3fc; }
+.extra-duty-meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0 8px; }
+.extra-duty-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid #cbd5e1;
+  font-size: .75rem;
+  font-weight: 800;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+.extra-duty-badge.coverage { background: #ede9fe; color: #6d28d9; border-color: #c4b5fd; }
+.extra-duty-badge.reinforcement { background: #dbeafe; color: #1d4ed8; border-color: #93c5fd; }
+.extra-duty-badge.fixed { background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
+.extra-duty-operator-grid,
+.extra-assignment-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+.extra-assignment-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); align-items: end; }
+.extra-notes-field { grid-column: span 2; }
+.extra-assignment-grid .primary-btn { min-height: 44px; align-self: end; }
+.extraordinary-assignment-card { margin-bottom: 14px; border-color: #bae6fd; }
+.inline-warning {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  color: #9a3412;
+  font-weight: 700;
+  font-size: .86rem;
+}
+.validation-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.extra-schedule-label { font-weight: 800; color: #075985; white-space: nowrap; }
+.list-item-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+@media (max-width: 980px) {
+  .extra-assignment-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .extra-duty-operator-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 640px) {
+  .operator-head-actions { width: 100%; justify-content: stretch; }
+  .operator-head-actions > * { flex: 1; }
+  .extra-assignment-grid,
+  .extra-duty-operator-grid { grid-template-columns: 1fr; }
+  .extra-notes-field { grid-column: span 1; }
+}
+.extra-replace-check { grid-column: span 4; align-self: center; margin: 0; }
+@media (max-width: 980px) { .extra-replace-check { grid-column: span 2; } }
+@media (max-width: 640px) { .extra-replace-check { grid-column: span 1; } }

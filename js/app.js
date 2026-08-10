@@ -425,6 +425,44 @@
     return "supervisor";
   }
 
+  function assignmentTypeLabel(type) {
+    const normalized = String(type || "fixed").toLowerCase();
+    if (normalized === "coverage") return "Cobertura por ausencia";
+    if (normalized === "reinforcement") return "Refuerzo";
+    return "Asignación fija";
+  }
+
+  function workTypeLabel(type) {
+    const normalized = String(type || "regular").toLowerCase();
+    if (normalized === "coverage") return "Cobertura por ausencia";
+    if (normalized === "reinforcement") return "Refuerzo";
+    return "Trabajo regular";
+  }
+
+  function validationLabel(status) {
+    const normalized = String(status || "confirmed").toLowerCase();
+    if (normalized === "pending") return "Pendiente de validar";
+    if (normalized === "rejected") return "Rechazado";
+    return "Validado";
+  }
+
+  function assignmentAppliesOnDate(assignment, dateString) {
+    if (!assignment || assignment.is_active === false) return false;
+    const day = (() => { const d = new Date(`${dateString}T12:00:00`).getDay(); return d === 0 ? 7 : d; })();
+    if (!(assignment.days_of_week || []).map(Number).includes(day)) return false;
+    if (assignment.valid_from && assignment.valid_from > dateString) return false;
+    if (assignment.valid_to && assignment.valid_to < dateString) return false;
+    return true;
+  }
+
+  function assignmentsOverlap(a, b) {
+    const aStart = String(a?.scheduled_start || "00:00").slice(0, 5);
+    const aEnd = String(a?.scheduled_end || "23:59").slice(0, 5);
+    const bStart = String(b?.scheduled_start || "00:00").slice(0, 5);
+    const bEnd = String(b?.scheduled_end || "23:59").slice(0, 5);
+    return aStart < bEnd && bStart < aEnd;
+  }
+
   function renderLoginMode() {
     $$('[data-login-mode]').forEach(btn => btn.classList.toggle('active', btn.dataset.loginMode === state.loginMode));
     const isSupervisor = state.loginMode === "supervisor";
@@ -548,6 +586,7 @@
       }
       $("#dashboardDate").value = todayISO();
       $("#assignmentValidFrom").value = todayISO();
+      if ($("#extraAssignmentDate")) $("#extraAssignmentDate").value = todayISO();
       syncPeriodControls("live", false);
       await renderSupervisorView();
     }
@@ -573,45 +612,70 @@
 
     $("#operatorTitle").textContent = `Hola, ${state.currentProfile.full_name}`;
 
-    const todayId = todayDayId();
-    const todaysAssignments = state.assignments
-      .filter(a =>
-        a.operator_id === state.currentProfile.id &&
-        a.is_active !== false &&
-        (a.days_of_week || []).map(Number).includes(todayId)
-      )
+    const activeToday = state.assignments.filter(a => a.operator_id === state.currentProfile.id && assignmentAppliesOnDate(a, today));
+    const suppressors = activeToday.filter(a => (a.assignment_type || "fixed") !== "fixed" && a.suppress_regular_assignments === true);
+    const todaysAssignments = activeToday
+      .filter(a => (a.assignment_type || "fixed") !== "fixed" || !suppressors.some(extra => extra.id !== a.id && assignmentsOverlap(extra, a)))
       .sort((a, b) => String(a.scheduled_start).localeCompare(String(b.scheduled_start)));
 
-    const container = $("#operatorShiftContainer");
+    const extraEvents = state.events.filter(e =>
+      e.operator_id === state.currentProfile.id &&
+      e.shift_date === today &&
+      e.assignment_id == null &&
+      e.entry_source === "operator_extra" &&
+      ["coverage", "reinforcement"].includes(String(e.work_type || ""))
+    );
+    const extraGroups = new Map();
+    extraEvents.forEach(event => {
+      if (!extraGroups.has(event.shift_id)) extraGroups.set(event.shift_id, []);
+      extraGroups.get(event.shift_id).push(event);
+    });
 
-    if (todaysAssignments.length === 0) {
-      const shiftId = `${state.currentProfile.id}__${today}`;
-      const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
-      const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
-      container.innerHTML = renderGpsOnlyCard(shiftId, entryEvent, exitEvent, null);
-      container.querySelector("[data-gps-checkin]")?.addEventListener("click", () => handleGpsCheckin(shiftId, null));
-      container.querySelector("[data-gps-checkout]")?.addEventListener("click", () => handleGpsCheckout(shiftId));
-      return;
+    const container = $("#operatorShiftContainer");
+    const cards = [];
+
+    if (!todaysAssignments.length && !extraGroups.size) {
+      cards.push(`
+        <article class="operator-card operator-empty-card">
+          <p class="eyebrow">Sin asignación fija para hoy</p>
+          <h3>No tenés un servicio programado.</h3>
+          <p class="muted no-margin">Si te enviaron a cubrir una ausencia o a reforzar otro servicio, usá la opción extraordinaria de abajo para que el fichaje quede asociado al lugar correcto.</p>
+        </article>`);
     }
 
-    container.innerHTML = todaysAssignments
-      .map(assignment => {
-        const shiftId = `${assignment.id}__${today}`;
-        const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
-        const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
-        const assignedSite = byId(state.sites, assignment.site_id);
-        return renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite);
-      })
-      .join("");
+    todaysAssignments.forEach(assignment => {
+      const shiftId = `${assignment.id}__${today}`;
+      const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
+      const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
+      const assignedSite = byId(state.sites, assignment.site_id);
+      cards.push(renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite, assignment));
+    });
+
+    extraGroups.forEach((eventsForShift, shiftId) => {
+      const entryEvent = eventsForShift.find(e => e.event_type === "present");
+      const exitEvent = eventsForShift.find(e => e.event_type === "checkout");
+      if (!entryEvent) return;
+      const site = byId(state.sites, entryEvent.site_id);
+      cards.push(renderSelfReportedExtraCard(shiftId, entryEvent, exitEvent, site));
+    });
+
+    const hasOpenExtra = Array.from(extraGroups.values()).some(group => group.some(e => e.event_type === "present") && !group.some(e => e.event_type === "checkout"));
+    cards.push(renderExtraDutyStartCard(hasOpenExtra));
+    container.innerHTML = cards.join("");
 
     todaysAssignments.forEach(assignment => {
       const shiftId = `${assignment.id}__${today}`;
       container.querySelector(`[data-gps-checkin="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckin(shiftId, assignment));
       container.querySelector(`[data-gps-checkout="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckout(shiftId));
     });
+    extraGroups.forEach((eventsForShift, shiftId) => {
+      if (!eventsForShift.some(e => e.event_type === "present")) return;
+      container.querySelector(`[data-gps-checkout="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckout(shiftId));
+    });
+    container.querySelector("[data-extra-checkin]")?.addEventListener("click", handleExtraDutyCheckin);
   }
 
-  function renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite = null) {
+  function renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite = null, assignment = null) {
     const checkedIn = Boolean(entryEvent);
     const checkedOut = Boolean(exitEvent);
     const detectedSite = entryEvent ? byId(state.sites, entryEvent.site_id) : null;
@@ -633,12 +697,19 @@
     else { statusLabel = "Sin marcar"; statusClass = "status-pending"; }
 
     const dateLabel = new Date().toLocaleDateString("es-AR", { weekday: "long", day: "numeric", month: "long" });
+    const assignmentType = assignment?.assignment_type || "fixed";
+    const isExtraAssignment = assignmentType !== "fixed";
+    const coveredOperator = assignment?.covered_operator_id ? byId(state.profiles, assignment.covered_operator_id) : null;
+    const assignmentMeta = isExtraAssignment
+      ? `<div class="extra-duty-meta"><span class="extra-duty-badge ${assignmentType}">${escapeHtml(assignmentTypeLabel(assignmentType))}</span>${coveredOperator ? `<span class="muted small">Cubre a ${escapeHtml(coveredOperator.full_name || "operario")}</span>` : ""}</div>`
+      : "";
 
     return `
       <article class="operator-card main-checkin">
         <div class="card-title-row">
           <div>
             <p class="eyebrow">Hoy · ${escapeHtml(dateLabel)}</p>
+            ${assignmentMeta}
             <h3 class="service-title">${displaySite ? escapeHtml(displaySite.name) : "Sin servicio asignado para hoy"}</h3>
             <p class="muted">${displaySite ? escapeHtml(displaySite.address || "") : "Contactá al supervisor si creés que hay un error."}</p>
           </div>
@@ -690,6 +761,116 @@
       </article>`;
   }
 
+  function renderSelfReportedExtraCard(shiftId, entryEvent, exitEvent, site) {
+    const checkedOut = Boolean(exitEvent);
+    const type = entryEvent.work_type || "coverage";
+    const validation = entryEvent.validation_status || "pending";
+    const validationClass = validation === "confirmed" ? "status-present" : validation === "rejected" ? "status-rejected" : "status-extra";
+    const exitDisabled = checkedOut ? "disabled" : "";
+    return `
+      <article class="operator-card main-checkin extra-self-card">
+        <div class="card-title-row">
+          <div>
+            <p class="eyebrow">Trabajo extraordinario declarado por vos</p>
+            <div class="extra-duty-meta">
+              <span class="extra-duty-badge ${escapeHtml(type)}">${escapeHtml(workTypeLabel(type))}</span>
+              <span class="status-pill ${validationClass}">${escapeHtml(validationLabel(validation))}</span>
+            </div>
+            <h3 class="service-title">${escapeHtml(site?.name || "Servicio")}</h3>
+            <p class="muted">${escapeHtml(site?.address || "")}</p>
+          </div>
+          <span class="status-pill ${checkedOut ? "status-present" : "status-ok"}">${checkedOut ? "Servicio completado" : "En servicio"}</span>
+        </div>
+        <div class="meta-grid">
+          <div class="meta-item"><strong>Entrada</strong><span class="meta-subline">${formatDateTime(entryEvent.client_time || entryEvent.created_at)} · ${gpsSummary(entryEvent)}</span></div>
+          <div class="meta-item"><strong>Salida</strong><span class="meta-subline">${exitEvent ? `${formatDateTime(exitEvent.client_time || exitEvent.created_at)} · ${gpsSummary(exitEvent)}` : "Sin salida registrada"}</span></div>
+        </div>
+        <div class="checkin-box exit-box">
+          <div class="checkpoint-title-row">
+            <strong>Salida del servicio</strong>
+            <span class="status-pill ${checkedOut ? "status-present" : "status-pending"}">${checkedOut ? "Registrada" : "Pendiente"}</span>
+          </div>
+          <label class="checkbox-row">
+            <input type="checkbox" id="confirm-out-${escapeHtml(shiftId)}" ${exitDisabled} />
+            <span><strong>Confirmo que estoy saliendo del servicio</strong><br><span class="muted small">La salida queda vinculada a esta cobertura/refuerzo.</span></span>
+          </label>
+          <label><span>Observación opcional</span><textarea id="notes-out-${escapeHtml(shiftId)}" ${exitDisabled} placeholder="Ej. Finalizó normal..."></textarea></label>
+          <button class="secondary-btn big-action" data-gps-checkout="${escapeHtml(shiftId)}" type="button" ${exitDisabled}>Registrar salida con GPS</button>
+        </div>
+      </article>`;
+  }
+
+  function renderExtraDutyStartCard(hasOpenExtra = false) {
+    const options = state.sites.map(site => `<option value="${site.id}">${escapeHtml(site.name)}${site.address ? ` · ${escapeHtml(site.address)}` : ""}</option>`).join("");
+    return `
+      <article class="operator-card extra-duty-start-card">
+        <div class="card-title-row">
+          <div>
+            <p class="eyebrow">Situación excepcional</p>
+            <h3>¿Te enviaron a cubrir o reforzar otro servicio?</h3>
+            <p class="muted small no-margin">Usá esta opción solo si el supervisor todavía no cargó la tarea extraordinaria. El registro queda identificado como declarado por el operario y pendiente de validación.</p>
+          </div>
+          <span class="status-pill status-extra">Extraordinario</span>
+        </div>
+        ${hasOpenExtra ? `<div class="inline-warning">Ya tenés una cobertura/refuerzo extraordinario abierto. Registrá su salida antes de iniciar otro.</div>` : ""}
+        <div class="extra-duty-operator-grid">
+          <label><span>Tipo</span><select id="operatorExtraType" ${hasOpenExtra ? "disabled" : ""}><option value="coverage">Cobertura por ausencia</option><option value="reinforcement">Refuerzo</option></select></label>
+          <label><span>Servicio</span><select id="operatorExtraSite" ${hasOpenExtra ? "disabled" : ""}>${options}</select></label>
+          <label class="extra-notes-field"><span>Motivo / observación</span><input id="operatorExtraNotes" ${hasOpenExtra ? "disabled" : ""} placeholder="Ej. Me envió supervisor Juan para cubrir una ausencia" /></label>
+        </div>
+        <label class="checkbox-row">
+          <input type="checkbox" id="operatorExtraConfirm" ${hasOpenExtra ? "disabled" : ""} />
+          <span><strong>Confirmo que fui enviado a este servicio</strong><br><span class="muted small">Se registrarán hora, GPS, servicio y tipo de trabajo.</span></span>
+        </label>
+        <button class="primary-btn big-action" data-extra-checkin type="button" ${hasOpenExtra || !state.sites.length ? "disabled" : ""}>Registrar entrada extraordinaria</button>
+      </article>`;
+  }
+
+  async function handleExtraDutyCheckin() {
+    const siteId = $("#operatorExtraSite")?.value;
+    const type = $("#operatorExtraType")?.value || "coverage";
+    const notes = $("#operatorExtraNotes")?.value || "";
+    const confirm = $("#operatorExtraConfirm");
+    if (!confirm?.checked) return toast("Confirmá que fuiste enviado a ese servicio.");
+    const site = byId(state.sites, siteId);
+    if (!site) return toast("Seleccioná el servicio al que fuiste enviado.");
+
+    const existingOpen = state.events.some(e => e.operator_id === state.currentProfile.id && e.shift_date === todayISO() && e.assignment_id == null && e.entry_source === "operator_extra" && e.event_type === "present" && !state.events.some(x => x.shift_id === e.shift_id && x.event_type === "checkout"));
+    if (existingOpen) return toast("Ya tenés una cobertura/refuerzo extraordinario abierto. Registrá primero la salida.");
+
+    try {
+      toast("Solicitando GPS de alta precisión...");
+      const position = await getPosition();
+      const { latitude, longitude, accuracy } = position.coords;
+      const distance = haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng));
+      const isInside = distance <= Number(site.gps_radius_m || 120);
+      const shiftId = `extra__${state.currentProfile.id}__${todayISO()}__${Date.now()}`;
+      await store.createEvent({
+        shift_id: shiftId,
+        assignment_id: null,
+        shift_date: todayISO(),
+        operator_id: state.currentProfile.id,
+        site_id: site.id,
+        event_type: "present",
+        observed_status: "present",
+        work_type: type,
+        entry_source: "operator_extra",
+        validation_status: "pending",
+        notes: `Trabajo extraordinario declarado por operario. ${notes}${isInside ? "" : " · Entrada fuera de radio."}`.trim(),
+        lat: latitude,
+        lng: longitude,
+        gps_accuracy_m: accuracy,
+        distance_m: distance,
+        is_inside_site: isInside,
+        client_time: new Date().toISOString()
+      });
+      toast(`${workTypeLabel(type)} registrada en ${site.name}. Quedó pendiente de validación del supervisor.`, "success");
+      await renderOperatorView();
+    } catch (error) {
+      toast(error.message || "No se pudo registrar el trabajo extraordinario.");
+    }
+  }
+
   function getPosition() {
     return new Promise((resolve, reject) => {
       if (!navigator.geolocation) {
@@ -729,6 +910,9 @@
           site_id: null,
           event_type: "present",
           observed_status: "present",
+          work_type: "regular",
+          entry_source: "operator_extra",
+          validation_status: "pending",
           notes: `Sin asignación para hoy. ${notes}`.trim(),
           lat: latitude,
           lng: longitude,
@@ -753,6 +937,9 @@
         site_id: assignedSite.id,
         event_type: "present",
         observed_status: "present",
+        work_type: assignment.assignment_type === "coverage" ? "coverage" : assignment.assignment_type === "reinforcement" ? "reinforcement" : "regular",
+        entry_source: "assignment",
+        validation_status: "confirmed",
         notes: isInside ? notes : `Fuera de radio. ${notes}`.trim(),
         lat: latitude,
         lng: longitude,
@@ -796,12 +983,15 @@
 
       await store.createEvent({
         shift_id: shiftId,
-        assignment_id: null,
+        assignment_id: entryEvent.assignment_id || null,
         shift_date: today,
         operator_id: state.currentProfile.id,
         site_id: entryEvent.site_id,
         event_type: "checkout",
         observed_status: "on_time_exit",
+        work_type: entryEvent.work_type || "regular",
+        entry_source: entryEvent.entry_source || (entryEvent.assignment_id ? "assignment" : "operator_extra"),
+        validation_status: entryEvent.validation_status || (entryEvent.assignment_id ? "confirmed" : "pending"),
         notes,
         lat: latitude,
         lng: longitude,
@@ -886,7 +1076,12 @@
         shiftMap.set(event.shift_id, { shift_id: event.shift_id, shift_date: event.shift_date, operator_id: event.operator_id, site_id: null });
       }
       const s = shiftMap.get(event.shift_id);
-      if (event.event_type === "present") s.entry = event;
+      if (event.event_type === "present") {
+        s.entry = event;
+        s.work_type = event.work_type || "regular";
+        s.entry_source = event.entry_source || "assignment";
+        s.validation_status = event.validation_status || "confirmed";
+      }
       if (event.event_type === "checkout") s.exit = event;
       if (event.site_id) s.site_id = event.site_id;
     }
@@ -914,6 +1109,11 @@
         operator_id: s.operator_id,
         operator_name: operator?.full_name || "—",
         site_name: site?.name || "—",
+        work_type: s.work_type || "regular",
+        work_type_label: workTypeLabel(s.work_type || "regular"),
+        entry_source: s.entry_source || "assignment",
+        validation_status: s.validation_status || "confirmed",
+        validation_label: validationLabel(s.validation_status || "confirmed"),
         entry_time: entryTime,
         exit_time: exitTime,
         minutes,
@@ -965,6 +1165,7 @@
         <td>${escapeHtml(row.shift_date)}</td>
         <td><strong>${escapeHtml(row.operator_name)}</strong></td>
         <td>${escapeHtml(row.site_name)}</td>
+        <td>${escapeHtml(row.work_type_label)}${row.entry_source === "operator_extra" ? `<br><span class="muted small">Declarado por operario · ${escapeHtml(row.validation_label)}</span>` : ""}</td>
         <td>${row.entry_time ? formatDateTime(row.entry_time) : "—"}</td>
         <td>${row.exit_time ? formatDateTime(row.exit_time) : "—"}</td>
         <td><strong>${escapeHtml(row.horasLabel)}</strong></td>
@@ -974,9 +1175,9 @@
     $("#fichajeTable").innerHTML = `
       <table>
         <thead>
-          <tr><th>Fecha</th><th>Operario</th><th>Servicio</th><th>Entrada</th><th>Salida</th><th>Horas trabajadas</th><th>Estado</th></tr>
+          <tr><th>Fecha</th><th>Operario</th><th>Servicio</th><th>Tipo de trabajo</th><th>Entrada</th><th>Salida</th><th>Horas trabajadas</th><th>Estado</th></tr>
         </thead>
-        <tbody>${tableRows || `<tr><td colspan="7">No hay registros en el período seleccionado.</td></tr>`}</tbody>
+        <tbody>${tableRows || `<tr><td colspan="8">No hay registros en el período seleccionado.</td></tr>`}</tbody>
       </table>`;
   }
 
@@ -991,6 +1192,9 @@
       "Fecha": r.shift_date,
       "Operario": r.operator_name,
       "Servicio": r.site_name,
+      "Tipo de trabajo": r.work_type_label,
+      "Origen": r.entry_source === "operator_extra" ? "Declarado por operario" : "Asignación",
+      "Validación": r.validation_label,
       "Hora entrada": r.entry_time ? new Date(r.entry_time).toLocaleString("es-AR") : "",
       "Hora salida": r.exit_time ? new Date(r.exit_time).toLocaleString("es-AR") : "",
       "Horas trabajadas": r.horasLabel,
@@ -1055,7 +1259,8 @@
 
   function hasOperationalAlert(row) {
     return ["late", "absent", "outside"].includes(row.entryStatus.key)
-      || ["early_exit", "exit_outside", "missing_exit", "exit_due"].includes(row.exitStatus.key);
+      || ["early_exit", "exit_outside", "missing_exit", "exit_due"].includes(row.exitStatus.key)
+      || (row.isSelfReportedExtra && ["pending", "rejected"].includes(row.extraValidationStatus));
   }
 
   function operationalAlertItems(row) {
@@ -1073,6 +1278,8 @@
     };
     if (entryItems[row.entryStatus.key]) items.push(entryItems[row.entryStatus.key]);
     if (exitItems[row.exitStatus.key]) items.push(exitItems[row.exitStatus.key]);
+    if (row.isSelfReportedExtra && row.extraValidationStatus === "pending") items.push({ label: "Trabajo extraordinario pendiente de validar", className: "status-extra" });
+    if (row.isSelfReportedExtra && row.extraValidationStatus === "rejected") items.push({ label: "Trabajo extraordinario rechazado", className: "status-rejected" });
     return items;
   }
 
@@ -1088,8 +1295,55 @@
     return 4;
   }
 
+  function getSelfReportedExtraDashboardRows() {
+    const date = $("#dashboardDate")?.value || todayISO();
+    const events = state.events.filter(event => event.shift_date === date && event.assignment_id == null && event.entry_source === "operator_extra" && ["coverage", "reinforcement"].includes(String(event.work_type || "")));
+    const groups = new Map();
+    events.forEach(event => {
+      if (!groups.has(event.shift_id)) groups.set(event.shift_id, []);
+      groups.get(event.shift_id).push(event);
+    });
+    const rows = [];
+    groups.forEach((group, shiftId) => {
+      const entryEvent = group.filter(e => e.event_type === "present").sort((a, b) => new Date(b.client_time || b.created_at) - new Date(a.client_time || a.created_at))[0];
+      if (!entryEvent) return;
+      const exitEvent = group.filter(e => e.event_type === "checkout").sort((a, b) => new Date(b.client_time || b.created_at) - new Date(a.client_time || a.created_at))[0] || null;
+      const validation = entryEvent.validation_status || "pending";
+      const entryStatus = entryEvent.is_inside_site === false
+        ? { key: "outside", label: "Entrada fuera de radio", className: "status-outside" }
+        : { key: "present", label: "Entrada registrada", className: "status-present" };
+      let exitStatus;
+      if (exitEvent) {
+        exitStatus = exitEvent.is_inside_site === false
+          ? { key: "exit_outside", label: "Salida fuera de radio", className: "status-outside" }
+          : { key: "completed", label: "Salida registrada", className: "status-present" };
+      } else {
+        exitStatus = { key: "in_service_extra", label: "En servicio extraordinario", className: "status-extra" };
+      }
+      let status = exitEvent ? { ...exitStatus } : { key: "extra", label: `${workTypeLabel(entryEvent.work_type)} · ${validationLabel(validation)}`, className: validation === "rejected" ? "status-rejected" : "status-extra" };
+      if (validation === "pending") status = { key: "extra_pending", label: `${workTypeLabel(entryEvent.work_type)} · pendiente de validar`, className: "status-extra" };
+      if (validation === "rejected") status = { key: "extra_rejected", label: `${workTypeLabel(entryEvent.work_type)} · rechazado`, className: "status-rejected" };
+      const shift = {
+        id: shiftId,
+        assignment_id: null,
+        shift_date: date,
+        operator_id: entryEvent.operator_id,
+        site_id: entryEvent.site_id,
+        scheduled_start: null,
+        scheduled_end: null,
+        grace_minutes: 0,
+        absence_after_minutes: 0,
+        assignment_type: entryEvent.work_type || "coverage",
+        notes: entryEvent.notes || ""
+      };
+      const lastEvent = [...group].sort((a, b) => new Date(b.client_time || b.created_at) - new Date(a.client_time || a.created_at))[0];
+      rows.push({ shift, entryEvent, exitEvent, manualEvent: null, entryStatus, exitStatus, status, lastEvent, isSelfReportedExtra: true, extraValidationStatus: validation, extraWorkType: entryEvent.work_type || "coverage" });
+    });
+    return rows;
+  }
+
   function getDashboardRows() {
-    return state.shifts.map(shift => {
+    const regularRows = state.shifts.map(shift => {
       const entryEvent = getEntryEvent(shift);
       const exitEvent = getExitEvent(shift);
       const manualEvent = getManualEvent(shift);
@@ -1097,8 +1351,9 @@
       const exitStatus = getExitStatus(shift, entryEvent, exitEvent);
       const status = getShiftStatus(shift);
       const lastEvent = latestEventForShift(shift.id);
-      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent };
+      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent, isSelfReportedExtra: false };
     });
+    return [...regularRows, ...getSelfReportedExtraDashboardRows()].sort((a, b) => `${a.shift.scheduled_start || "99:99"}|${byId(state.sites, a.shift.site_id)?.name || ""}`.localeCompare(`${b.shift.scheduled_start || "99:99"}|${byId(state.sites, b.shift.site_id)?.name || ""}`));
   }
 
   function liveStatusFilterDefinitions(rows) {
@@ -1111,6 +1366,7 @@
       { key: "outside", label: "Fuera de radio", tone: "outside", matches: row => row.entryStatus.key === "outside" },
       { key: "absent", label: "Ausentes", tone: "absent", matches: row => row.entryStatus.key === "absent" },
       { key: "pending", label: "Pendientes", tone: "pending", matches: row => ["scheduled", "on_window"].includes(row.entryStatus.key) },
+      { key: "extra", label: "Coberturas / refuerzos", tone: "extra", matches: row => row.isSelfReportedExtra || ["coverage", "reinforcement"].includes(String(row.shift.assignment_type || "")) },
       { key: "exit_alert", label: "Alertas de salida", tone: "exit", matches: row => exitAlertKeys.includes(row.exitStatus.key) }
     ];
     return definitions.map(def => ({ ...def, count: rows.filter(def.matches).length }));
@@ -1202,6 +1458,16 @@
     refreshLiveFloatingScrollbar();
   }
 
+  async function updateExtraValidation(shiftId, status) {
+    if (!isManagementProfile()) return toast("No tenés permisos para validar este registro.");
+    if (!shiftId || !["confirmed", "rejected"].includes(status)) return;
+    const action = status === "confirmed" ? "validar" : "rechazar";
+    if (!window.confirm(`¿${action === "validar" ? "Validar" : "Rechazar"} este trabajo extraordinario declarado por el operario?`)) return;
+    await store.updateEventsByShift(shiftId, { validation_status: status });
+    toast(status === "confirmed" ? "Trabajo extraordinario validado." : "Trabajo extraordinario marcado como rechazado.", status === "confirmed" ? "success" : undefined);
+    await renderSupervisorView();
+  }
+
   function renderDashboard() {
     const rows = getDashboardRows();
     state.dashboardRows = rows;
@@ -1228,8 +1494,13 @@
       const { shift, entryEvent, exitEvent, entryStatus, exitStatus, status, lastEvent } = row;
       const operator = byId(state.profiles, shift.operator_id);
       const site = byId(state.sites, shift.site_id);
-      const message = buildWhatsAppMessage(shift, status);
+      const message = row.isSelfReportedExtra ? `Trabajo extraordinario registrado por ${operator?.full_name || "operario"} en ${site?.name || "servicio"}.` : buildWhatsAppMessage(shift, status);
       const url = whatsappUrl(site?.whatsapp_phone, message);
+      const assignmentType = row.isSelfReportedExtra ? (row.extraWorkType || "coverage") : (shift.assignment_type || "fixed");
+      const typeBadge = assignmentType !== "fixed" ? `<span class="extra-duty-badge ${escapeHtml(assignmentType)}">${escapeHtml(assignmentTypeLabel(assignmentType))}</span>` : "";
+      const validationActions = row.isSelfReportedExtra && row.extraValidationStatus === "pending"
+        ? `<div class="validation-actions"><button class="secondary-btn small-btn" data-extra-validation="confirmed" data-extra-shift="${escapeHtml(shift.id)}" type="button">Validar</button><button class="ghost-btn small-btn" data-extra-validation="rejected" data-extra-shift="${escapeHtml(shift.id)}" type="button">Rechazar</button></div>`
+        : row.isSelfReportedExtra ? `<span class="muted small">${escapeHtml(validationLabel(row.extraValidationStatus))}</span>` : "";
       const mapButtons = [
         hasCoordinates(entryEvent) ? `<button class="location-btn" data-map-event="${escapeHtml(entryEvent.id)}" type="button">Mapa entrada</button>` : "",
         hasCoordinates(exitEvent) ? `<button class="location-btn" data-map-event="${escapeHtml(exitEvent.id)}" type="button">Mapa salida</button>` : ""
@@ -1238,13 +1509,14 @@
       return `
         <tr>
           <td><strong>${escapeHtml(operator?.full_name || "—")}</strong><br><span class="muted small">${escapeHtml(operator?.phone || "")}</span></td>
-          <td><strong>${escapeHtml(site?.name || "—")}</strong><br><span class="muted small">${escapeHtml(site?.address || "")}</span></td>
-          <td>${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}</td>
+          <td><strong>${escapeHtml(site?.name || "—")}</strong><br>${typeBadge ? `${typeBadge}<br>` : ""}<span class="muted small">${escapeHtml(site?.address || "")}</span></td>
+          <td>${row.isSelfReportedExtra ? `<span class="extra-schedule-label">Sin horario previo</span>` : `${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`}</td>
           <td>${statusDetailCell(entryStatus, entryEvent, "Sin entrada")}</td>
           <td>${statusDetailCell(exitStatus, exitEvent, "Sin salida")}</td>
           <td><span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.client_time || lastEvent.created_at)}` : "—"}</span></td>
           <td class="row-actions">
             ${mapButtons}
+            ${validationActions}
             <a class="wa-btn ${normalizePhone(site?.whatsapp_phone) ? "" : "disabled-link"}" href="${url}" target="_blank" rel="noopener">WhatsApp consorcio</a>
           </td>
         </tr>`;
@@ -1308,7 +1580,7 @@
 
   function quickDetailMeta(row, kind) {
     const shift = row.shift;
-    const lines = [`Horario ${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`];
+    const lines = [row.isSelfReportedExtra ? "Sin horario previo · trabajo extraordinario" : `Horario ${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`];
     if (kind === "entries" && row.entryEvent) {
       lines.push(`Entrada: ${formatDateTime(row.entryEvent.client_time || row.entryEvent.created_at)}`);
       lines.push(gpsSummary(row.entryEvent));
@@ -1491,7 +1763,7 @@
     const term = $("#coverageSearch")?.value?.trim() || "";
     const grid = $("#coverageGrid");
     const html = state.sites
-      .map(site => ({ site, assignments: state.assignments.filter(a => a.site_id === site.id) }))
+      .map(site => ({ site, assignments: state.assignments.filter(a => a.site_id === site.id && (a.assignment_type || "fixed") === "fixed") }))
       .filter(group => assignmentMatchesSearch(group.site, group.assignments, term))
       .map(({ site, assignments }) => {
         const dayCards = DAYS.map(day => {
@@ -1615,8 +1887,13 @@
 
   function renderAssignmentSelectors() {
     const operators = state.profiles.filter(p => p.role === "operator");
-    $("#assignmentOperator").innerHTML = operators.map(op => `<option value="${op.id}">${escapeHtml(op.full_name)}</option>`).join("");
-    $("#assignmentSite").innerHTML = state.sites.map(site => `<option value="${site.id}">${escapeHtml(site.name)}</option>`).join("");
+    const operatorOptions = operators.map(op => `<option value="${op.id}">${escapeHtml(op.full_name)}</option>`).join("");
+    const siteOptions = state.sites.map(site => `<option value="${site.id}">${escapeHtml(site.name)}</option>`).join("");
+    $("#assignmentOperator").innerHTML = operatorOptions;
+    $("#assignmentSite").innerHTML = siteOptions;
+    if ($("#extraAssignmentOperator")) $("#extraAssignmentOperator").innerHTML = operatorOptions;
+    if ($("#extraAssignmentSite")) $("#extraAssignmentSite").innerHTML = siteOptions;
+    if ($("#extraCoveredOperator")) $("#extraCoveredOperator").innerHTML = `<option value="">Sin especificar</option>${operatorOptions}`;
   }
 
   function defaultScheduleStart() { return "08:00"; }
@@ -1841,6 +2118,51 @@
     }
   }
 
+  async function saveExtraAssignment(event) {
+    event.preventDefault();
+    const operatorId = $("#extraAssignmentOperator")?.value;
+    const siteId = $("#extraAssignmentSite")?.value;
+    const type = $("#extraAssignmentType")?.value || "coverage";
+    const date = $("#extraAssignmentDate")?.value || todayISO();
+    const start = $("#extraAssignmentStart")?.value;
+    const end = $("#extraAssignmentEnd")?.value;
+    const grace = Number($("#extraAssignmentGrace")?.value || 10);
+    const absent = Number($("#extraAssignmentAbsent")?.value || 30);
+    const coveredOperatorId = $("#extraCoveredOperator")?.value || null;
+    const notes = $("#extraAssignmentNotes")?.value.trim() || "";
+    const suppressRegular = Boolean($("#extraSuppressRegular")?.checked);
+
+    if (!operatorId || !siteId || !date || !start || !end) throw new Error("Completá operario, servicio, fecha y horario.");
+    if (end <= start) throw new Error("La hora de salida debe ser posterior a la entrada.");
+    if (absent <= grace) throw new Error("El margen de ausencia debe ser posterior a la tolerancia de demora.");
+    const day = (() => { const d = new Date(`${date}T12:00:00`).getDay(); return d === 0 ? 7 : d; })();
+
+    await store.upsertAssignment({
+      operator_id: operatorId,
+      site_id: siteId,
+      days_of_week: [day],
+      scheduled_start: start,
+      scheduled_end: end,
+      grace_minutes: grace,
+      absence_after_minutes: absent,
+      valid_from: date,
+      valid_to: date,
+      assignment_type: type,
+      covered_operator_id: coveredOperatorId,
+      created_by: state.currentProfile?.id || null,
+      suppress_regular_assignments: suppressRegular,
+      notes: notes || (type === "coverage" ? "Cobertura extraordinaria" : "Refuerzo extraordinario"),
+      is_active: true
+    });
+
+    $("#extraAssignmentNotes").value = "";
+    $("#extraCoveredOperator").value = "";
+    if ($("#extraSuppressRegular")) $("#extraSuppressRegular").checked = false;
+    $("#extraAssignmentDate").value = todayISO();
+    toast(`${assignmentTypeLabel(type)} creada. El operario la verá como tarea extraordinaria.`, "success");
+    await renderSupervisorView();
+  }
+
   function renderAssignments() {
     const list = $("#assignmentsList");
     const validIds = new Set(state.assignments.map(assignment => assignment.id));
@@ -1854,6 +2176,8 @@
     list.innerHTML = sorted.map(assignment => {
       const op = byId(state.profiles, assignment.operator_id);
       const site = byId(state.sites, assignment.site_id);
+      const coveredOp = assignment.covered_operator_id ? byId(state.profiles, assignment.covered_operator_id) : null;
+      const assignmentType = assignment.assignment_type || "fixed";
       const days = (assignment.days_of_week || []).map(d => dayLabel(d)).join(", ");
       const vigencia = `${assignment.valid_from || "—"}${assignment.valid_to ? ` a ${assignment.valid_to}` : " en adelante"}`;
       const selected = state.bulkSelectedAssignmentIds.has(assignment.id);
@@ -1865,8 +2189,10 @@
               <span>Seleccionar para cambio masivo</span>
             </label>
           </div>
-          <div class="list-item-title">${escapeHtml(site?.name || "—")}</div>
+          <div class="list-item-title-row"><div class="list-item-title">${escapeHtml(site?.name || "—")}</div>${assignmentType !== "fixed" ? `<span class="extra-duty-badge ${escapeHtml(assignmentType)}">${escapeHtml(assignmentTypeLabel(assignmentType))}</span>` : ""}</div>
           <div class="muted small"><strong>${escapeHtml(op?.full_name || "—")}</strong> · ${formatTime(assignment.scheduled_start)} a ${formatTime(assignment.scheduled_end)}</div>
+          ${coveredOp ? `<div class="muted small">Cubre a: <strong>${escapeHtml(coveredOp.full_name || "—")}</strong></div>` : ""}
+          ${assignment.suppress_regular_assignments ? `<div class="muted small"><strong>Reemplaza la asignación habitual del operario en ese horario.</strong></div>` : ""}
           <div class="muted small">Días: ${escapeHtml(days || "—")} · Vigencia: ${escapeHtml(vigencia)}</div>
           <div class="muted small">Tolerancia: ${assignment.grace_minutes} min · Ausente desde: ${assignment.absence_after_minutes} min</div>
           ${assignment.notes ? `<div class="muted small">Notas: ${escapeHtml(assignment.notes)}</div>` : ""}
@@ -1902,7 +2228,8 @@
       valid_from: $("#assignmentValidFrom").value || todayISO(),
       valid_to: $("#assignmentValidTo").value || null,
       notes: $("#assignmentNotes").value.trim(),
-      is_active: true
+      is_active: true,
+      ...(!id ? { assignment_type: "fixed", created_by: state.currentProfile?.id || null } : {})
     };
 
     return groups.map((group, index) => ({
@@ -2143,6 +2470,17 @@
     return true;
   }
 
+  function assignmentSuppressedHistorically(assignment, dateString, allAssignments) {
+    if ((assignment.assignment_type || "fixed") !== "fixed") return false;
+    return (allAssignments || []).some(extra =>
+      extra.operator_id === assignment.operator_id &&
+      (extra.assignment_type || "fixed") !== "fixed" &&
+      extra.suppress_regular_assignments === true &&
+      assignmentAppliesHistorically(extra, dateString) &&
+      assignmentsOverlap(extra, assignment)
+    );
+  }
+
   function scheduledRangeForShift(dateString, startTime, endTime) {
     const start = new Date(`${dateString}T${String(startTime || "00:00").slice(0, 5)}:00`);
     let end = new Date(`${dateString}T${String(endTime || "00:00").slice(0, 5)}:00`);
@@ -2281,7 +2619,7 @@
       if (!date || !endDate || date > endDate) continue;
 
       while (date <= endDate) {
-        if (assignmentAppliesHistorically(assignment, date)) {
+        if (assignmentAppliesHistorically(assignment, date) && !assignmentSuppressedHistorically(assignment, date, context.assignments)) {
           const shiftId = `${assignment.id}__${date}`;
           const shift = {
             id: shiftId,
@@ -2300,12 +2638,18 @@
           const evalResult = getHistoricalShiftEvaluation(shift, shiftEvents, reportNow);
           const operator = profilesById.get(assignment.operator_id);
           const site = sitesById.get(assignment.site_id);
+          const coveredOperator = assignment.covered_operator_id ? profilesById.get(assignment.covered_operator_id) : null;
+          const assignmentType = assignment.assignment_type || "fixed";
           const notes = [assignment.notes, evalResult.absentEvent?.notes, evalResult.lateEvent?.notes, evalResult.entry?.notes, evalResult.exit?.notes].filter(Boolean).join(" | ");
 
           rows.push({
             "Fecha": date,
             "Operario": operator?.full_name || assignment.operator_id || "",
             "Servicio": site?.name || assignment.site_id || "",
+            "Tipo de trabajo": assignmentTypeLabel(assignmentType),
+            "Cubre a": coveredOperator?.full_name || "",
+            "Origen de tarea": assignmentType === "fixed" ? "Asignación fija" : "Tarea extraordinaria cargada por supervisor",
+            "Validación": "Validado",
             "Dirección": site?.address || "",
             "Horario programado": `${String(assignment.scheduled_start || "").slice(0, 5)} - ${String(assignment.scheduled_end || "").slice(0, 5)}`,
             "Hora entrada": evalResult.entry ? formatClock(eventTimestamp(evalResult.entry)) : "",
@@ -2359,6 +2703,10 @@
         "Fecha": sample.shift_date || "",
         "Operario": operator?.full_name || sample.operator_id || "",
         "Servicio": site?.name || sample.site_id || "",
+        "Tipo de trabajo": workTypeLabel(entry?.work_type || sample.work_type || "regular"),
+        "Cubre a": "",
+        "Origen de tarea": (entry?.entry_source || sample.entry_source) === "operator_extra" ? "Declarado por operario" : "Marcación sin turno reconstruido",
+        "Validación": validationLabel(entry?.validation_status || sample.validation_status || "confirmed"),
         "Dirección": site?.address || "",
         "Horario programado": "No reconstruido",
         "Hora entrada": entry ? formatClock(eventTimestamp(entry)) : "",
@@ -2477,6 +2825,9 @@
       "Operario": op?.full_name || event.operator_id || "",
       "Servicio": site?.name || event.site_id || "",
       "Dirección": site?.address || "",
+      "Tipo de trabajo": workTypeLabel(event.work_type || "regular"),
+      "Origen de tarea": event.entry_source === "operator_extra" ? "Declarado por operario" : "Asignación",
+      "Validación": validationLabel(event.validation_status || "confirmed"),
       "Tipo": event.event_type || "",
       "Tipo legible": eventTypeLabel(event.event_type),
       "Estado": event.observed_status || "",
@@ -2544,6 +2895,7 @@
           <td>${escapeHtml(event.shift_date || "—")}</td>
           <td>${escapeHtml(op?.full_name || event.operator_id || "—")}</td>
           <td>${escapeHtml(site?.name || event.site_id || "—")}</td>
+          <td>${escapeHtml(workTypeLabel(event.work_type || "regular"))}${event.entry_source === "operator_extra" ? `<br><span class="muted small">Declarado por operario · ${escapeHtml(validationLabel(event.validation_status || "pending"))}</span>` : ""}</td>
           <td><strong>${escapeHtml(eventTypeLabel(event.event_type))}</strong><br><span class="muted small">${escapeHtml(observedStatusLabel(event.observed_status))}</span></td>
           <td>${event.lat != null ? `${Number(event.lat).toFixed(6)}, ${Number(event.lng).toFixed(6)}` : "—"}</td>
           <td>${event.gps_accuracy_m != null ? `${Math.round(Number(event.gps_accuracy_m))} m` : "—"}</td>
@@ -2555,8 +2907,8 @@
 
     $("#recordsTable").innerHTML = `
       <table>
-        <thead><tr><th>Hora registro</th><th>Fecha servicio</th><th>Operario</th><th>Servicio</th><th>Tipo</th><th>GPS</th><th>Precisión</th><th>Distancia</th><th>Dentro radio</th><th>Obs.</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="10">No hay marcaciones para el período seleccionado.</td></tr>`}</tbody>
+        <thead><tr><th>Hora registro</th><th>Fecha servicio</th><th>Operario</th><th>Servicio</th><th>Tipo de trabajo</th><th>Marcación</th><th>GPS</th><th>Precisión</th><th>Distancia</th><th>Dentro radio</th><th>Obs.</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="11">No hay marcaciones para el período seleccionado.</td></tr>`}</tbody>
       </table>`;
 
     const summary = $("#recordsRangeSummary");
@@ -2575,7 +2927,7 @@
     const button = $("#exportCsvBtn");
     await withExportButton(button, "Generando...", async () => {
       const { period, events, profiles, sites } = await fetchRecordsForSelectedPeriod();
-      const headers = ["fecha_hora", "fecha_servicio", "operario", "servicio", "tipo", "tipo_legible", "estado", "estado_legible", "lat", "lng", "precision_m", "distancia_m", "dentro_radio", "observacion", "assignment_id", "shift_id"];
+      const headers = ["fecha_hora", "fecha_servicio", "operario", "servicio", "tipo", "tipo_legible", "estado", "estado_legible", "lat", "lng", "precision_m", "distancia_m", "dentro_radio", "observacion", "assignment_id", "shift_id", "tipo_trabajo", "origen_tarea", "validacion"];
       const rows = events.map(event => {
         const op = byId(profiles, event.operator_id);
         const site = byId(sites, event.site_id);
@@ -2584,6 +2936,9 @@
           fecha_servicio: event.shift_date || "",
           operario: op?.full_name || event.operator_id || "",
           servicio: site?.name || event.site_id || "",
+          tipo_trabajo: workTypeLabel(event.work_type || "regular"),
+          origen_tarea: event.entry_source === "operator_extra" ? "Declarado por operario" : "Asignación",
+          validacion: validationLabel(event.validation_status || "confirmed"),
           tipo: event.event_type || "",
           tipo_legible: eventTypeLabel(event.event_type),
           estado: event.observed_status || "",
@@ -2617,6 +2972,7 @@
     $("#forgotPasswordForm").addEventListener("submit", handleForgotPassword);
     $("#resetPasswordForm").addEventListener("submit", handleResetPassword);
     $("#operatorLogoutBtn").addEventListener("click", logout);
+    $("#refreshOperatorBtn")?.addEventListener("click", () => renderOperatorView().catch(error => toast(error.message || "No se pudieron actualizar los servicios.")));
     $("#supervisorLogoutBtn").addEventListener("click", logout);
     $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => {
       renderTab(btn.dataset.tab);
@@ -2641,8 +2997,10 @@
       renderDashboard();
     });
     $("#liveTable").addEventListener("click", (event) => {
-      const button = event.target.closest("[data-map-event]");
-      if (button) openAttendanceMap(button.dataset.mapEvent);
+      const mapButton = event.target.closest("[data-map-event]");
+      if (mapButton) return openAttendanceMap(mapButton.dataset.mapEvent);
+      const validationButton = event.target.closest("[data-extra-validation]");
+      if (validationButton) updateExtraValidation(validationButton.dataset.extraShift, validationButton.dataset.extraValidation).catch(error => toast(error.message || "No se pudo validar el registro."));
     });
     $("#quickDetailBody").addEventListener("click", (event) => {
       const button = event.target.closest("[data-map-event]");
@@ -2678,6 +3036,8 @@
     });
     $("#bulkSiteScope").addEventListener("change", updateBulkSelectionSummaries);
     $("#applyBulkSitesBtn").addEventListener("click", () => applyBulkSiteRadius().catch(error => toast(error.message || "No se pudo actualizar el radio GPS.")));
+
+    $("#extraAssignmentForm")?.addEventListener("submit", (event) => saveExtraAssignment(event).catch(error => toast(error.message || "No se pudo crear la tarea extraordinaria.")));
 
     $("#assignmentForm").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -2751,6 +3111,7 @@
     renderAssignmentSchedule();
     $("#dashboardDate").value = todayISO();
     $("#assignmentValidFrom").value = todayISO();
+    if ($("#extraAssignmentDate")) $("#extraAssignmentDate").value = todayISO();
     syncPeriodControls("live", false);
     syncPeriodControls("records", false);
     bindEvents();
