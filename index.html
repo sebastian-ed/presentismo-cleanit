@@ -117,6 +117,7 @@
 
         <nav class="tabbar" aria-label="Panel supervisor">
           <button class="tab-btn active" data-tab="live" type="button">En vivo</button>
+          <button class="tab-btn" data-tab="analytics" type="button">Análisis</button>
           <button class="tab-btn" data-tab="fichaje" type="button">Fichaje</button>
           <button class="tab-btn" data-tab="coverage" type="button">Cobertura</button>
           <button class="tab-btn" data-tab="assignments" type="button">Asignaciones</button>
@@ -207,6 +208,82 @@
             <div id="liveStatusFilters" class="live-status-filters" aria-label="Filtros rápidos de estado"></div>
             <div id="liveTable" class="responsive-table"></div>
             <div id="liveTableScrollProxy" class="floating-h-scroll hidden" aria-hidden="true"><div class="floating-h-scroll-inner"></div></div>
+          </div>
+        </section>
+
+        <section id="analyticsTab" class="tab-panel">
+          <div class="data-card analytics-hero">
+            <div class="card-title-row">
+              <div>
+                <p class="eyebrow">Control de presentismo</p>
+                <h3>Análisis y ranking de operarios</h3>
+                <p class="muted small no-margin">Horas reales, ausencias, llegadas tarde y fichajes fuera de radio. El período se calcula con las entradas y salidas registradas.</p>
+              </div>
+            </div>
+            <div class="analytics-toolbar">
+              <label>
+                <span>Período</span>
+                <select id="analyticsPeriod">
+                  <option value="today">Hoy</option>
+                  <option value="yesterday">Ayer</option>
+                  <option value="last7">Últimos 7 días</option>
+                  <option value="month" selected>Mes actual</option>
+                  <option value="lastmonth">Mes anterior</option>
+                  <option value="custom">Rango personalizado</option>
+                  <option value="all">Todo el historial</option>
+                </select>
+              </label>
+              <label><span>Desde</span><input id="analyticsFrom" type="date" /></label>
+              <label><span>Hasta</span><input id="analyticsTo" type="date" /></label>
+              <label>
+                <span>Servicio</span>
+                <select id="analyticsService"><option value="">Todos los servicios</option></select>
+              </label>
+              <label>
+                <span>Orden ranking</span>
+                <select id="analyticsOrder"><option value="desc">Mayor a menor</option><option value="asc">Menor a mayor</option></select>
+              </label>
+              <div class="analytics-toolbar-actions">
+                <button class="secondary-btn small-btn" id="applyAnalyticsBtn" type="button">Actualizar análisis</button>
+                <button class="secondary-btn small-btn" id="exportAnalyticsCsvBtn" type="button">Descargar CSV</button>
+                <button class="primary-btn small-btn" id="exportAnalyticsExcelBtn" type="button">Descargar Excel</button>
+              </div>
+            </div>
+            <div id="analyticsRangeSummary" class="muted small analytics-range-summary"></div>
+          </div>
+
+          <div id="analyticsKpis" class="kpi-grid analytics-kpis"></div>
+
+          <div class="analytics-chart-grid">
+            <article class="data-card analytics-chart-card">
+              <div class="analytics-card-head"><h3>Horas confirmadas</h3><span class="muted small">Top operarios</span></div>
+              <div id="analyticsHoursChart" class="analytics-bars"></div>
+            </article>
+            <article class="data-card analytics-chart-card">
+              <div class="analytics-card-head"><h3>Ausencias / sin entrada</h3><span class="muted small">Incidencias</span></div>
+              <div id="analyticsAbsenceChart" class="analytics-bars"></div>
+            </article>
+            <article class="data-card analytics-chart-card">
+              <div class="analytics-card-head"><h3>Llegadas tarde</h3><span class="muted small">Incidencias</span></div>
+              <div id="analyticsLateChart" class="analytics-bars"></div>
+            </article>
+            <article class="data-card analytics-chart-card">
+              <div class="analytics-card-head"><h3>Fichajes fuera de radio</h3><span class="muted small">Entradas + salidas</span></div>
+              <div id="analyticsOutsideChart" class="analytics-bars"></div>
+            </article>
+          </div>
+
+          <div class="data-card">
+            <div class="card-title-row">
+              <div><h3>Resumen completo por operario</h3><p class="muted small no-margin">Incluye horas confirmadas, pendientes de validar y principales incidencias.</p></div>
+            </div>
+            <div id="analyticsSummaryTable" class="responsive-table"></div>
+          </div>
+
+          <div class="analytics-ranking-grid">
+            <article class="data-card ranking-card"><div class="analytics-card-head"><h3>Ranking de ausencias</h3><span class="muted small">Todos los operarios</span></div><div id="analyticsAbsenceRanking" class="ranking-list"></div></article>
+            <article class="data-card ranking-card"><div class="analytics-card-head"><h3>Ranking de tardanzas</h3><span class="muted small">Todos los operarios</span></div><div id="analyticsLateRanking" class="ranking-list"></div></article>
+            <article class="data-card ranking-card"><div class="analytics-card-head"><h3>Ranking fuera de radio</h3><span class="muted small">Todos los operarios</span></div><div id="analyticsOutsideRanking" class="ranking-list"></div></article>
           </div>
         </section>
 
@@ -497,7 +574,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="js/config.js"></script>
-  <script src="js/storage.js?v=20260810-extra1"></script>
-  <script src="js/app.js?v=20260810-extra1"></script>
+  <script src="js/storage.js?v=20260810-analytics1"></script>
+  <script src="js/app.js?v=20260810-analytics1"></script>
 </body>
 </html>

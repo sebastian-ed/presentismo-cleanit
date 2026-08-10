@@ -970,3 +970,121 @@ body.modal-open { overflow: hidden; }
 .extra-replace-check { grid-column: span 4; align-self: center; margin: 0; }
 @media (max-width: 980px) { .extra-replace-check { grid-column: span 2; } }
 @media (max-width: 640px) { .extra-replace-check { grid-column: span 1; } }
+
+/* Dashboard de análisis y horas RRHH · 2026-08-10 */
+.analytics-hero { margin-bottom: 14px; }
+.analytics-toolbar {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  align-items: end;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #f8fafc;
+}
+.analytics-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.analytics-toolbar-actions .small-btn { min-height: 42px; }
+.analytics-range-summary { min-height: 20px; margin: 10px 2px 0; font-weight: 750; }
+.analytics-kpis { margin-bottom: 14px; }
+.analytics-chart-grid,
+.analytics-ranking-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.analytics-chart-card { min-width: 0; }
+.analytics-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.analytics-card-head h3 { margin-bottom: 0; }
+.analytics-bars { display: grid; gap: 11px; }
+.analytics-bar-row { display: grid; gap: 5px; }
+.analytics-bar-label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  font-size: .78rem;
+}
+.analytics-bar-label span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 750;
+  color: #334155;
+}
+.analytics-bar-label strong { font-size: .76rem; white-space: nowrap; }
+.analytics-bar-track {
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #e2e8f0;
+}
+.analytics-bar-fill {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  border-radius: inherit;
+  transition: width .22s ease;
+}
+.analytics-bar-fill.tone-hours { background: #0f766e; }
+.analytics-bar-fill.tone-absence { background: #b91c1c; }
+.analytics-bar-fill.tone-late { background: #b45309; }
+.analytics-bar-fill.tone-outside { background: #6d28d9; }
+.ranking-card { min-width: 0; }
+.ranking-list {
+  display: grid;
+  gap: 0;
+  max-height: 430px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+.ranking-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 9px 10px;
+  border-bottom: 1px solid #e8edf4;
+  font-size: .8rem;
+}
+.ranking-row:last-child { border-bottom: 0; }
+.ranking-position {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 9px;
+  background: #eef2f7;
+  color: #475569;
+  font-size: .72rem;
+  font-weight: 900;
+}
+.ranking-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 800; }
+.ranking-value { white-space: nowrap; font-size: .82rem; }
+
+@media (min-width: 760px) {
+  .analytics-toolbar { grid-template-columns: minmax(150px,.9fr) minmax(135px,.7fr) minmax(135px,.7fr) minmax(190px,1.1fr) minmax(150px,.8fr); }
+  .analytics-toolbar-actions { grid-column: 1 / -1; justify-content: flex-end; }
+  .analytics-chart-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .analytics-ranking-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (min-width: 1120px) {
+  .analytics-toolbar { grid-template-columns: minmax(145px,.8fr) 130px 130px minmax(190px,1fr) minmax(145px,.75fr) auto; }
+  .analytics-toolbar-actions { grid-column: auto; justify-content: flex-end; }
+}

@@ -28,6 +28,13 @@
     recordsProfiles: [],
     recordsSites: [],
     recordsLoaded: false,
+    analyticsLoaded: false,
+    analyticsAllRows: [],
+    analyticsRows: [],
+    analyticsSummary: [],
+    analyticsDaily: [],
+    analyticsProfiles: [],
+    analyticsPeriodResolved: null,
     activeTab: "live",
     bulkSelectedAssignmentIds: new Set(),
     bulkSelectedSiteIds: new Set()
@@ -90,6 +97,9 @@
     if (kind === "live") {
       return { period: $("#liveExportPeriod"), from: $("#liveExportFrom"), to: $("#liveExportTo") };
     }
+    if (kind === "analytics") {
+      return { period: $("#analyticsPeriod"), from: $("#analyticsFrom"), to: $("#analyticsTo") };
+    }
     return { period: $("#recordsPeriod"), from: $("#recordsFrom"), to: $("#recordsTo") };
   }
 
@@ -150,6 +160,39 @@
     } catch (_) {
       return "";
     }
+  }
+
+  function formatDurationSeconds(totalSeconds) {
+    if (totalSeconds == null || !Number.isFinite(Number(totalSeconds)) || Number(totalSeconds) < 0) return "";
+    const seconds = Math.floor(Number(totalSeconds));
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  }
+
+  function workedDuration(entry, exit) {
+    if (!entry || !exit) return { seconds: null, minutes: null, decimalHours: null, label: "" };
+    const start = new Date(eventTimestamp(entry));
+    const end = new Date(eventTimestamp(exit));
+    const ms = end.getTime() - start.getTime();
+    if (!Number.isFinite(ms) || ms < 0) return { seconds: null, minutes: null, decimalHours: null, label: "" };
+    const seconds = Math.floor(ms / 1000);
+    return {
+      seconds,
+      minutes: Math.round((seconds / 60) * 100) / 100,
+      decimalHours: Math.round((seconds / 3600) * 10000) / 10000,
+      label: formatDurationSeconds(seconds)
+    };
+  }
+
+  function minutesToHoursLabel(minutes) {
+    const value = Number(minutes || 0);
+    if (!Number.isFinite(value) || value < 0) return "00:00";
+    const totalMinutes = Math.round(value);
+    const hours = Math.floor(totalMinutes / 60);
+    const mins = totalMinutes % 60;
+    return `${hours} h ${String(mins).padStart(2, "0")} min`;
   }
 
   function csvEscape(value) {
@@ -1067,8 +1110,8 @@
     return created;
   }
 
-  function buildFichajeRows(dateFrom, dateTo, operatorFilter) {
-    const events = state.events.filter(e => e.shift_date >= dateFrom && e.shift_date <= dateTo);
+  function buildFichajeRows(dateFrom, dateTo, operatorFilter, sourceEvents = state.events, sourceProfiles = state.profiles, sourceSites = state.sites) {
+    const events = sourceEvents.filter(e => e.shift_date >= dateFrom && e.shift_date <= dateTo);
 
     const shiftMap = new Map();
     for (const event of events) {
@@ -1087,17 +1130,13 @@
     }
 
     let rows = Array.from(shiftMap.values()).map(s => {
-      const operator = byId(state.profiles, s.operator_id);
-      const site = byId(state.sites, s.site_id);
-      const entryTime = s.entry?.client_time;
-      const exitTime = s.exit?.client_time;
-
-      let minutes = null;
-      let horasLabel = "—";
-      if (entryTime && exitTime) {
-        minutes = Math.round((new Date(exitTime) - new Date(entryTime)) / 60000);
-        horasLabel = `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
-      }
+      const operator = byId(sourceProfiles, s.operator_id);
+      const site = byId(sourceSites, s.site_id);
+      const entryTime = s.entry?.client_time || s.entry?.created_at;
+      const exitTime = s.exit?.client_time || s.exit?.created_at;
+      const duration = workedDuration(s.entry, s.exit);
+      const minutes = duration.minutes;
+      const horasLabel = duration.label || "—";
 
       let estado, estadoClass;
       if (s.entry && s.exit) { estado = "Completo"; estadoClass = "status-present"; }
@@ -1117,6 +1156,8 @@
         entry_time: entryTime,
         exit_time: exitTime,
         minutes,
+        seconds: duration.seconds,
+        decimalHours: duration.decimalHours,
         horasLabel,
         estado,
         estadoClass
@@ -1128,7 +1169,7 @@
     return rows;
   }
 
-  function renderFichaje() {
+  function renderFichaje(sourceEvents = state.events, sourceProfiles = state.profiles, sourceSites = state.sites) {
     const dateFrom = $("#fichajeFrom").value || todayISO();
     const dateTo = $("#fichajeTo").value || todayISO();
     const operatorFilter = $("#fichajeOperator").value || "";
@@ -1136,10 +1177,10 @@
     // Populate operator selector
     const select = $("#fichajeOperator");
     const currentVal = select.value;
-    const operators = state.profiles.filter(p => p.role === "operator").sort((a, b) => a.full_name.localeCompare(b.full_name));
+    const operators = sourceProfiles.filter(p => p.role === "operator").sort((a, b) => a.full_name.localeCompare(b.full_name));
     select.innerHTML = `<option value="">Todos</option>` + operators.map(op => `<option value="${op.id}" ${op.id === currentVal ? "selected" : ""}>${escapeHtml(op.full_name)}</option>`).join("");
 
-    const rows = buildFichajeRows(dateFrom, dateTo, operatorFilter);
+    const rows = buildFichajeRows(dateFrom, dateTo, operatorFilter, sourceEvents, sourceProfiles, sourceSites);
 
     // Summary totals per operator
     const totals = new Map();
@@ -1157,7 +1198,7 @@
     $("#fichajeSummary").innerHTML = `
       ${kpi("Jornadas completas", totalDays, "status-present")}
       ${kpi("Sin salida / sin marcar", totalIncomplete, totalIncomplete ? "status-late" : "status-present")}
-      ${kpi("Horas totales período", `${Math.floor(totalMinutes / 60)} h ${String(totalMinutes % 60).padStart(2, "0")} min`)}
+      ${kpi("Horas totales período", minutesToHoursLabel(totalMinutes))}
     `;
 
     const tableRows = rows.map(row => `
@@ -1181,11 +1222,29 @@
       </table>`;
   }
 
-  function exportFichajeExcel() {
+  async function loadFichajePeriod() {
+    const dateFrom = $("#fichajeFrom").value || todayISO();
+    const dateTo = $("#fichajeTo").value || todayISO();
+    if (dateFrom > dateTo) throw new Error("La fecha Desde no puede ser posterior a Hasta.");
+    const [events, profiles, sites] = await Promise.all([
+      store.listEventsRange(dateFrom, dateTo),
+      store.listAllProfiles(),
+      store.listAllSites()
+    ]);
+    renderFichaje(events, profiles, sites);
+    return { events, profiles, sites, dateFrom, dateTo };
+  }
+
+  async function exportFichajeExcel() {
     const dateFrom = $("#fichajeFrom").value || todayISO();
     const dateTo = $("#fichajeTo").value || todayISO();
     const operatorFilter = $("#fichajeOperator").value || "";
-    const rows = buildFichajeRows(dateFrom, dateTo, operatorFilter);
+    const [events, profiles, sites] = await Promise.all([
+      store.listEventsRange(dateFrom, dateTo),
+      store.listAllProfiles(),
+      store.listAllSites()
+    ]);
+    const rows = buildFichajeRows(dateFrom, dateTo, operatorFilter, events, profiles, sites);
 
     // Sheet 1: detalle
     const detalle = rows.map(r => ({
@@ -1197,26 +1256,50 @@
       "Validación": r.validation_label,
       "Hora entrada": r.entry_time ? new Date(r.entry_time).toLocaleString("es-AR") : "",
       "Hora salida": r.exit_time ? new Date(r.exit_time).toLocaleString("es-AR") : "",
-      "Horas trabajadas": r.horasLabel,
+      "Duración exacta (hh:mm:ss)": r.horasLabel === "—" ? "" : r.horasLabel,
       "Minutos trabajados": r.minutes ?? "",
+      "Horas trabajadas (decimal)": r.decimalHours ?? "",
       "Estado": r.estado
     }));
 
     // Sheet 2: resumen por operario
     const totals = new Map();
+    const dailyTotals = new Map();
     for (const row of rows) {
-      if (!totals.has(row.operator_id)) totals.set(row.operator_id, { Operario: row.operator_name, "Jornadas completas": 0, "Total minutos": 0, "Total horas": "" });
+      if (!totals.has(row.operator_id)) totals.set(row.operator_id, { Operario: row.operator_name, "Jornadas completas": 0, "Total segundos": 0 });
       const t = totals.get(row.operator_id);
-      if (row.minutes !== null) { t["Jornadas completas"]++; t["Total minutos"] += row.minutes; }
+      if (row.seconds !== null) { t["Jornadas completas"]++; t["Total segundos"] += row.seconds; }
+      const dailyKey = `${row.shift_date}__${row.operator_id}`;
+      if (!dailyTotals.has(dailyKey)) dailyTotals.set(dailyKey, { Fecha: row.shift_date, Operario: row.operator_name, "Turnos completos": 0, "Total segundos": 0 });
+      const d = dailyTotals.get(dailyKey);
+      if (row.seconds !== null) { d["Turnos completos"]++; d["Total segundos"] += row.seconds; }
     }
-    const resumen = Array.from(totals.values()).map(t => {
-      t["Total horas"] = `${Math.floor(t["Total minutos"] / 60)} h ${String(t["Total minutos"] % 60).padStart(2, "0")} min`;
-      return t;
-    }).sort((a, b) => a.Operario.localeCompare(b.Operario));
+    const resumen = Array.from(totals.values()).map(t => ({
+      Operario: t.Operario,
+      "Jornadas completas": t["Jornadas completas"],
+      "Total exacto (hh:mm:ss)": formatDurationSeconds(t["Total segundos"]),
+      "Total minutos": Math.round((t["Total segundos"] / 60) * 100) / 100,
+      "Total horas (decimal)": Math.round((t["Total segundos"] / 3600) * 10000) / 10000
+    })).sort((a, b) => a.Operario.localeCompare(b.Operario));
+    const diario = Array.from(dailyTotals.values()).map(d => ({
+      Fecha: d.Fecha,
+      Operario: d.Operario,
+      "Turnos completos": d["Turnos completos"],
+      "Total exacto (hh:mm:ss)": formatDurationSeconds(d["Total segundos"]),
+      "Total minutos": Math.round((d["Total segundos"] / 60) * 100) / 100,
+      "Total horas (decimal)": Math.round((d["Total segundos"] / 3600) * 10000) / 10000
+    })).sort((a, b) => `${a.Fecha}|${a.Operario}`.localeCompare(`${b.Fecha}|${b.Operario}`));
 
     const wb = window.XLSX.utils.book_new();
-    window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.json_to_sheet(detalle), "Detalle");
-    window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.json_to_sheet(resumen), "Resumen por operario");
+    const wsDetail = window.XLSX.utils.json_to_sheet(detalle.length ? detalle : [{ "Sin datos": "No hay fichajes en el período." }]);
+    applyWorksheetUsability(wsDetail, [14, 30, 30, 24, 22, 18, 24, 24, 24, 20, 22, 18]);
+    window.XLSX.utils.book_append_sheet(wb, wsDetail, "Detalle");
+    const wsResumen = window.XLSX.utils.json_to_sheet(resumen.length ? resumen : [{ Operario: "Sin datos" }]);
+    applyWorksheetUsability(wsResumen, [30, 20, 24, 20, 22]);
+    window.XLSX.utils.book_append_sheet(wb, wsResumen, "Resumen por operario");
+    const wsDiario = window.XLSX.utils.json_to_sheet(diario.length ? diario : [{ Fecha: "Sin datos" }]);
+    applyWorksheetUsability(wsDiario, [14, 30, 20, 24, 20, 22]);
+    window.XLSX.utils.book_append_sheet(wb, wsDiario, "Horas por día");
     window.XLSX.writeFile(wb, `fichaje-cleanit-${dateFrom}-al-${dateTo}.xlsx`);
   }
 
@@ -2641,6 +2724,7 @@
           const coveredOperator = assignment.covered_operator_id ? profilesById.get(assignment.covered_operator_id) : null;
           const assignmentType = assignment.assignment_type || "fixed";
           const notes = [assignment.notes, evalResult.absentEvent?.notes, evalResult.lateEvent?.notes, evalResult.entry?.notes, evalResult.exit?.notes].filter(Boolean).join(" | ");
+          const duration = workedDuration(evalResult.entry, evalResult.exit);
 
           rows.push({
             "Fecha": date,
@@ -2653,6 +2737,7 @@
             "Dirección": site?.address || "",
             "Horario programado": `${String(assignment.scheduled_start || "").slice(0, 5)} - ${String(assignment.scheduled_end || "").slice(0, 5)}`,
             "Hora entrada": evalResult.entry ? formatClock(eventTimestamp(evalResult.entry)) : "",
+            "Fecha/hora entrada": evalResult.entry ? eventTimestamp(evalResult.entry) : "",
             "Estado entrada": evalResult.entryStatus,
             "Minutos demora": evalResult.lateMinutes ?? "",
             "Entrada dentro radio": eventInsideLabel(evalResult.entry),
@@ -2661,6 +2746,10 @@
             "Lat entrada": evalResult.entry?.lat ?? "",
             "Lng entrada": evalResult.entry?.lng ?? "",
             "Hora salida": evalResult.exit ? formatClock(eventTimestamp(evalResult.exit)) : "",
+            "Fecha/hora salida": evalResult.exit ? eventTimestamp(evalResult.exit) : "",
+            "Duración trabajada": duration.label,
+            "Minutos trabajados": duration.minutes ?? "",
+            "Horas trabajadas (decimal)": duration.decimalHours ?? "",
             "Estado salida": evalResult.exitStatus,
             "Minutos salida anticipada": evalResult.earlyExitMinutes ?? "",
             "Salida dentro radio": eventInsideLabel(evalResult.exit),
@@ -2672,6 +2761,8 @@
             "Alertas RRHH": evalResult.alerts.join(" | "),
             "Origen del estado": evalResult.source,
             "Observaciones": notes,
+            "Operator ID": assignment.operator_id,
+            "Site ID": assignment.site_id,
             "Assignment ID": assignment.id,
             "Shift ID": shiftId
           });
@@ -2699,6 +2790,7 @@
       if (entry?.is_inside_site === false) alerts.push("Entrada fuera de radio");
       if (exit?.observed_status === "early_exit") alerts.push("Salida anticipada");
       if (exit?.is_inside_site === false) alerts.push("Salida fuera de radio");
+      const duration = workedDuration(entry, exit);
       rows.push({
         "Fecha": sample.shift_date || "",
         "Operario": operator?.full_name || sample.operator_id || "",
@@ -2710,6 +2802,7 @@
         "Dirección": site?.address || "",
         "Horario programado": "No reconstruido",
         "Hora entrada": entry ? formatClock(eventTimestamp(entry)) : "",
+        "Fecha/hora entrada": entry ? eventTimestamp(entry) : "",
         "Estado entrada": entry ? (entry.is_inside_site === false ? "Entrada fuera de radio" : entry.observed_status === "late" ? "Entrada tarde" : "Entrada registrada") : "Sin entrada",
         "Minutos demora": "",
         "Entrada dentro radio": eventInsideLabel(entry),
@@ -2718,6 +2811,10 @@
         "Lat entrada": entry?.lat ?? "",
         "Lng entrada": entry?.lng ?? "",
         "Hora salida": exit ? formatClock(eventTimestamp(exit)) : "",
+        "Fecha/hora salida": exit ? eventTimestamp(exit) : "",
+        "Duración trabajada": duration.label,
+        "Minutos trabajados": duration.minutes ?? "",
+        "Horas trabajadas (decimal)": duration.decimalHours ?? "",
         "Estado salida": exit ? (exit.is_inside_site === false ? "Salida fuera de radio" : exit.observed_status === "early_exit" ? "Salida anticipada" : "Salida registrada") : "",
         "Minutos salida anticipada": "",
         "Salida dentro radio": eventInsideLabel(exit),
@@ -2729,6 +2826,8 @@
         "Alertas RRHH": alerts.join(" | "),
         "Origen del estado": "Marcación sin turno reconstruido",
         "Observaciones": events.map(e => e.notes).filter(Boolean).join(" | "),
+        "Operator ID": sample.operator_id || "",
+        "Site ID": sample.site_id || "",
         "Assignment ID": sample.assignment_id || "",
         "Shift ID": sample.shift_id || ""
       });
@@ -2738,41 +2837,185 @@
     return { rows, period: resolved };
   }
 
+  function rowWorkedMinutes(row) {
+    const value = Number(row?.["Minutos trabajados"]);
+    return Number.isFinite(value) && value >= 0 ? value : 0;
+  }
+
+  function rowValidationBucket(row) {
+    const validation = String(row?.["Validación"] || "Validado").toLowerCase();
+    if (validation.includes("rechaz")) return "rejected";
+    if (validation.includes("pendiente")) return "pending";
+    return "confirmed";
+  }
+
+  function outsideIncidentsForRow(row) {
+    let count = 0;
+    if (String(row?.["Estado entrada"] || "").toLowerCase().includes("fuera de radio")) count++;
+    if (String(row?.["Estado salida"] || "").toLowerCase().includes("fuera de radio")) count++;
+    return count;
+  }
+
+
+  function rowWorkInterval(row) {
+    const startRaw = row?.["Fecha/hora entrada"];
+    const endRaw = row?.["Fecha/hora salida"];
+    if (!startRaw || !endRaw) return null;
+    const start = new Date(startRaw).getTime();
+    const end = new Date(endRaw).getTime();
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+    return { start, end };
+  }
+
+  function mergedIntervalsMinutes(intervals) {
+    const valid = (intervals || []).filter(Boolean).sort((a, b) => a.start - b.start);
+    if (!valid.length) return 0;
+    let totalMs = 0;
+    let currentStart = valid[0].start;
+    let currentEnd = valid[0].end;
+    for (let i = 1; i < valid.length; i++) {
+      const item = valid[i];
+      if (item.start <= currentEnd) currentEnd = Math.max(currentEnd, item.end);
+      else {
+        totalMs += currentEnd - currentStart;
+        currentStart = item.start;
+        currentEnd = item.end;
+      }
+    }
+    totalMs += currentEnd - currentStart;
+    return Math.round((totalMs / 60000) * 100) / 100;
+  }
+
   function operationalSummaryByOperator(rows) {
     const map = new Map();
     rows.forEach(row => {
       const key = row.Operario || "Sin identificar";
-      if (!map.has(key)) map.set(key, { "Operario": key, "Coberturas": 0, "Ingresos correctos": 0, "Llegadas tarde": 0, "Fuera de radio": 0, "Ausencias / sin entrada": 0, "Ausencias registradas": 0, "Sin entrada inferido": 0, "Salidas anticipadas": 0, "Salidas no registradas": 0 });
+      if (!map.has(key)) map.set(key, {
+        "Operario": key,
+        "Coberturas": 0,
+        "Jornadas con entrada y salida": 0,
+        "Horas confirmadas": "0 h 00 min",
+        "Horas confirmadas (decimal)": 0,
+        "Minutos confirmados": 0,
+        "Horas pendientes validar": "0 h 00 min",
+        "Minutos pendientes validar": 0,
+        "Ingresos correctos": 0,
+        "Llegadas tarde": 0,
+        "Minutos demora acumulados": 0,
+        "Fichajes fuera de radio": 0,
+        "Ausencias / sin entrada": 0,
+        "Ausencias registradas": 0,
+        "Sin entrada inferido": 0,
+        "Salidas anticipadas": 0,
+        "Salidas no registradas": 0
+      });
       const item = map.get(key);
       item["Coberturas"]++;
-      if (row["Estado entrada"] === "Entrada correcta") item["Ingresos correctos"]++;
+      const minutes = rowWorkedMinutes(row);
+      const validation = rowValidationBucket(row);
+      if (minutes > 0) {
+        item["Jornadas con entrada y salida"]++;
+        if (validation === "confirmed") item["Minutos confirmados"] += minutes;
+        if (validation === "pending") item["Minutos pendientes validar"] += minutes;
+      }
+      if (row["Estado entrada"] === "Entrada correcta" || row["Estado entrada"] === "Entrada registrada") item["Ingresos correctos"]++;
       if (String(row["Estado entrada"]).includes("tarde") || String(row["Alertas RRHH"]).includes("Llegada tarde")) item["Llegadas tarde"]++;
-      if (String(row["Alertas RRHH"]).includes("fuera de radio")) item["Fuera de radio"]++;
+      item["Minutos demora acumulados"] += Number(row["Minutos demora"] || 0) || 0;
+      item["Fichajes fuera de radio"] += outsideIncidentsForRow(row);
       if (String(row["Alertas RRHH"]).includes("Ausencia / sin entrada")) item["Ausencias / sin entrada"]++;
       if (row["Origen del estado"] === "Ausencia registrada") item["Ausencias registradas"]++;
       if (row["Origen del estado"] === "Inferido por programación") item["Sin entrada inferido"]++;
       if (String(row["Alertas RRHH"]).includes("Salida anticipada")) item["Salidas anticipadas"]++;
       if (String(row["Alertas RRHH"]).includes("Salida no registrada")) item["Salidas no registradas"]++;
     });
-    return Array.from(map.values()).sort((a, b) => a.Operario.localeCompare(b.Operario));
+    const dailyHours = operationalHoursByOperatorDate(rows);
+    const netHours = new Map();
+    dailyHours.forEach(day => {
+      if (!netHours.has(day.Operario)) netHours.set(day.Operario, { confirmed: 0, pending: 0 });
+      const total = netHours.get(day.Operario);
+      total.confirmed += Number(day["Minutos confirmados"] || 0);
+      total.pending += Number(day["Minutos pendientes validar"] || 0);
+    });
+    return Array.from(map.values()).map(item => {
+      const net = netHours.get(item.Operario) || { confirmed: 0, pending: 0 };
+      item["Minutos confirmados"] = Math.round(net.confirmed * 100) / 100;
+      item["Minutos pendientes validar"] = Math.round(net.pending * 100) / 100;
+      item["Horas confirmadas"] = minutesToHoursLabel(item["Minutos confirmados"]);
+      item["Horas confirmadas (decimal)"] = Math.round((item["Minutos confirmados"] / 60) * 10000) / 10000;
+      item["Horas pendientes validar"] = minutesToHoursLabel(item["Minutos pendientes validar"]);
+      item["Minutos demora acumulados"] = Math.round(item["Minutos demora acumulados"] * 100) / 100;
+      return item;
+    }).sort((a, b) => a.Operario.localeCompare(b.Operario));
   }
 
   function operationalSummaryByDate(rows) {
     const map = new Map();
     rows.forEach(row => {
       const key = row.Fecha || "Sin fecha";
-      if (!map.has(key)) map.set(key, { "Fecha": key, "Coberturas": 0, "Ingresos correctos": 0, "Llegadas tarde": 0, "Fuera de radio": 0, "Ausencias / sin entrada": 0, "Ausencias registradas": 0, "Sin entrada inferido": 0, "Alertas de salida": 0 });
+      if (!map.has(key)) map.set(key, { "Fecha": key, "Coberturas": 0, "Horas confirmadas": "0 h 00 min", "Horas confirmadas (decimal)": 0, "Minutos confirmados": 0, "Ingresos correctos": 0, "Llegadas tarde": 0, "Fichajes fuera de radio": 0, "Ausencias / sin entrada": 0, "Ausencias registradas": 0, "Sin entrada inferido": 0, "Alertas de salida": 0 });
       const item = map.get(key);
       item["Coberturas"]++;
-      if (row["Estado entrada"] === "Entrada correcta") item["Ingresos correctos"]++;
+      if (rowValidationBucket(row) === "confirmed") item["Minutos confirmados"] += rowWorkedMinutes(row);
+      if (row["Estado entrada"] === "Entrada correcta" || row["Estado entrada"] === "Entrada registrada") item["Ingresos correctos"]++;
       if (String(row["Alertas RRHH"]).includes("Llegada tarde")) item["Llegadas tarde"]++;
-      if (String(row["Alertas RRHH"]).includes("fuera de radio")) item["Fuera de radio"]++;
+      item["Fichajes fuera de radio"] += outsideIncidentsForRow(row);
       if (String(row["Alertas RRHH"]).includes("Ausencia / sin entrada")) item["Ausencias / sin entrada"]++;
       if (row["Origen del estado"] === "Ausencia registrada") item["Ausencias registradas"]++;
       if (row["Origen del estado"] === "Inferido por programación") item["Sin entrada inferido"]++;
       if (/Salida anticipada|Salida no registrada|Salida fuera de radio/.test(String(row["Alertas RRHH"]))) item["Alertas de salida"]++;
     });
-    return Array.from(map.values()).sort((a, b) => a.Fecha.localeCompare(b.Fecha));
+    return Array.from(map.values()).map(item => {
+      item["Horas confirmadas"] = minutesToHoursLabel(item["Minutos confirmados"]);
+      item["Horas confirmadas (decimal)"] = Math.round((item["Minutos confirmados"] / 60) * 10000) / 10000;
+      return item;
+    }).sort((a, b) => a.Fecha.localeCompare(b.Fecha));
+  }
+
+  function operationalHoursByOperatorDate(rows) {
+    const map = new Map();
+    rows.forEach(row => {
+      const operatorKey = row["Operator ID"] || row.Operario || "Sin identificar";
+      const key = `${row.Fecha || ""}__${operatorKey}`;
+      if (!map.has(key)) map.set(key, {
+        "Fecha": row.Fecha || "",
+        "Operator ID": row["Operator ID"] || "",
+        "Operario": row.Operario || "Sin identificar",
+        "Servicios trabajados": new Set(),
+        "Turnos con entrada y salida": 0,
+        confirmedIntervals: [],
+        pendingIntervals: [],
+        rejectedIntervals: []
+      });
+      const item = map.get(key);
+      if (row.Servicio && rowWorkedMinutes(row) > 0) item["Servicios trabajados"].add(row.Servicio);
+      const interval = rowWorkInterval(row);
+      if (interval) {
+        item["Turnos con entrada y salida"]++;
+        const validation = rowValidationBucket(row);
+        if (validation === "confirmed") item.confirmedIntervals.push(interval);
+        if (validation === "pending") item.pendingIntervals.push(interval);
+        if (validation === "rejected") item.rejectedIntervals.push(interval);
+      }
+    });
+    return Array.from(map.values()).map(item => {
+      const confirmed = mergedIntervalsMinutes(item.confirmedIntervals);
+      const pending = mergedIntervalsMinutes(item.pendingIntervals);
+      const rejected = mergedIntervalsMinutes(item.rejectedIntervals);
+      return {
+        "Fecha": item.Fecha,
+        "Operator ID": item["Operator ID"],
+        "Operario": item.Operario,
+        "Servicios trabajados": Array.from(item["Servicios trabajados"]).join(" | "),
+        "Turnos con entrada y salida": item["Turnos con entrada y salida"],
+        "Minutos confirmados": confirmed,
+        "Horas confirmadas": minutesToHoursLabel(confirmed),
+        "Horas confirmadas (decimal)": Math.round((confirmed / 60) * 10000) / 10000,
+        "Minutos pendientes validar": pending,
+        "Horas pendientes validar": minutesToHoursLabel(pending),
+        "Minutos rechazados": rejected,
+        "Horas rechazadas": minutesToHoursLabel(rejected)
+      };
+    }).sort((a, b) => `${a.Fecha}|${a.Operario}`.localeCompare(`${b.Fecha}|${b.Operario}`));
   }
 
   async function getOperationalExportData() {
@@ -2808,11 +3051,311 @@
 
       const byDate = operationalSummaryByDate(rows);
       const wsDates = window.XLSX.utils.json_to_sheet(byDate.length ? byDate : [{ "Fecha": "Sin datos" }]);
-      applyWorksheetUsability(wsDates, [14, 13, 18, 16, 16, 22, 20, 20, 18]);
+      applyWorksheetUsability(wsDates, [14, 13, 18, 19, 19, 18, 16, 20, 22, 20, 20, 18]);
       window.XLSX.utils.book_append_sheet(wb, wsDates, "Resumen por día");
+
+      const hoursByDay = operationalHoursByOperatorDate(rows);
+      const wsHoursByDay = window.XLSX.utils.json_to_sheet(hoursByDay.length ? hoursByDay : [{ "Fecha": "Sin datos" }]);
+      applyWorksheetUsability(wsHoursByDay, [14, 30, 42, 22, 20, 19, 24, 24, 24]);
+      window.XLSX.utils.book_append_sheet(wb, wsHoursByDay, "Horas por operario y día");
 
       window.XLSX.writeFile(wb, `estado-operativo-cleanit-${period.label}.xlsx`);
       toast(`${rows.length} cobertura${rows.length === 1 ? "" : "s"} exportada${rows.length === 1 ? "" : "s"} a Excel.`, "success");
+    });
+  }
+
+
+  function analyticsServiceValue(row) {
+    return String(row?.["Site ID"] || row?.Servicio || "");
+  }
+
+  function updateAnalyticsServiceOptions(rows) {
+    const select = $("#analyticsService");
+    if (!select) return;
+    const current = select.value;
+    const services = new Map();
+    (rows || []).forEach(row => {
+      const value = analyticsServiceValue(row);
+      if (value && row.Servicio) services.set(value, row.Servicio);
+    });
+    const options = Array.from(services.entries()).sort((a, b) => a[1].localeCompare(b[1], "es"));
+    select.innerHTML = `<option value="">Todos los servicios</option>` + options.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("");
+    if (current && services.has(current)) select.value = current;
+  }
+
+  function buildAnalyticsSummary(rows, profiles, includeAllActive = true) {
+    const map = new Map();
+    const rowOperatorIds = new Set((rows || []).map(row => row["Operator ID"]).filter(Boolean));
+    const rowNames = new Map();
+    (rows || []).forEach(row => {
+      const key = row["Operator ID"] || `name:${row.Operario || "Sin identificar"}`;
+      if (!rowNames.has(key)) rowNames.set(key, row.Operario || "Sin identificar");
+    });
+
+    if (includeAllActive) {
+      (profiles || []).filter(profile => profile.role === "operator" && profile.is_active !== false).forEach(profile => {
+        const key = profile.id || `name:${profile.full_name}`;
+        map.set(key, {
+          operator_id: profile.id || "",
+          Operario: profile.full_name || "Sin identificar"
+        });
+      });
+    }
+    rowNames.forEach((name, key) => {
+      if (!map.has(key)) map.set(key, { operator_id: key.startsWith("name:") ? "" : key, Operario: name });
+    });
+
+    map.forEach(item => Object.assign(item, {
+      "Coberturas programadas": 0,
+      "Jornadas con entrada": 0,
+      "Jornadas completas": 0,
+      "Minutos confirmados": 0,
+      "Horas confirmadas": "0 h 00 min",
+      "Horas confirmadas (decimal)": 0,
+      "Minutos pendientes validar": 0,
+      "Horas pendientes validar": "0 h 00 min",
+      "Ausencias / sin entrada": 0,
+      "Ausencias registradas": 0,
+      "Sin entrada inferido": 0,
+      "Llegadas tarde": 0,
+      "Minutos demora acumulados": 0,
+      "Promedio demora (min)": 0,
+      "Entradas fuera de radio": 0,
+      "Salidas fuera de radio": 0,
+      "Fichajes fuera de radio": 0,
+      "Salidas anticipadas": 0,
+      "Salidas no registradas": 0,
+      "Asistencia %": null,
+      "Puntualidad %": null
+    }));
+
+    (rows || []).forEach(row => {
+      const key = row["Operator ID"] || `name:${row.Operario || "Sin identificar"}`;
+      if (!map.has(key)) return;
+      const item = map.get(key);
+      const scheduled = Boolean(row["Horario programado"] && row["Horario programado"] !== "No reconstruido");
+      const hasEntry = Boolean(row["Fecha/hora entrada"]);
+      const complete = rowWorkedMinutes(row) > 0;
+      const alerts = String(row["Alertas RRHH"] || "");
+      if (scheduled) item["Coberturas programadas"]++;
+      if (hasEntry) item["Jornadas con entrada"]++;
+      if (complete) item["Jornadas completas"]++;
+      if (alerts.includes("Ausencia / sin entrada")) item["Ausencias / sin entrada"]++;
+      if (row["Origen del estado"] === "Ausencia registrada") item["Ausencias registradas"]++;
+      if (row["Origen del estado"] === "Inferido por programación") item["Sin entrada inferido"]++;
+      if (alerts.includes("Llegada tarde") || String(row["Estado entrada"] || "").toLowerCase().includes("tarde")) item["Llegadas tarde"]++;
+      item["Minutos demora acumulados"] += Number(row["Minutos demora"] || 0) || 0;
+      if (String(row["Estado entrada"] || "").toLowerCase().includes("fuera de radio")) item["Entradas fuera de radio"]++;
+      if (String(row["Estado salida"] || "").toLowerCase().includes("fuera de radio")) item["Salidas fuera de radio"]++;
+      if (alerts.includes("Salida anticipada")) item["Salidas anticipadas"]++;
+      if (alerts.includes("Salida no registrada")) item["Salidas no registradas"]++;
+    });
+
+    const daily = operationalHoursByOperatorDate(rows || []);
+    daily.forEach(day => {
+      const key = day["Operator ID"] || `name:${day.Operario || "Sin identificar"}`;
+      if (!map.has(key)) return;
+      const item = map.get(key);
+      item["Minutos confirmados"] += Number(day["Minutos confirmados"] || 0);
+      item["Minutos pendientes validar"] += Number(day["Minutos pendientes validar"] || 0);
+    });
+
+    return Array.from(map.values()).map(item => {
+      item["Minutos confirmados"] = Math.round(item["Minutos confirmados"] * 100) / 100;
+      item["Minutos pendientes validar"] = Math.round(item["Minutos pendientes validar"] * 100) / 100;
+      item["Horas confirmadas"] = minutesToHoursLabel(item["Minutos confirmados"]);
+      item["Horas confirmadas (decimal)"] = Math.round((item["Minutos confirmados"] / 60) * 10000) / 10000;
+      item["Horas pendientes validar"] = minutesToHoursLabel(item["Minutos pendientes validar"]);
+      item["Minutos demora acumulados"] = Math.round(item["Minutos demora acumulados"] * 100) / 100;
+      item["Promedio demora (min)"] = item["Llegadas tarde"] ? Math.round((item["Minutos demora acumulados"] / item["Llegadas tarde"]) * 10) / 10 : 0;
+      item["Fichajes fuera de radio"] = item["Entradas fuera de radio"] + item["Salidas fuera de radio"];
+      const scheduled = item["Coberturas programadas"];
+      item["Asistencia %"] = scheduled ? Math.max(0, Math.round(((scheduled - item["Ausencias / sin entrada"]) / scheduled) * 1000) / 10) : null;
+      item["Puntualidad %"] = item["Jornadas con entrada"] ? Math.max(0, Math.round(((item["Jornadas con entrada"] - item["Llegadas tarde"]) / item["Jornadas con entrada"]) * 1000) / 10) : null;
+      return item;
+    }).sort((a, b) => a.Operario.localeCompare(b.Operario, "es"));
+  }
+
+  function analyticsSort(items, metric) {
+    const order = $("#analyticsOrder")?.value || "desc";
+    const direction = order === "asc" ? 1 : -1;
+    return [...items].sort((a, b) => {
+      const av = Number(a?.[metric] || 0);
+      const bv = Number(b?.[metric] || 0);
+      if (av !== bv) return (av - bv) * direction;
+      return String(a.Operario || "").localeCompare(String(b.Operario || ""), "es");
+    });
+  }
+
+  function renderAnalyticsBars(containerId, summary, metric, formatter, tone) {
+    const container = $(containerId);
+    if (!container) return;
+    const sorted = analyticsSort(summary, metric).slice(0, 10);
+    const max = Math.max(0, ...sorted.map(item => Number(item[metric] || 0)));
+    if (!sorted.length) {
+      container.innerHTML = `<p class="muted small">Sin datos para el período seleccionado.</p>`;
+      return;
+    }
+    container.innerHTML = sorted.map((item, index) => {
+      const value = Number(item[metric] || 0);
+      const width = max > 0 ? Math.max(value > 0 ? 4 : 0, (value / max) * 100) : 0;
+      return `<div class="analytics-bar-row">
+        <div class="analytics-bar-label"><span>${index + 1}. ${escapeHtml(item.Operario)}</span><strong>${escapeHtml(formatter(value, item))}</strong></div>
+        <div class="analytics-bar-track"><span class="analytics-bar-fill tone-${escapeHtml(tone)}" style="width:${width.toFixed(2)}%"></span></div>
+      </div>`;
+    }).join("");
+  }
+
+  function renderAnalyticsRanking(containerId, summary, metric, formatter) {
+    const container = $(containerId);
+    if (!container) return;
+    const sorted = analyticsSort(summary, metric);
+    container.innerHTML = sorted.length ? sorted.map((item, index) => `
+      <div class="ranking-row">
+        <span class="ranking-position">${index + 1}</span>
+        <span class="ranking-name">${escapeHtml(item.Operario)}</span>
+        <strong class="ranking-value">${escapeHtml(formatter(Number(item[metric] || 0), item))}</strong>
+      </div>`).join("") : `<p class="muted small">Sin datos.</p>`;
+  }
+
+  function renderAnalyticsFromState() {
+    const service = $("#analyticsService")?.value || "";
+    const allRows = state.analyticsAllRows || [];
+    const rows = service ? allRows.filter(row => analyticsServiceValue(row) === service) : allRows;
+    const summary = buildAnalyticsSummary(rows, state.analyticsProfiles || [], !service);
+    const daily = operationalHoursByOperatorDate(rows);
+    state.analyticsRows = rows;
+    state.analyticsSummary = summary;
+    state.analyticsDaily = daily;
+
+    const totalConfirmed = summary.reduce((acc, item) => acc + Number(item["Minutos confirmados"] || 0), 0);
+    const totalPending = summary.reduce((acc, item) => acc + Number(item["Minutos pendientes validar"] || 0), 0);
+    const absences = summary.reduce((acc, item) => acc + Number(item["Ausencias / sin entrada"] || 0), 0);
+    const lates = summary.reduce((acc, item) => acc + Number(item["Llegadas tarde"] || 0), 0);
+    const outside = summary.reduce((acc, item) => acc + Number(item["Fichajes fuera de radio"] || 0), 0);
+    const complete = summary.reduce((acc, item) => acc + Number(item["Jornadas completas"] || 0), 0);
+
+    $("#analyticsKpis").innerHTML = `
+      ${kpi("Horas confirmadas", minutesToHoursLabel(totalConfirmed), "status-present")}
+      ${kpi("Horas pendientes validar", minutesToHoursLabel(totalPending), totalPending ? "status-late" : "status-present")}
+      ${kpi("Jornadas completas", complete, "status-present")}
+      ${kpi("Ausencias / sin entrada", absences, absences ? "status-absent" : "status-present")}
+      ${kpi("Llegadas tarde", lates, lates ? "status-late" : "status-present")}
+      ${kpi("Fichajes fuera de radio", outside, outside ? "status-outside" : "status-present")}
+    `;
+
+    renderAnalyticsBars("#analyticsHoursChart", summary, "Minutos confirmados", value => minutesToHoursLabel(value), "hours");
+    renderAnalyticsBars("#analyticsAbsenceChart", summary, "Ausencias / sin entrada", value => String(value), "absence");
+    renderAnalyticsBars("#analyticsLateChart", summary, "Llegadas tarde", value => String(value), "late");
+    renderAnalyticsBars("#analyticsOutsideChart", summary, "Fichajes fuera de radio", value => String(value), "outside");
+    renderAnalyticsRanking("#analyticsAbsenceRanking", summary, "Ausencias / sin entrada", value => String(value));
+    renderAnalyticsRanking("#analyticsLateRanking", summary, "Llegadas tarde", value => String(value));
+    renderAnalyticsRanking("#analyticsOutsideRanking", summary, "Fichajes fuera de radio", value => String(value));
+
+    const rowsHtml = [...summary].sort((a, b) => a.Operario.localeCompare(b.Operario, "es")).map(item => `
+      <tr>
+        <td><strong>${escapeHtml(item.Operario)}</strong></td>
+        <td><strong>${escapeHtml(item["Horas confirmadas"])}</strong><br><span class="muted small">${Number(item["Horas confirmadas (decimal)"] || 0).toFixed(2)} h</span></td>
+        <td>${escapeHtml(item["Horas pendientes validar"])}</td>
+        <td>${item["Jornadas completas"]}</td>
+        <td>${item["Ausencias / sin entrada"]}</td>
+        <td>${item["Llegadas tarde"]}<br><span class="muted small">${item["Minutos demora acumulados"]} min acum.</span></td>
+        <td>${item["Fichajes fuera de radio"]}</td>
+        <td>${item["Salidas anticipadas"]}</td>
+        <td>${item["Salidas no registradas"]}</td>
+        <td>${item["Asistencia %"] == null ? "—" : `${item["Asistencia %"].toFixed(1)}%`}</td>
+        <td>${item["Puntualidad %"] == null ? "—" : `${item["Puntualidad %"].toFixed(1)}%`}</td>
+      </tr>`).join("");
+    $("#analyticsSummaryTable").innerHTML = `<table><thead><tr><th>Operario</th><th>Horas confirmadas</th><th>Horas pendientes</th><th>Jornadas completas</th><th>Ausencias</th><th>Tardanzas</th><th>Fuera de radio</th><th>Salidas anticipadas</th><th>Sin salida</th><th>Asistencia</th><th>Puntualidad</th></tr></thead><tbody>${rowsHtml || `<tr><td colspan="11">Sin datos para el período seleccionado.</td></tr>`}</tbody></table>`;
+
+    const period = state.analyticsPeriodResolved;
+    const serviceLabel = service ? ($("#analyticsService")?.selectedOptions?.[0]?.textContent || "Servicio filtrado") : "Todos los servicios";
+    $("#analyticsRangeSummary").textContent = period ? `${period.from || "Inicio"} → ${period.to || todayISO()} · ${serviceLabel} · ${rows.length} coberturas analizadas` : "";
+  }
+
+  async function loadAnalyticsData() {
+    const button = $("#applyAnalyticsBtn");
+    await withExportButton(button, "Analizando...", async () => {
+      const requested = resolvePeriod("analytics");
+      const context = await fetchReportContext(requested);
+      const built = buildOperationalExportRows(requested, context);
+      state.analyticsAllRows = built.rows;
+      state.analyticsProfiles = context.profiles;
+      state.analyticsPeriodResolved = built.period;
+      state.analyticsLoaded = true;
+      updateAnalyticsServiceOptions(built.rows);
+      renderAnalyticsFromState();
+    });
+  }
+
+  function analyticsExportSummaryRows() {
+    return (state.analyticsSummary || []).map(item => ({
+      "Operario": item.Operario,
+      "Horas confirmadas": item["Horas confirmadas"],
+      "Horas confirmadas (decimal)": item["Horas confirmadas (decimal)"],
+      "Minutos confirmados": item["Minutos confirmados"],
+      "Horas pendientes validar": item["Horas pendientes validar"],
+      "Coberturas programadas": item["Coberturas programadas"],
+      "Jornadas con entrada": item["Jornadas con entrada"],
+      "Jornadas completas": item["Jornadas completas"],
+      "Ausencias / sin entrada": item["Ausencias / sin entrada"],
+      "Ausencias registradas": item["Ausencias registradas"],
+      "Sin entrada inferido": item["Sin entrada inferido"],
+      "Llegadas tarde": item["Llegadas tarde"],
+      "Minutos demora acumulados": item["Minutos demora acumulados"],
+      "Promedio demora (min)": item["Promedio demora (min)"],
+      "Entradas fuera de radio": item["Entradas fuera de radio"],
+      "Salidas fuera de radio": item["Salidas fuera de radio"],
+      "Fichajes fuera de radio": item["Fichajes fuera de radio"],
+      "Salidas anticipadas": item["Salidas anticipadas"],
+      "Salidas no registradas": item["Salidas no registradas"],
+      "Asistencia %": item["Asistencia %"],
+      "Puntualidad %": item["Puntualidad %"]
+    }));
+  }
+
+  async function exportAnalyticsCsv() {
+    const button = $("#exportAnalyticsCsvBtn");
+    await withExportButton(button, "Generando...", async () => {
+      await loadAnalyticsData();
+      const rows = state.analyticsRows || [];
+      const headers = rows.length ? Object.keys(rows[0]) : ["Fecha", "Operario", "Servicio", "Duración trabajada", "Alertas RRHH"];
+      const label = state.analyticsPeriodResolved?.label || "periodo";
+      downloadCsvObjects(rows, headers, `analisis-presentismo-cleanit-${label}.csv`);
+      toast(`${rows.length} registros detallados exportados a CSV.`, "success");
+    });
+  }
+
+  async function exportAnalyticsExcel() {
+    const button = $("#exportAnalyticsExcelBtn");
+    await withExportButton(button, "Generando...", async () => {
+      if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+      await loadAnalyticsData();
+      const summary = analyticsExportSummaryRows();
+      const daily = state.analyticsDaily || [];
+      const detail = state.analyticsRows || [];
+      const byDate = operationalSummaryByDate(detail);
+      const wb = window.XLSX.utils.book_new();
+
+      const wsSummary = window.XLSX.utils.json_to_sheet(summary.length ? summary : [{ "Operario": "Sin datos" }]);
+      applyWorksheetUsability(wsSummary, [30, 20, 22, 20, 24, 20, 20, 20, 22, 22, 20, 18, 24, 22, 22, 22, 22, 22, 22, 16, 16]);
+      window.XLSX.utils.book_append_sheet(wb, wsSummary, "Resumen operarios");
+
+      const wsDaily = window.XLSX.utils.json_to_sheet(daily.length ? daily : [{ "Fecha": "Sin datos" }]);
+      applyWorksheetUsability(wsDaily, [14, 38, 30, 42, 22, 20, 20, 22, 24, 24, 22, 20]);
+      window.XLSX.utils.book_append_sheet(wb, wsDaily, "Horas por operario y día");
+
+      const wsDetail = window.XLSX.utils.json_to_sheet(detail.length ? detail : [{ "Sin datos": "No hay registros en el período seleccionado." }]);
+      applyWorksheetUsability(wsDetail, [14, 30, 30, 28, 20, 24, 18, 30, 20, 18, 28, 24, 18, 16, 18, 22, 18, 18, 18, 22, 18, 20, 18, 18, 18, 18, 36, 40, 30, 42]);
+      window.XLSX.utils.book_append_sheet(wb, wsDetail, "Detalle RRHH");
+
+      const wsDate = window.XLSX.utils.json_to_sheet(byDate.length ? byDate : [{ "Fecha": "Sin datos" }]);
+      applyWorksheetUsability(wsDate, [14, 18, 22, 22, 20, 20, 20, 20, 22, 22, 22, 20]);
+      window.XLSX.utils.book_append_sheet(wb, wsDate, "Resumen por día");
+
+      const label = state.analyticsPeriodResolved?.label || "periodo";
+      window.XLSX.writeFile(wb, `analisis-presentismo-cleanit-${label}.xlsx`);
+      toast("Excel de análisis generado con resumen, horas diarias y detalle RRHH.", "success");
     });
   }
 
@@ -2977,6 +3520,8 @@
     $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => {
       renderTab(btn.dataset.tab);
       if (btn.dataset.tab === "records") loadRecordsPeriod().catch(error => toast(error.message || "No se pudieron cargar los registros."));
+      if (btn.dataset.tab === "analytics" && !state.analyticsLoaded) loadAnalyticsData().catch(error => toast(error.message || "No se pudo generar el análisis."));
+      if (btn.dataset.tab === "fichaje") loadFichajePeriod().catch(error => toast(error.message || "No se pudo cargar el fichaje del período."));
     }));
     $("#refreshDashboardBtn").addEventListener("click", renderSupervisorView);
     $("#dashboardDate").addEventListener("change", async () => {
@@ -2984,6 +3529,12 @@
       await renderSupervisorView();
     });
     $("#liveExportPeriod").addEventListener("change", () => syncPeriodControls("live", false));
+    $("#analyticsPeriod")?.addEventListener("change", () => { syncPeriodControls("analytics", false); state.analyticsLoaded = false; });
+    $("#applyAnalyticsBtn")?.addEventListener("click", () => loadAnalyticsData().catch(error => toast(error.message || "No se pudo generar el análisis.")));
+    $("#analyticsService")?.addEventListener("change", renderAnalyticsFromState);
+    $("#analyticsOrder")?.addEventListener("change", renderAnalyticsFromState);
+    $("#exportAnalyticsCsvBtn")?.addEventListener("click", () => exportAnalyticsCsv().catch(error => toast(error.message || "No se pudo exportar el análisis a CSV.")));
+    $("#exportAnalyticsExcelBtn")?.addEventListener("click", () => exportAnalyticsExcel().catch(error => toast(error.message || "No se pudo exportar el análisis a Excel.")));
     $("#exportLiveCsvBtn").addEventListener("click", () => exportLiveCsv().catch(error => toast(error.message || "No se pudo exportar el estado operativo.")));
     $("#exportLiveExcelBtn").addEventListener("click", () => exportLiveExcel().catch(error => toast(error.message || "No se pudo exportar el estado operativo.")));
     $("#kpiGrid").addEventListener("click", (event) => {
@@ -3101,8 +3652,8 @@
     firstDay.setDate(1);
     $("#fichajeFrom").value = firstDay.toISOString().slice(0, 10);
     $("#fichajeTo").value = todayISO();
-    $("#applyFichajeBtn").addEventListener("click", renderFichaje);
-    $("#exportFichajeBtn").addEventListener("click", exportFichajeExcel);
+    $("#applyFichajeBtn").addEventListener("click", () => loadFichajePeriod().catch(error => toast(error.message || "No se pudo cargar el fichaje.")));
+    $("#exportFichajeBtn").addEventListener("click", () => exportFichajeExcel().catch(error => toast(error.message || "No se pudo exportar el fichaje.")));
   }
 
   async function init() {
@@ -3114,6 +3665,7 @@
     if ($("#extraAssignmentDate")) $("#extraAssignmentDate").value = todayISO();
     syncPeriodControls("live", false);
     syncPeriodControls("records", false);
+    syncPeriodControls("analytics", false);
     bindEvents();
 
     store.onAuthStateChange((event, session) => {
