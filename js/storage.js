@@ -82,6 +82,147 @@
           storageKey: "cleanit-presentismo-auth"
         }
       });
+      this.offlineUserId = null;
+      this.OFFLINE_AUTH_KEY = "cleanit-presentismo-offline-auth-v1";
+      this.OFFLINE_QUEUE_KEY = "cleanit-presentismo-offline-events-v1";
+    }
+
+    isNetworkError(error) {
+      if (typeof navigator !== "undefined" && navigator.onLine === false) return true;
+      const text = String(error?.message || error || "").toLowerCase();
+      return text.includes("failed to fetch") || text.includes("network") || text.includes("load failed") || text.includes("fetch");
+    }
+
+    readJson(key, fallback = null) {
+      try {
+        const raw = window.localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : fallback;
+      } catch (_) {
+        return fallback;
+      }
+    }
+
+    writeJson(key, value) {
+      try {
+        window.localStorage.setItem(key, JSON.stringify(value));
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    offlineDataKey(kind, userId = this.offlineUserId) {
+      return `cleanit-presentismo-offline-${kind}-v1-${userId || "unknown"}`;
+    }
+
+    cacheOfflineAuth(user, profile) {
+      if (!user?.id || !profile?.id) return;
+      this.offlineUserId = user.id;
+      this.writeJson(this.OFFLINE_AUTH_KEY, {
+        user: { id: user.id, email: user.email || null },
+        profile,
+        cached_at: new Date().toISOString()
+      });
+    }
+
+    readOfflineAuth() {
+      const cached = this.readJson(this.OFFLINE_AUTH_KEY, null);
+      if (cached?.user?.id && cached?.profile?.id) this.offlineUserId = cached.user.id;
+      return cached;
+    }
+
+    clearOfflineAuth() {
+      try { window.localStorage.removeItem(this.OFFLINE_AUTH_KEY); } catch (_) { /* noop */ }
+      this.offlineUserId = null;
+    }
+
+    cacheOfflineData(kind, rows) {
+      if (!this.offlineUserId) {
+        const cachedAuth = this.readOfflineAuth();
+        if (!cachedAuth?.user?.id) return;
+      }
+      this.writeJson(this.offlineDataKey(kind), { rows: rows || [], cached_at: new Date().toISOString() });
+    }
+
+    readOfflineData(kind) {
+      const cachedAuth = this.readOfflineAuth();
+      const userId = this.offlineUserId || cachedAuth?.user?.id;
+      if (!userId) return [];
+      return this.readJson(this.offlineDataKey(kind, userId), { rows: [] })?.rows || [];
+    }
+
+    readOfflineQueue() {
+      const rows = this.readJson(this.OFFLINE_QUEUE_KEY, []);
+      return Array.isArray(rows) ? rows : [];
+    }
+
+    writeOfflineQueue(rows) {
+      this.writeJson(this.OFFLINE_QUEUE_KEY, Array.isArray(rows) ? rows : []);
+    }
+
+    queueOfflineEvent(payload) {
+      const cleanPayload = this.clean(payload || {});
+      if (!cleanPayload.id) cleanPayload.id = (window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+      const queue = this.readOfflineQueue();
+      if (!queue.some(item => item?.id === cleanPayload.id)) queue.push(cleanPayload);
+      this.writeOfflineQueue(queue);
+      const cachedEvents = this.readOfflineData("events");
+      const merged = [cleanPayload, ...cachedEvents.filter(item => item?.id !== cleanPayload.id)];
+      this.cacheOfflineData("events", merged.slice(0, 1500));
+      return { ...cleanPayload, __offline_pending: true };
+    }
+
+    async getOfflineQueueCount() {
+      const auth = this.readOfflineAuth();
+      const userId = this.offlineUserId || auth?.user?.id;
+      return this.readOfflineQueue().filter(item => !userId || item?.operator_id === userId).length;
+    }
+
+    async flushOfflineQueue() {
+      if (typeof navigator !== "undefined" && navigator.onLine === false) return { synced: 0, pending: await this.getOfflineQueueCount() };
+      const queue = this.readOfflineQueue();
+      if (!queue.length) return { synced: 0, pending: 0 };
+
+      let sessionUserId = null;
+      try {
+        const { data } = await this.client.auth.getSession();
+        sessionUserId = data?.session?.user?.id || null;
+      } catch (_) { /* noop */ }
+      if (!sessionUserId) return { synced: 0, pending: queue.length };
+
+      let synced = 0;
+      const remaining = [];
+      for (let i = 0; i < queue.length; i++) {
+        const item = queue[i];
+        if (item?.operator_id !== sessionUserId) {
+          remaining.push(item);
+          continue;
+        }
+        try {
+          const { error } = await this.client.from("attendance_events").insert(this.clean(item));
+          if (error) {
+            if (String(error.code || "") === "23505") {
+              synced++;
+              continue;
+            }
+            remaining.push(item);
+            if (this.isNetworkError(error)) {
+              remaining.push(...queue.slice(i + 1));
+              break;
+            }
+            continue;
+          }
+          synced++;
+        } catch (error) {
+          remaining.push(item);
+          if (this.isNetworkError(error)) {
+            remaining.push(...queue.slice(i + 1));
+            break;
+          }
+        }
+      }
+      this.writeOfflineQueue(remaining);
+      return { synced, pending: remaining.filter(item => item?.operator_id === sessionUserId).length };
     }
 
     clean(payload) {
@@ -102,6 +243,7 @@
       if (error) throw new Error(error.message || "Email o contraseña incorrectos.");
       if (!data?.user) throw new Error("No se pudo obtener el usuario autenticado.");
       const profile = await this.loadProfileForAuthUser(data.user);
+      this.cacheOfflineAuth(data.user, profile);
       return { user: data.user, profile };
     }
 
@@ -132,6 +274,7 @@
       });
       if (sessionError || !sessionData?.user) throw new Error(sessionError?.message || "No se pudo iniciar la sesión.");
       const profile = await this.loadProfileForAuthUser(sessionData.user);
+      this.cacheOfflineAuth(sessionData.user, profile);
       return { user: sessionData.user, profile };
     }
 
@@ -167,12 +310,35 @@
     }
 
     async getCurrentSessionProfile() {
-      const { data, error } = await this.client.auth.getSession();
-      if (error) throw error;
-      const user = data?.session?.user;
-      if (!user) return null;
-      const profile = await this.loadProfileForAuthUser(user);
-      return { user, profile };
+      let user = null;
+      try {
+        const { data, error } = await this.client.auth.getSession();
+        if (error) throw error;
+        user = data?.session?.user || null;
+      } catch (error) {
+        if (!this.isNetworkError(error)) throw error;
+      }
+
+      if (!user) {
+        const cached = this.readOfflineAuth();
+        if (cached?.user?.id && typeof navigator !== "undefined" && navigator.onLine === false) {
+          return { user: cached.user, profile: cached.profile, offline: true };
+        }
+        return null;
+      }
+
+      this.offlineUserId = user.id;
+      try {
+        const profile = await this.loadProfileForAuthUser(user);
+        this.cacheOfflineAuth(user, profile);
+        return { user, profile };
+      } catch (error) {
+        const cached = this.readOfflineAuth();
+        if (this.isNetworkError(error) && cached?.user?.id === user.id && cached?.profile?.id === user.id) {
+          return { user: cached.user, profile: cached.profile, offline: true };
+        }
+        throw error;
+      }
     }
 
     async loadProfileForAuthUser(authUser) {
@@ -189,11 +355,14 @@
         throw new Error("El usuario existe en Supabase Authentication, pero no tiene un perfil activo en public.profiles con el mismo UUID. Creá el perfil con id = User UID.");
       }
 
+      this.offlineUserId = authUser.id;
+      this.cacheOfflineAuth(authUser, data);
       return data;
     }
 
     async signOut() {
       await this.client.auth.signOut();
+      this.clearOfflineAuth();
       return true;
     }
 
@@ -211,25 +380,43 @@
     }
 
     async listSites() {
-      const { data, error } = await this.client
-        .from("sites")
-        .select("*")
-        .eq("is_active", true)
-        .order("name", { ascending: true });
+      try {
+        const { data, error } = await this.client
+          .from("sites")
+          .select("*")
+          .eq("is_active", true)
+          .order("name", { ascending: true });
 
-      if (error) throw error;
-      return data || [];
+        if (error) throw error;
+        const rows = data || [];
+        this.cacheOfflineData("sites", rows);
+        return rows;
+      } catch (error) {
+        if (!this.isNetworkError(error)) throw error;
+        const cached = this.readOfflineData("sites");
+        if (cached.length) return cached;
+        throw new Error("No hay conexión y este teléfono todavía no tiene los servicios guardados para uso sin internet.");
+      }
     }
 
     async listAssignments() {
-      const { data, error } = await this.client
-        .from("assignments")
-        .select("*")
-        .eq("is_active", true)
-        .order("scheduled_start", { ascending: true });
+      try {
+        const { data, error } = await this.client
+          .from("assignments")
+          .select("*")
+          .eq("is_active", true)
+          .order("scheduled_start", { ascending: true });
 
-      if (error) throw error;
-      return data || [];
+        if (error) throw error;
+        const rows = data || [];
+        this.cacheOfflineData("assignments", rows);
+        return rows;
+      } catch (error) {
+        if (!this.isNetworkError(error)) throw error;
+        const cached = this.readOfflineData("assignments");
+        if (cached.length) return cached;
+        throw new Error("No hay conexión y este teléfono todavía no tiene las asignaciones guardadas para uso sin internet.");
+      }
     }
 
     async listShifts(date) {
@@ -238,14 +425,33 @@
     }
 
     async listEvents() {
-      const { data, error } = await this.client
-        .from("attendance_events")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(1500);
+      if (typeof navigator !== "undefined" && navigator.onLine !== false) {
+        try { await this.flushOfflineQueue(); } catch (_) { /* se mantiene la cola */ }
+      }
+      try {
+        const { data, error } = await this.client
+          .from("attendance_events")
+          .select("*")
+          .order("created_at", { ascending: false })
+          .limit(1500);
 
-      if (error) throw error;
-      return data || [];
+        if (error) throw error;
+        const rows = data || [];
+        this.cacheOfflineData("events", rows);
+        const pending = this.readOfflineQueue();
+        const userId = this.offlineUserId || this.readOfflineAuth()?.user?.id;
+        const pendingOwn = pending.filter(item => !userId || item?.operator_id === userId);
+        const ids = new Set(pendingOwn.map(item => item?.id));
+        return [...pendingOwn.map(item => ({ ...item, __offline_pending: true })), ...rows.filter(item => !ids.has(item?.id))];
+      } catch (error) {
+        if (!this.isNetworkError(error)) throw error;
+        const cached = this.readOfflineData("events");
+        const pending = this.readOfflineQueue();
+        const userId = this.offlineUserId || this.readOfflineAuth()?.user?.id;
+        const pendingOwn = pending.filter(item => !userId || item?.operator_id === userId);
+        const ids = new Set(pendingOwn.map(item => item?.id));
+        return [...pendingOwn.map(item => ({ ...item, __offline_pending: true })), ...cached.filter(item => !ids.has(item?.id))];
+      }
     }
 
     async listAllProfiles() {
@@ -305,14 +511,26 @@
     }
 
     async createEvent(payload) {
-      const { data, error } = await this.client
-        .from("attendance_events")
-        .insert(this.clean(payload))
-        .select("*")
-        .single();
+      const cleanPayload = this.clean(payload || {});
+      if (!cleanPayload.id) cleanPayload.id = (window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+      try {
+        const { data, error } = await this.client
+          .from("attendance_events")
+          .insert(cleanPayload)
+          .select("*")
+          .single();
 
-      if (error) throw error;
-      return data;
+        if (error) throw error;
+        const cached = this.readOfflineData("events");
+        this.cacheOfflineData("events", [data, ...cached.filter(item => item?.id !== data?.id)].slice(0, 1500));
+        return data;
+      } catch (error) {
+        if (!this.isNetworkError(error)) throw error;
+        return this.queueOfflineEvent({
+          ...cleanPayload,
+          notes: [cleanPayload.notes, "Registro realizado sin conexión."].filter(Boolean).join(" · ")
+        });
+      }
     }
 
     async updateEventsByShift(shiftId, patch) {

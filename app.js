@@ -585,6 +585,61 @@
     state.events = events;
   }
 
+  async function renderOperatorConnectivity() {
+    const banner = $("#operatorConnectivity");
+    if (!banner) return;
+    let pending = 0;
+    try { pending = await store.getOfflineQueueCount(); } catch (_) { /* noop */ }
+    const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+    if (!offline && !pending) {
+      banner.className = "connectivity-banner hidden";
+      banner.innerHTML = "";
+      return;
+    }
+    banner.className = `connectivity-banner ${offline ? "offline" : "pending"}`;
+    banner.innerHTML = offline
+      ? `<strong>Sin conexión a internet</strong><span>Podés registrar entrada y salida igual. La hora, fecha y GPS quedan guardados en este teléfono y se sincronizan cuando vuelva la conexión.</span>${pending ? `<small>${pending} fichaje${pending === 1 ? "" : "s"} pendiente${pending === 1 ? "" : "s"} de sincronizar.</small>` : ""}`
+      : `<strong>${pending} fichaje${pending === 1 ? "" : "s"} pendiente${pending === 1 ? "" : "s"}</strong><span>Se enviará${pending === 1 ? "" : "n"} automáticamente a Presentismo.</span>`;
+  }
+
+  async function syncOfflineAttendance({ notify = true } = {}) {
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      await renderOperatorConnectivity();
+      return { synced: 0, pending: await store.getOfflineQueueCount() };
+    }
+    try {
+      const result = await store.flushOfflineQueue();
+      if (notify && result?.synced) toast(`${result.synced} fichaje${result.synced === 1 ? "" : "s"} sin conexión sincronizado${result.synced === 1 ? "" : "s"}.`, "success");
+      await renderOperatorConnectivity();
+      return result;
+    } catch (_) {
+      await renderOperatorConnectivity();
+      return { synced: 0, pending: await store.getOfflineQueueCount() };
+    }
+  }
+
+  function openShiftObservations(shiftId) {
+    const row = state.dashboardRows.find(item => item?.shift?.id === shiftId);
+    if (!row) return toast("No se encontró el registro para mostrar sus observaciones.");
+    const operator = byId(state.profiles, row.shift.operator_id);
+    const site = byId(state.sites, row.shift.site_id);
+    const entryNote = String(row.entryEvent?.notes || "").trim();
+    const exitNote = String(row.exitEvent?.notes || "").trim();
+    const assignmentNote = String(row.shift?.notes || "").trim();
+    $("#observationModalTitle").textContent = operator?.full_name || "Observaciones del operario";
+    $("#observationModalSubtitle").textContent = `${site?.name || "Servicio"} · ${row.shift.shift_date || $("#dashboardDate")?.value || todayISO()}`;
+    $("#observationModalBody").innerHTML = `
+      <div class="observation-summary-row">
+        <span class="extra-duty-badge ${escapeHtml(row.shift.assignment_type || row.extraWorkType || "fixed")}">${escapeHtml(assignmentTypeLabel(row.shift.assignment_type || row.extraWorkType || "fixed"))}</span>
+        ${row.isSelfReportedExtra ? `<span class="status-pill status-extra">${escapeHtml(validationLabel(row.extraValidationStatus || "pending"))}</span>` : ""}
+      </div>
+      <div class="observation-note-card"><span>Observación al registrar entrada</span><p>${entryNote ? escapeHtml(entryNote) : "Sin observación."}</p></div>
+      <div class="observation-note-card"><span>Observación al registrar salida</span><p>${exitNote ? escapeHtml(exitNote) : "Sin observación."}</p></div>
+      ${assignmentNote && assignmentNote !== entryNote ? `<div class="observation-note-card secondary"><span>Nota de la cobertura / asignación</span><p>${escapeHtml(assignmentNote)}</p></div>` : ""}
+    `;
+    openModal("observationModal");
+  }
+
   function renderConnectionMode() {
     // Connection pill removed — no technical UI exposed to users
   }
@@ -862,6 +917,7 @@
       container.querySelector(`[data-gps-checkout="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckout(shiftId));
     });
     container.querySelector("[data-extra-checkin]")?.addEventListener("click", handleExtraDutyCheckin);
+    await renderOperatorConnectivity();
   }
 
   function renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite = null, assignment = null) {
@@ -1034,7 +1090,7 @@
       const distance = haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng));
       const isInside = distance <= Number(site.gps_radius_m || 120);
       const shiftId = `extra__${state.currentProfile.id}__${todayISO()}__${Date.now()}`;
-      await store.createEvent({
+      const savedEvent = await store.createEvent({
         shift_id: shiftId,
         assignment_id: null,
         shift_date: todayISO(),
@@ -1053,7 +1109,9 @@
         is_inside_site: isInside,
         client_time: new Date().toISOString()
       });
-      toast(`${workTypeLabel(type)} registrada en ${site.name}. Quedó pendiente de validación del supervisor.`, "success");
+      toast(savedEvent?.__offline_pending
+        ? `${workTypeLabel(type)} guardada sin internet. Quedó registrada en este teléfono y se enviará cuando vuelva la conexión.`
+        : `${workTypeLabel(type)} registrada en ${site.name}. Quedó pendiente de validación del supervisor.`, "success");
       await renderOperatorView();
     } catch (error) {
       toast(error.message || "No se pudo registrar el trabajo extraordinario.");
@@ -1068,7 +1126,7 @@
       }
       navigator.geolocation.getCurrentPosition(resolve, reject, {
         enableHighAccuracy: true,
-        timeout: 15000,
+        timeout: 30000,
         maximumAge: 0
       });
     });
@@ -1091,7 +1149,7 @@
       const assignedSite = assignment ? byId(state.sites, assignment.site_id) : null;
 
       if (!assignedSite) {
-        await store.createEvent({
+        const savedEvent = await store.createEvent({
           shift_id: shiftId,
           assignment_id: null,
           shift_date: today,
@@ -1110,7 +1168,9 @@
           is_inside_site: null,
           client_time: new Date().toISOString()
         });
-        toast("Entrada registrada. No tenés servicio asignado para hoy. Avisá al supervisor.");
+        toast(savedEvent?.__offline_pending
+          ? "Entrada guardada sin internet. Se sincronizará cuando vuelva la conexión. Avisá al supervisor por otro medio si corresponde."
+          : "Entrada registrada. No tenés servicio asignado para hoy. Avisá al supervisor.", "success");
         await renderOperatorView();
         return;
       }
@@ -1118,7 +1178,7 @@
       const distance = haversineMeters(latitude, longitude, Number(assignedSite.lat), Number(assignedSite.lng));
       const isInside = distance <= Number(assignedSite.gps_radius_m || 120);
 
-      await store.createEvent({
+      const savedEvent = await store.createEvent({
         shift_id: shiftId,
         assignment_id: assignment.id,
         shift_date: today,
@@ -1138,7 +1198,9 @@
         client_time: new Date().toISOString()
       });
 
-      if (isInside) {
+      if (savedEvent?.__offline_pending) {
+        toast(`Entrada guardada sin internet a ${Math.round(distance)} m de ${assignedSite.name}. Se sincronizará cuando vuelva la conexión.`, "success");
+      } else if (isInside) {
         toast(`Entrada registrada en ${assignedSite.name} (${Math.round(distance)} m del punto de ingreso).`);
       } else {
         toast(`Entrada registrada. Estás a ${Math.round(distance)} m de ${assignedSite.name} (fuera del radio). Avisá al supervisor.`);
@@ -1170,7 +1232,7 @@
       const distance = site ? haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng)) : null;
       const isInside = site ? distance <= Number(site.gps_radius_m || 120) : null;
 
-      await store.createEvent({
+      const savedEvent = await store.createEvent({
         shift_id: shiftId,
         assignment_id: entryEvent.assignment_id || null,
         shift_date: today,
@@ -1190,7 +1252,9 @@
         client_time: new Date().toISOString()
       });
 
-      toast(isInside ? "Salida registrada correctamente." : "Salida registrada, pero fuera del radio del servicio.");
+      toast(savedEvent?.__offline_pending
+        ? "Salida guardada sin internet. Se sincronizará cuando vuelva la conexión."
+        : (isInside ? "Salida registrada correctamente." : "Salida registrada, pero fuera del radio del servicio."), "success");
       await renderOperatorView();
     } catch (error) {
       toast(error.message || "No se pudo obtener ubicación GPS.");
@@ -1901,6 +1965,8 @@
         hasCoordinates(entryEvent) ? `<button class="location-btn" data-map-event="${escapeHtml(entryEvent.id)}" type="button">Mapa entrada</button>` : "",
         hasCoordinates(exitEvent) ? `<button class="location-btn" data-map-event="${escapeHtml(exitEvent.id)}" type="button">Mapa salida</button>` : ""
       ].filter(Boolean).join("");
+      const hasNotes = Boolean(String(entryEvent?.notes || "").trim() || String(exitEvent?.notes || "").trim() || ((assignmentType !== "fixed") && String(shift?.notes || "").trim()));
+      const observationButton = hasNotes ? `<button class="secondary-btn small-btn observation-btn" data-observation-shift="${escapeHtml(shift.id)}" type="button">Ver observación</button>` : "";
 
       return `
         <tr class="${searchTerm ? "search-match-row" : ""}">
@@ -1912,6 +1978,7 @@
           <td><span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.client_time || lastEvent.created_at)}` : "—"}</span></td>
           <td class="row-actions">
             ${mapButtons}
+            ${observationButton}
             ${validationActions}
             <a class="wa-btn ${normalizePhone(site?.whatsapp_phone) ? "" : "disabled-link"}" href="${url}" target="_blank" rel="noopener">WhatsApp consorcio</a>
           </td>
@@ -4789,6 +4856,8 @@
     $("#liveTable").addEventListener("click", (event) => {
       const mapButton = event.target.closest("[data-map-event]");
       if (mapButton) return openAttendanceMap(mapButton.dataset.mapEvent);
+      const observationButton = event.target.closest("[data-observation-shift]");
+      if (observationButton) return openShiftObservations(observationButton.dataset.observationShift);
       const validationButton = event.target.closest("[data-extra-validation]");
       if (validationButton) updateExtraValidation(validationButton.dataset.extraShift, validationButton.dataset.extraValidation).catch(error => toast(error.message || "No se pudo validar el registro."));
     });
@@ -4802,7 +4871,8 @@
     }));
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
-      if (!$("#serviceLocationModal").classList.contains("hidden")) closeModal("serviceLocationModal");
+      if (!$("#observationModal").classList.contains("hidden")) closeModal("observationModal");
+      else if (!$("#serviceLocationModal").classList.contains("hidden")) closeModal("serviceLocationModal");
       else if (!$("#locationModal").classList.contains("hidden")) closeModal("locationModal");
       else if (!$("#quickDetailModal").classList.contains("hidden")) closeModal("quickDetailModal");
     });
@@ -4947,6 +5017,18 @@
     bindEvents();
     setupManagedTableUX();
 
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("./sw.js").catch(() => { /* la app sigue funcionando online */ });
+    }
+    window.addEventListener("offline", () => {
+      if (state.currentProfile?.role === "operator") renderOperatorConnectivity();
+    });
+    window.addEventListener("online", async () => {
+      if (state.currentProfile?.role !== "operator") return;
+      await syncOfflineAttendance({ notify: true });
+      try { await renderOperatorView(); } catch (_) { /* se reintentará al actualizar */ }
+    });
+
     store.onAuthStateChange((event, session) => {
       if (event === "PASSWORD_RECOVERY") {
         showPasswordResetView(Boolean(session?.user));
@@ -4971,6 +5053,11 @@
         await afterLogin();
       }
     } catch (error) {
+      if (typeof navigator !== "undefined" && navigator.onLine === false) {
+        setView("#loginView");
+        toast("Sin conexión. Para fichar offline, este teléfono debe haber iniciado sesión y abierto la app previamente con internet.");
+        return;
+      }
       await store.signOut();
       setView("#loginView");
     }
