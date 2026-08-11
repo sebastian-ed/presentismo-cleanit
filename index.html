@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#0f172a" />
   <title>Clean It · Presentismo GPS</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20260811-email-optional1" />
+  <link rel="stylesheet" href="styles.css?v=20260811-no-admin-recovery-email1" />
 </head>
 <body>
   <div class="app-shell">
@@ -528,12 +528,11 @@
               <label><span>Rol</span><select id="userRole" required><option value="operator">Operario</option><option value="supervisor">Supervisor</option><option value="admin">Administrador</option></select></label>
               <label><span>Nombre completo</span><input id="userName" required placeholder="Nombre y apellido" /></label>
               <label><span>Nombre de usuario (login)</span><input id="userUsername" autocomplete="off" required placeholder="ej: arielacevedo" /></label>
-              <label><span>Email de recuperación <span class="muted">(opcional)</span></span><input id="userEmail" type="email" autocomplete="off" placeholder="Podés dejarlo vacío" /></label>
               <label>
                 <span id="userPasswordLabel">Contraseña inicial</span>
                 <input id="userPassword" type="password" autocomplete="new-password" minlength="6" placeholder="Mínimo 6 caracteres" />
               </label>
-              <p id="userPasswordHelp" class="muted small">Para operarios podés usar el DNI como contraseña inicial. No es necesario cargar un email al crear la cuenta.</p>
+              <p id="userPasswordHelp" class="muted small">Para operarios podés usar el DNI como contraseña inicial.</p>
               <label><span>Teléfono</span><input id="userPhone" placeholder="+549..." /></label>
               <label><span>Notas</span><textarea id="userNotes" placeholder="Datos internos, reemplazos, observaciones operativas..."></textarea></label>
               <button class="primary-btn" type="submit">Guardar usuario</button>
@@ -647,7 +646,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="js/config.js"></script>
-  <script src="js/storage.js?v=20260811-email-optional1"></script>
-  <script src="js/app.js?v=20260811-email-optional1"></script>
+  <script src="js/storage.js?v=20260811-no-admin-recovery-email1"></script>
+  <script src="js/app.js?v=20260811-no-admin-recovery-email1"></script>
 </body>
 </html>

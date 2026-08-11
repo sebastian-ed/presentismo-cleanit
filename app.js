@@ -105,7 +105,7 @@
     coverage: { label: "Cobertura", placeholder: "Buscar servicio, zona u operario...", noun: "servicios", target: "#coverageGrid" },
     assignments: { label: "Asignaciones", placeholder: "Buscar operario, servicio o tipo de asignación...", noun: "asignaciones", target: "#assignmentsList" },
     sites: { label: "Servicios", placeholder: "Buscar servicio, dirección o zona...", noun: "servicios", target: "#sitesList" },
-    users: { label: "Usuarios", placeholder: "Buscar nombre, usuario, email o rol...", noun: "usuarios", target: "#usersList" },
+    users: { label: "Usuarios", placeholder: "Buscar nombre, usuario, teléfono o rol...", noun: "usuarios", target: "#usersList" },
     records: { label: "Registros", placeholder: "Buscar operario, servicio o estado...", noun: "marcaciones", target: "#recordsTable" }
   };
 
@@ -3555,26 +3555,19 @@
     return currentRole === "supervisor" && ["operator", "supervisor"].includes(targetRole);
   }
 
-  function hasRealRecoveryEmail(user) {
-    const email = String(user?.email || "").trim().toLowerCase();
-    return Boolean(email && email.includes("@") && !email.endsWith("@cleanit.ar"));
-  }
-
   function renderUsers() {
     const list = $("#usersList");
     const searchTerm = sectionSearchTerm("users");
-    const visibleUsers = searchTerm ? state.profiles.filter(user => valuesMatchSearch(searchTerm, user.full_name, user.username, user.email, user.phone, roleLabel(user.role), user.notes)) : state.profiles;
+    const visibleUsers = searchTerm ? state.profiles.filter(user => valuesMatchSearch(searchTerm, user.full_name, user.username, user.phone, roleLabel(user.role), user.notes, user.pending_recovery_email)) : state.profiles;
     updateSectionSearchCount("users", visibleUsers.length, state.profiles.length);
     list.innerHTML = visibleUsers.map(user => {
       const manageable = canManageAccountUser(user);
       const username = user.username || (String(user.email || "").toLowerCase().endsWith("@cleanit.ar") ? String(user.email).split("@")[0] : "Sin usuario");
-      const recoveryEmail = hasRealRecoveryEmail(user) ? user.email : "No configurado";
       const pendingRecoveryEmail = String(user.pending_recovery_email || "").trim();
       return `
       <div class="list-item ${searchTerm ? "search-match-card" : ""}">
         <div class="list-item-title">${escapeHtml(user.full_name)}</div>
         <div class="muted small">${escapeHtml(roleLabel(user.role).replace(/^./, c => c.toUpperCase()))} · Usuario: <strong>${escapeHtml(username)}</strong></div>
-        <div class="muted small">Email recuperación: ${escapeHtml(recoveryEmail)}</div>
         ${pendingRecoveryEmail ? `<div class="recovery-request-box"><strong>Recuperación solicitada:</strong> ${escapeHtml(pendingRecoveryEmail)}<div class="muted small">La persona informó este correo desde «Olvidaste tu contraseña».</div></div>` : ""}
         <div class="muted small">${escapeHtml(user.phone || "Sin teléfono")}</div>
         ${user.notes ? `<div class="muted small">Notas: ${escapeHtml(user.notes)}</div>` : ""}
@@ -3657,27 +3650,24 @@
     passwordInput.placeholder = isEditing ? "Dejar vacío para mantener la actual" : "Mínimo 6 caracteres";
 
     if (isEditing) {
-      passwordHelp.textContent = "Si no querés cambiar la contraseña, dejá este campo vacío. El email de recuperación también es opcional.";
+      passwordHelp.textContent = "Si no querés cambiar la contraseña, dejá este campo vacío.";
     } else if (role === "operator") {
-      passwordHelp.textContent = "Para operarios podés usar el DNI como contraseña inicial. El email de recuperación no es obligatorio: puede informarse recién si la persona pierde la contraseña.";
+      passwordHelp.textContent = "Para operarios podés usar el DNI como contraseña inicial.";
     } else {
-      passwordHelp.textContent = "Definí la contraseña inicial que quieras. El email de recuperación es opcional y no hace falta copiar ningún UUID de Supabase.";
+      passwordHelp.textContent = "Definí la contraseña inicial que quieras. No hace falta copiar ningún UUID de Supabase.";
     }
   }
 
   function userAccountPayloadFromForm() {
     const username = $("#userUsername").value.trim();
-    const email = $("#userEmail").value.trim().toLowerCase();
     const password = $("#userPassword").value;
     const fullName = $("#userName").value.trim();
     if (username.length < 3) throw new Error("El nombre de usuario debe tener al menos 3 caracteres.");
-    if (email && (!email.includes("@") || email.endsWith("@cleanit.ar"))) throw new Error("Si cargás un email de recuperación, debe ser un correo real válido.");
     if (!fullName) throw new Error("Cargá nombre y apellido.");
     if (!$("#userId").value && password.length < 6) throw new Error("La contraseña inicial debe tener al menos 6 caracteres.");
     if (password && password.length < 6) throw new Error("La contraseña debe tener al menos 6 caracteres.");
     return {
       username,
-      email,
       password,
       full_name: fullName,
       phone: $("#userPhone").value.trim(),
@@ -3690,7 +3680,6 @@
     $("#userForm").reset();
     $("#userId").value = "";
     $("#userUsername").value = "";
-    $("#userEmail").value = "";
     $("#userPassword").value = "";
     $("#userRole").value = "operator";
     $("#userFormTitle").textContent = "Nuevo usuario";
@@ -3704,7 +3693,6 @@
     $("#userId").value = user.id;
     $("#userRole").value = user.role || "operator";
     $("#userUsername").value = user.username || (String(user.email || "").toLowerCase().endsWith("@cleanit.ar") ? String(user.email).split("@")[0] : "");
-    $("#userEmail").value = hasRealRecoveryEmail(user) ? user.email : "";
     $("#userPassword").value = "";
     $("#userName").value = user.full_name || "";
     $("#userPhone").value = user.phone || "";
