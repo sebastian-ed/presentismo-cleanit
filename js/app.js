@@ -710,12 +710,18 @@
   async function handleForgotPassword(event) {
     event.preventDefault();
     const identifier = $("#forgotIdentifier").value.trim();
+    const recoveryEmail = $("#forgotRecoveryEmail")?.value.trim().toLowerCase() || "";
     const button = $("#forgotPasswordSubmitBtn");
     try {
       button.disabled = true;
-      const result = await store.requestPasswordReset(identifier);
+      const result = await store.requestPasswordReset(identifier, recoveryEmail);
       if (result?.needs_real_email) {
-        toast(result.message || "Este usuario no tiene un email real de recuperación configurado.");
+        toast(result.message || "Esta cuenta todavía no tiene email de recuperación. Completalo en este formulario.");
+        $("#forgotRecoveryEmail")?.focus();
+        return;
+      }
+      if (result?.pending_approval) {
+        toast(result.message || "Email informado. Un supervisor o administrador debe aprobarlo antes de enviar el enlace.", "success");
         return;
       }
       toast(result?.sent === false
@@ -3562,16 +3568,20 @@
     list.innerHTML = visibleUsers.map(user => {
       const manageable = canManageAccountUser(user);
       const username = user.username || (String(user.email || "").toLowerCase().endsWith("@cleanit.ar") ? String(user.email).split("@")[0] : "Sin usuario");
-      const recoveryEmail = hasRealRecoveryEmail(user) ? user.email : "Sin email real de recuperación";
+      const recoveryEmail = hasRealRecoveryEmail(user) ? user.email : "No configurado";
+      const pendingRecoveryEmail = String(user.pending_recovery_email || "").trim();
       return `
       <div class="list-item ${searchTerm ? "search-match-card" : ""}">
         <div class="list-item-title">${escapeHtml(user.full_name)}</div>
         <div class="muted small">${escapeHtml(roleLabel(user.role).replace(/^./, c => c.toUpperCase()))} · Usuario: <strong>${escapeHtml(username)}</strong></div>
-        <div class="muted small ${hasRealRecoveryEmail(user) ? "" : "warning-text"}">Email recuperación: ${escapeHtml(recoveryEmail)}</div>
+        <div class="muted small">Email recuperación: ${escapeHtml(recoveryEmail)}</div>
+        ${pendingRecoveryEmail ? `<div class="recovery-request-box"><strong>Recuperación solicitada:</strong> ${escapeHtml(pendingRecoveryEmail)}<div class="muted small">La persona informó este correo desde «Olvidaste tu contraseña».</div></div>` : ""}
         <div class="muted small">${escapeHtml(user.phone || "Sin teléfono")}</div>
         ${user.notes ? `<div class="muted small">Notas: ${escapeHtml(user.notes)}</div>` : ""}
         <div class="list-item-actions">
           ${manageable ? `<button class="secondary-btn small-btn" data-edit-user="${user.id}" type="button">Editar</button>` : ""}
+          ${manageable && pendingRecoveryEmail ? `<button class="primary-btn small-btn" data-approve-recovery="${user.id}" type="button">Aprobar email y enviar enlace</button>` : ""}
+          ${manageable && pendingRecoveryEmail ? `<button class="ghost-btn small-btn" data-reject-recovery="${user.id}" type="button">Rechazar email</button>` : ""}
           ${manageable ? `<button class="secondary-btn small-btn" data-set-password="${user.id}" type="button">Cambiar contraseña</button>` : ""}
           ${manageable ? `<button class="danger-btn small-btn" data-delete-user="${user.id}" type="button">Eliminar</button>` : ""}
         </div>
@@ -3581,6 +3591,35 @@
     list.querySelectorAll("[data-edit-user]").forEach(btn => btn.addEventListener("click", () => editUser(btn.dataset.editUser)));
     list.querySelectorAll("[data-delete-user]").forEach(btn => btn.addEventListener("click", () => deleteUser(btn.dataset.deleteUser)));
     list.querySelectorAll("[data-set-password]").forEach(btn => btn.addEventListener("click", () => setUserPasswordPrompt(btn.dataset.setPassword)));
+    list.querySelectorAll("[data-approve-recovery]").forEach(btn => btn.addEventListener("click", () => approveRecoveryEmail(btn.dataset.approveRecovery)));
+    list.querySelectorAll("[data-reject-recovery]").forEach(btn => btn.addEventListener("click", () => rejectRecoveryEmail(btn.dataset.rejectRecovery)));
+  }
+
+  async function approveRecoveryEmail(id) {
+    const user = byId(state.profiles, id);
+    if (!user || !canManageAccountUser(user) || !user.pending_recovery_email) return;
+    const email = String(user.pending_recovery_email).trim();
+    if (!window.confirm(`¿Aprobar ${email} como correo de recuperación de ${user.full_name} y enviarle el enlace para cambiar la contraseña?`)) return;
+    try {
+      await store.approveRecoveryEmail(id);
+      toast("Email aprobado. Se envió el enlace de recuperación.", "success");
+      await renderSupervisorView();
+    } catch (error) {
+      toast(error.message || "No se pudo aprobar el email de recuperación.");
+    }
+  }
+
+  async function rejectRecoveryEmail(id) {
+    const user = byId(state.profiles, id);
+    if (!user || !canManageAccountUser(user) || !user.pending_recovery_email) return;
+    if (!window.confirm(`¿Rechazar el email de recuperación solicitado para ${user.full_name}?`)) return;
+    try {
+      await store.rejectRecoveryEmail(id);
+      toast("Solicitud de recuperación rechazada.", "success");
+      await renderSupervisorView();
+    } catch (error) {
+      toast(error.message || "No se pudo rechazar la solicitud.");
+    }
   }
 
   function syncUserRolePermissions() {
@@ -3618,11 +3657,11 @@
     passwordInput.placeholder = isEditing ? "Dejar vacío para mantener la actual" : "Mínimo 6 caracteres";
 
     if (isEditing) {
-      passwordHelp.textContent = "Si no querés cambiar la contraseña, dejá este campo vacío. El email debe ser real para que funcione «Olvidaste tu contraseña».";
+      passwordHelp.textContent = "Si no querés cambiar la contraseña, dejá este campo vacío. El email de recuperación también es opcional.";
     } else if (role === "operator") {
-      passwordHelp.textContent = "Para operarios podés usar el DNI como contraseña inicial. Luego la persona podrá recuperarla por email.";
+      passwordHelp.textContent = "Para operarios podés usar el DNI como contraseña inicial. El email de recuperación no es obligatorio: puede informarse recién si la persona pierde la contraseña.";
     } else {
-      passwordHelp.textContent = "Definí la contraseña inicial que quieras. No hace falta crear el usuario manualmente en Supabase ni copiar ningún UUID.";
+      passwordHelp.textContent = "Definí la contraseña inicial que quieras. El email de recuperación es opcional y no hace falta copiar ningún UUID de Supabase.";
     }
   }
 
@@ -3632,7 +3671,7 @@
     const password = $("#userPassword").value;
     const fullName = $("#userName").value.trim();
     if (username.length < 3) throw new Error("El nombre de usuario debe tener al menos 3 caracteres.");
-    if (!email || !email.includes("@") || email.endsWith("@cleanit.ar")) throw new Error("Cargá un email real para recuperación de contraseña.");
+    if (email && (!email.includes("@") || email.endsWith("@cleanit.ar"))) throw new Error("Si cargás un email de recuperación, debe ser un correo real válido.");
     if (!fullName) throw new Error("Cargá nombre y apellido.");
     if (!$("#userId").value && password.length < 6) throw new Error("La contraseña inicial debe tener al menos 6 caracteres.");
     if (password && password.length < 6) throw new Error("La contraseña debe tener al menos 6 caracteres.");

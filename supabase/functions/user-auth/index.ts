@@ -1,7 +1,7 @@
 // Clean It · Presentismo GPS
-// Edge Function unificada para cuentas con usuario + email real.
+// Edge Function unificada para cuentas con usuario + email de recuperación opcional.
 // Acciones públicas: login, forgot_password.
-// Acciones de gestión: create, update, set_password.
+// Acciones de gestión: create, update, set_password, approve_recovery_email, reject_recovery_email.
 // IMPORTANTE: desplegar con --no-verify-jwt. Las acciones sensibles validan
 // manualmente el JWT del llamante y nunca exponen SUPABASE_SERVICE_ROLE_KEY.
 
@@ -174,11 +174,38 @@ Deno.serve(async (req) => {
       }
 
       if (isSyntheticEmail(identity.email)) {
+        const recoveryEmail = normalizeEmail(body?.recovery_email);
+        if (!recoveryEmail) {
+          return response({
+            success: true,
+            sent: false,
+            needs_real_email: true,
+            message: "Esta cuenta todavía no tiene email de recuperación. Ingresalo en este formulario para solicitar su aprobación.",
+          });
+        }
+        if (!recoveryEmail.includes("@") || isSyntheticEmail(recoveryEmail)) {
+          return response({ error: "Ingresá un email de recuperación válido." }, 400);
+        }
+
+        const { data: duplicate } = await admin
+          .from("profiles")
+          .select("id")
+          .eq("email", recoveryEmail)
+          .neq("id", identity.id)
+          .maybeSingle();
+        if (duplicate) return response({ error: "Ese email ya está asociado a otro usuario." }, 400);
+
+        const { error: requestError } = await admin
+          .from("profiles")
+          .update({ pending_recovery_email: recoveryEmail, recovery_requested_at: new Date().toISOString() })
+          .eq("id", identity.id);
+        if (requestError) return response({ error: requestError.message || "No se pudo registrar la solicitud de recuperación." }, 400);
+
         return response({
           success: true,
           sent: false,
-          needs_real_email: true,
-          message: "Este usuario todavía no tiene un email real de recuperación cargado. Pedile a un administrador que lo actualice desde Usuarios.",
+          pending_approval: true,
+          message: "Email informado. Un supervisor o administrador debe aprobarlo. Una vez aprobado, recibirás el enlace para cambiar la contraseña.",
         });
       }
 
@@ -193,7 +220,7 @@ Deno.serve(async (req) => {
 
     if (action === "create") {
       const username = normalizeUsername(body?.username);
-      const email = normalizeEmail(body?.email);
+      const requestedEmail = normalizeEmail(body?.email);
       const password = String(body?.password || "");
       const fullName = String(body?.full_name || "").trim();
       const role = String(body?.role || "operator") as Role;
@@ -201,7 +228,8 @@ Deno.serve(async (req) => {
       const notes = String(body?.notes || "").trim() || null;
 
       if (!username || username.length < 3) return response({ error: "El nombre de usuario debe tener al menos 3 caracteres." }, 400);
-      if (!email || !email.includes("@") || isSyntheticEmail(email)) return response({ error: "Cargá un email real para recuperación de contraseña." }, 400);
+      if (requestedEmail && (!requestedEmail.includes("@") || isSyntheticEmail(requestedEmail))) return response({ error: "Si cargás un email de recuperación, debe ser un correo real válido." }, 400);
+      const email = requestedEmail || `${username}@cleanit.ar`;
       if (password.length < 6) return response({ error: "La contraseña debe tener al menos 6 caracteres." }, 400);
       if (!fullName) return response({ error: "Cargá nombre y apellido." }, 400);
       if (!validRole(role)) return response({ error: "Rol inválido." }, 400);
@@ -215,7 +243,10 @@ Deno.serve(async (req) => {
       });
       if (createError || !created?.user) {
         const msg = createError?.message || "No se pudo crear el usuario.";
-        return response({ error: /already|exists|registered/i.test(msg) ? "El email ya está registrado." : msg }, 400);
+        if (/already|exists|registered/i.test(msg)) {
+          return response({ error: requestedEmail ? "El email ya está registrado." : "Ese nombre de usuario ya está registrado." }, 400);
+        }
+        return response({ error: msg }, 400);
       }
 
       const { data: profile, error: profileError } = await admin
@@ -248,7 +279,7 @@ Deno.serve(async (req) => {
 
       const { data: target, error: targetError } = await admin
         .from("profiles")
-        .select("id, username, email, full_name, role, phone, notes, is_active")
+        .select("id, username, email, full_name, role, phone, notes, is_active, pending_recovery_email, recovery_requested_at")
         .eq("id", profileId)
         .maybeSingle();
       if (targetError) throw targetError;
@@ -261,14 +292,16 @@ Deno.serve(async (req) => {
       }
 
       const username = normalizeUsername(body?.username || target.username);
-      const email = normalizeEmail(body?.email || target.email);
+      const requestedEmail = normalizeEmail(body?.email);
+      const currentEmail = normalizeEmail(target.email);
+      const email = requestedEmail || (isSyntheticEmail(currentEmail) ? `${username}@cleanit.ar` : currentEmail);
       const fullName = String(body?.full_name || target.full_name || "").trim();
       const password = String(body?.password || "");
       const phone = String(body?.phone ?? target.phone ?? "").trim() || null;
       const notes = String(body?.notes ?? target.notes ?? "").trim() || null;
 
       if (!username || username.length < 3) return response({ error: "El nombre de usuario debe tener al menos 3 caracteres." }, 400);
-      if (!email || !email.includes("@") || isSyntheticEmail(email)) return response({ error: "Cargá un email real para recuperación de contraseña." }, 400);
+      if (requestedEmail && (!requestedEmail.includes("@") || isSyntheticEmail(requestedEmail))) return response({ error: "Si cargás un email de recuperación, debe ser un correo real válido." }, 400);
       if (!fullName) return response({ error: "Cargá nombre y apellido." }, 400);
       if (password && password.length < 6) return response({ error: "La nueva contraseña debe tener al menos 6 caracteres." }, 400);
 
@@ -284,7 +317,16 @@ Deno.serve(async (req) => {
 
       const { data: profile, error: profileUpdateError } = await admin
         .from("profiles")
-        .update({ username, email, full_name: fullName, role, phone, notes, is_active: true })
+        .update({
+          username,
+          email,
+          full_name: fullName,
+          role,
+          phone,
+          notes,
+          is_active: true,
+          ...(requestedEmail ? { pending_recovery_email: null, recovery_requested_at: null } : {}),
+        })
         .eq("id", profileId)
         .select("*")
         .single();
@@ -293,6 +335,71 @@ Deno.serve(async (req) => {
       }
 
       return response({ profile });
+    }
+
+    if (action === "approve_recovery_email") {
+      const profileId = String(body?.profile_id || "").trim();
+      if (!profileId) return response({ error: "Falta el usuario." }, 400);
+
+      const { data: target, error: targetError } = await admin
+        .from("profiles")
+        .select("id, role, pending_recovery_email, is_active")
+        .eq("id", profileId)
+        .maybeSingle();
+      if (targetError) throw targetError;
+      if (!target?.is_active) return response({ error: "Usuario no encontrado o inactivo." }, 404);
+      if (!callerCanManage(caller.role, target.role as Role)) return response({ error: "Tu rol no puede aprobar la recuperación de este usuario." }, 403);
+
+      const recoveryEmail = normalizeEmail(target.pending_recovery_email);
+      if (!recoveryEmail || !recoveryEmail.includes("@") || isSyntheticEmail(recoveryEmail)) {
+        return response({ error: "No hay un email de recuperación pendiente válido." }, 400);
+      }
+
+      const { data: duplicate } = await admin
+        .from("profiles")
+        .select("id")
+        .eq("email", recoveryEmail)
+        .neq("id", profileId)
+        .maybeSingle();
+      if (duplicate) return response({ error: "Ese email ya está asociado a otro usuario." }, 400);
+
+      const { error: authError } = await admin.auth.admin.updateUserById(profileId, {
+        email: recoveryEmail,
+        email_confirm: true,
+      });
+      if (authError) return response({ error: authError.message || "No se pudo asociar el email al usuario." }, 400);
+
+      const { error: profileError } = await admin
+        .from("profiles")
+        .update({ email: recoveryEmail, pending_recovery_email: null, recovery_requested_at: null })
+        .eq("id", profileId);
+      if (profileError) return response({ error: profileError.message || "No se pudo actualizar el perfil." }, 400);
+
+      const redirectTo = safeResetRedirect(body?.redirect_to);
+      const { error: resetError } = await anon.auth.resetPasswordForEmail(recoveryEmail, { redirectTo });
+      if (resetError) return response({ error: resetError.message || "El email quedó aprobado, pero no se pudo enviar el enlace de recuperación." }, 400);
+      return response({ success: true, sent: true });
+    }
+
+    if (action === "reject_recovery_email") {
+      const profileId = String(body?.profile_id || "").trim();
+      if (!profileId) return response({ error: "Falta el usuario." }, 400);
+
+      const { data: target, error: targetError } = await admin
+        .from("profiles")
+        .select("id, role, is_active")
+        .eq("id", profileId)
+        .maybeSingle();
+      if (targetError) throw targetError;
+      if (!target?.is_active) return response({ error: "Usuario no encontrado o inactivo." }, 404);
+      if (!callerCanManage(caller.role, target.role as Role)) return response({ error: "Tu rol no puede rechazar la recuperación de este usuario." }, 403);
+
+      const { error } = await admin
+        .from("profiles")
+        .update({ pending_recovery_email: null, recovery_requested_at: null })
+        .eq("id", profileId);
+      if (error) return response({ error: error.message || "No se pudo rechazar la solicitud." }, 400);
+      return response({ success: true });
     }
 
     if (action === "set_password") {

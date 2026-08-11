@@ -10,6 +10,8 @@ create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   username text,
   email text,
+  pending_recovery_email text,
+  recovery_requested_at timestamptz,
   full_name text not null,
   role text not null check (role in ('operator', 'supervisor', 'admin')),
   phone text,

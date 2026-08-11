@@ -135,10 +135,15 @@
       return { user: sessionData.user, profile };
     }
 
-    async requestPasswordReset(identifier) {
+    async requestPasswordReset(identifier, recoveryEmail = "") {
       const redirectTo = `${window.location.origin}${window.location.pathname}`;
       const { data, error } = await this.client.functions.invoke("user-auth", {
-        body: { action: "forgot_password", identifier: String(identifier || "").trim(), redirect_to: redirectTo }
+        body: {
+          action: "forgot_password",
+          identifier: String(identifier || "").trim(),
+          recovery_email: String(recoveryEmail || "").trim().toLowerCase(),
+          redirect_to: redirectTo
+        }
       });
       if (error) throw new Error(await this.functionErrorMessage(error, "No se pudo enviar el email de recuperación."));
       if (data?.error) throw new Error(data.error);
@@ -495,6 +500,25 @@
       if (error) throw new Error(await this.functionErrorMessage(error, "No se pudo actualizar el usuario."));
       if (data?.error) throw new Error(data.error);
       return data.profile;
+    }
+
+    async approveRecoveryEmail(profileId) {
+      const redirectTo = `${window.location.origin}${window.location.pathname}`;
+      const { data, error } = await this.client.functions.invoke("user-auth", {
+        body: { action: "approve_recovery_email", profile_id: profileId, redirect_to: redirectTo }
+      });
+      if (error) throw new Error(await this.functionErrorMessage(error, "No se pudo aprobar el email de recuperación."));
+      if (data?.error) throw new Error(data.error);
+      return data;
+    }
+
+    async rejectRecoveryEmail(profileId) {
+      const { data, error } = await this.client.functions.invoke("user-auth", {
+        body: { action: "reject_recovery_email", profile_id: profileId }
+      });
+      if (error) throw new Error(await this.functionErrorMessage(error, "No se pudo rechazar el email de recuperación."));
+      if (data?.error) throw new Error(data.error);
+      return data;
     }
 
     async setManagedUserPassword(profileId, password) {

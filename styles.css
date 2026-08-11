@@ -1280,3 +1280,13 @@ body.modal-open { overflow: hidden; }
 /* Navegación contextual: formularios de edición y mapa de servicios */
 #assignmentForm, #siteForm, #userForm { scroll-margin-top: 140px; }
 #serviceMap { min-height: 430px; }
+
+
+.recovery-request-box {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid #f0c36a;
+  border-radius: 12px;
+  background: #fff8e8;
+  color: #6b4b00;
+}
