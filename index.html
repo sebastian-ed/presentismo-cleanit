@@ -484,10 +484,11 @@
                 <label><span>Tipo de cobertura</span><input id="siteType" placeholder="Ej. fixed" /></label>
                 <label><span>Radio GPS aceptado en metros</span><input id="siteRadius" required type="number" min="10" max="1000" value="120" /></label>
               </div>
-              <div class="two-cols">
-                <label><span>Latitud</span><input id="siteLat" required type="number" step="any" placeholder="-34.6037" /></label>
-                <label><span>Longitud</span><input id="siteLng" required type="number" step="any" placeholder="-58.3816" /></label>
-              </div>
+              <label>
+                <span>Coordenadas GPS (latitud, longitud)</span>
+                <input id="siteCoordinates" required type="text" inputmode="decimal" autocomplete="off" placeholder="-34.5849798751733, -58.43825497202207" />
+                <small class="muted">Podés pegar directamente las coordenadas copiadas desde Google Maps en formato <strong>latitud, longitud</strong>.</small>
+              </label>
               <div class="two-cols">
                 <label><span>Contacto consorcio</span><input id="siteContactName" placeholder="Ej. Administración / Encargado" /></label>
                 <label><span>WhatsApp</span><input id="siteWhatsapp" placeholder="+5491123456789" /></label>
@@ -616,13 +617,32 @@
     </section>
   </div>
 
+  <div id="serviceLocationModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="serviceLocationModalTitle">
+    <section class="modal-panel modal-panel-map">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Ubicación del servicio</p>
+          <h3 id="serviceLocationModalTitle">Servicio</h3>
+          <p id="serviceLocationModalSubtitle" class="muted small no-margin"></p>
+        </div>
+        <button class="ghost-btn small-btn modal-close" type="button" data-close-modal="serviceLocationModal" aria-label="Cerrar">Cerrar</button>
+      </div>
+      <div id="serviceLocationSummary" class="location-summary"></div>
+      <div class="map-legend" aria-label="Referencias del mapa">
+        <span><i class="legend-dot legend-assigned"></i> Servicio seleccionado</span>
+        <span><i class="legend-dot legend-other"></i> Otros servicios Clean It</span>
+      </div>
+      <div id="serviceMap" class="attendance-map" aria-label="Mapa de ubicación del servicio"></div>
+    </section>
+  </div>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="js/config.js"></script>
-  <script src="js/storage.js?v=20260810-stickytable1"></script>
-  <script src="js/app.js?v=20260810-stickytable1"></script>
+  <script src="js/storage.js?v=20260811-service-map-scroll1"></script>
+  <script src="js/app.js?v=20260811-service-map-scroll1"></script>
 </body>
 </html>

@@ -1276,3 +1276,7 @@ body.modal-open { overflow: hidden; }
   .assignment-audit-toolbar { grid-template-columns: 1fr; }
   .assignment-audit-kpis { grid-template-columns: 1fr 1fr; }
 }
+
+/* Navegación contextual: formularios de edición y mapa de servicios */
+#assignmentForm, #siteForm, #userForm { scroll-margin-top: 140px; }
+#serviceMap { min-height: 430px; }

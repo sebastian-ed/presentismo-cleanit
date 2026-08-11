@@ -52,7 +52,9 @@
   };
 
   let attendanceMapInstance = null;
+  let serviceMapInstance = null;
   let passwordRecoveryActive = false;
+  let contextSearchAutoScrollTimer = null;
 
   const $ = (selector) => document.querySelector(selector);
   const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -65,6 +67,36 @@
   const normalizePhone = (raw) => String(raw || "").replace(/[^0-9]/g, "");
   const escapeHtml = (str) => String(str ?? "").replace(/[&<>'"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c]));
   const dayLabel = (id, variant = "short") => DAYS.find(d => d.id === Number(id))?.[variant] || id;
+
+  function parseCoordinatesInput(raw) {
+    const text = String(raw || "").trim().replace(/[()\[\]]/g, "");
+    const match = text.match(/^(-?\d+(?:\.\d+)?)\s*[,;]\s*(-?\d+(?:\.\d+)?)$/);
+    if (!match) throw new Error("Ingresá las coordenadas en formato latitud, longitud. Ej.: -34.5849798751733, -58.43825497202207");
+    const lat = Number(match[1]);
+    const lng = Number(match[2]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      throw new Error("Las coordenadas ingresadas no son válidas. Revisá latitud (-90 a 90) y longitud (-180 a 180).");
+    }
+    return { lat, lng };
+  }
+
+  function scrollElementIntoWorkingView(target, flash = false) {
+    const element = typeof target === "string" ? $(target) : target;
+    if (!element) return;
+    const rect = element.getBoundingClientRect();
+    const stickyOffset = typeof managedStickyTop === "function" ? managedStickyTop() : 8;
+    const top = Math.max(0, window.scrollY + rect.top - stickyOffset - 12);
+    window.scrollTo({ top, behavior: "smooth" });
+    if (flash) {
+      element.classList.remove("search-target-flash");
+      requestAnimationFrame(() => element.classList.add("search-target-flash"));
+      window.setTimeout(() => element.classList.remove("search-target-flash"), 1200);
+    }
+  }
+
+  function scrollToActiveEditor(selector) {
+    requestAnimationFrame(() => requestAnimationFrame(() => scrollElementIntoWorkingView(selector, true)));
+  }
 
   const TAB_SEARCH_META = {
     live: { label: "En vivo", placeholder: "Buscar operario o servicio...", noun: "coberturas", target: "#liveTable" },
@@ -146,10 +178,21 @@
     const meta = TAB_SEARCH_META[tab];
     const target = meta?.target ? $(meta.target) : null;
     if (!target) return;
-    target.scrollIntoView({ behavior: "smooth", block: "start" });
-    target.classList.remove("search-target-flash");
-    requestAnimationFrame(() => target.classList.add("search-target-flash"));
-    window.setTimeout(() => target.classList.remove("search-target-flash"), 1200);
+    const preferred = target.querySelector(".search-match-card")
+      || target.querySelector(".search-match-row")
+      || target.querySelector("tbody tr")
+      || target;
+    scrollElementIntoWorkingView(preferred, true);
+  }
+
+  function scheduleContextSearchAutoScroll() {
+    window.clearTimeout(contextSearchAutoScrollTimer);
+    const raw = String(state.sectionSearch?.[state.activeTab] || "").trim();
+    if (raw.length < 2) return;
+    contextSearchAutoScrollTimer = window.setTimeout(() => {
+      if (String(state.sectionSearch?.[state.activeTab] || "").trim() !== raw) return;
+      focusCurrentSearchResults();
+    }, 320);
   }
 
   function dateToISO(date) {
@@ -1913,6 +1956,12 @@
       const mapEl = $("#attendanceMap");
       if (mapEl) mapEl.innerHTML = "";
     }
+    if (id === "serviceLocationModal" && serviceMapInstance) {
+      serviceMapInstance.remove();
+      serviceMapInstance = null;
+      const mapEl = $("#serviceMap");
+      if (mapEl) mapEl.innerHTML = "";
+    }
     if ($$(".modal-backdrop:not(.hidden)").length === 0) document.body.classList.remove("modal-open");
   }
 
@@ -2097,6 +2146,74 @@
     });
   }
 
+  function openServiceMap(siteId) {
+    if (!isManagementProfile()) return;
+    const site = byId(state.sites, siteId);
+    if (!site) return;
+    const lat = Number(site.lat);
+    const lng = Number(site.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      toast("Este servicio no tiene coordenadas GPS válidas cargadas.");
+      return;
+    }
+    if (!window.L) {
+      toast("No se pudo cargar el mapa. Revisá la conexión a internet.");
+      return;
+    }
+
+    $("#serviceLocationModalTitle").textContent = site.name || "Servicio";
+    $("#serviceLocationModalSubtitle").textContent = site.address || "Sin dirección";
+    $("#serviceLocationSummary").innerHTML = `
+      <div class="location-summary-card ok">
+        <strong>Coordenadas</strong>
+        <span>${lat}, ${lng}</span>
+      </div>
+      <div class="location-summary-card">
+        <strong>Radio GPS aceptado</strong>
+        <span>${Math.round(Number(site.gps_radius_m || 120))} m</span>
+      </div>
+      <div class="location-summary-card">
+        <strong>Servicio</strong>
+        <span>${escapeHtml(site.zone || "Sin zona")} · ${escapeHtml(site.supervisor_name || "Sin supervisor")}</span>
+      </div>`;
+
+    openModal("serviceLocationModal");
+    window.requestAnimationFrame(() => {
+      if (serviceMapInstance) serviceMapInstance.remove();
+      serviceMapInstance = window.L.map("serviceMap", { zoomControl: true });
+      window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>'
+      }).addTo(serviceMapInstance);
+
+      state.sites.forEach(candidate => {
+        const candidateLat = Number(candidate.lat);
+        const candidateLng = Number(candidate.lng);
+        if (!Number.isFinite(candidateLat) || !Number.isFinite(candidateLng)) return;
+        const selected = String(candidate.id) === String(site.id);
+        const marker = window.L.circleMarker([candidateLat, candidateLng], {
+          radius: selected ? 10 : 5,
+          color: selected ? "#a16207" : "#64748b",
+          weight: selected ? 4 : 2,
+          fillColor: selected ? "#f2b705" : "#94a3b8",
+          fillOpacity: selected ? .95 : .65
+        }).addTo(serviceMapInstance);
+        marker.bindPopup(`<strong>${escapeHtml(candidate.name || "Servicio")}</strong><br>${escapeHtml(candidate.address || "Sin dirección")}${selected ? "<br><strong>Servicio seleccionado</strong>" : ""}`);
+        if (selected) marker.openPopup();
+      });
+
+      window.L.circle([lat, lng], {
+        radius: Number(site.gps_radius_m || 120),
+        color: "#a16207",
+        weight: 2,
+        fillColor: "#fde68a",
+        fillOpacity: .13
+      }).addTo(serviceMapInstance);
+      serviceMapInstance.setView([lat, lng], 16);
+      window.setTimeout(() => serviceMapInstance?.invalidateSize(), 50);
+    });
+  }
+
   function assignmentMatchesSearch(site, assignments, term) {
     if (!term) return true;
     return valuesMatchSearch(
@@ -2169,6 +2286,7 @@
           </div>
         </div>
         <div class="list-item-actions">
+          <button class="secondary-btn small-btn" data-map-site="${site.id}" type="button">Ver mapa</button>
           <button class="secondary-btn small-btn" data-edit-site="${site.id}" type="button">Editar</button>
           <button class="danger-btn small-btn" data-delete-site="${site.id}" type="button">Eliminar</button>
         </div>
@@ -2180,6 +2298,7 @@
       input.closest(".list-item")?.classList.toggle("bulk-selected-item", input.checked);
       updateBulkSelectionSummaries();
     }));
+    list.querySelectorAll("[data-map-site]").forEach(btn => btn.addEventListener("click", () => openServiceMap(btn.dataset.mapSite)));
     list.querySelectorAll("[data-edit-site]").forEach(btn => btn.addEventListener("click", () => editSite(btn.dataset.editSite)));
     list.querySelectorAll("[data-delete-site]").forEach(btn => btn.addEventListener("click", () => deleteSite(btn.dataset.deleteSite)));
     updateBulkSelectionSummaries();
@@ -2187,6 +2306,7 @@
 
   function sitePayloadFromForm() {
     const id = $("#siteId").value || undefined;
+    const coordinates = parseCoordinatesInput($("#siteCoordinates").value);
     return {
       ...(id ? { id } : {}),
       name: $("#siteName").value.trim(),
@@ -2194,8 +2314,8 @@
       zone: $("#siteZone").value.trim(),
       supervisor_name: $("#siteSupervisor").value.trim(),
       service_type: $("#siteType").value.trim(),
-      lat: toNumber($("#siteLat").value),
-      lng: toNumber($("#siteLng").value),
+      lat: coordinates.lat,
+      lng: coordinates.lng,
       gps_radius_m: Number($("#siteRadius").value || 120),
       whatsapp_name: $("#siteContactName").value.trim(),
       whatsapp_phone: $("#siteWhatsapp").value.trim(),
@@ -2220,14 +2340,14 @@
     $("#siteZone").value = site.zone || "";
     $("#siteSupervisor").value = site.supervisor_name || "";
     $("#siteType").value = site.service_type || "";
-    $("#siteLat").value = site.lat || "";
-    $("#siteLng").value = site.lng || "";
+    $("#siteCoordinates").value = Number.isFinite(Number(site.lat)) && Number.isFinite(Number(site.lng)) ? `${site.lat}, ${site.lng}` : "";
     $("#siteRadius").value = site.gps_radius_m || 120;
     $("#siteContactName").value = site.whatsapp_name || "";
     $("#siteWhatsapp").value = site.whatsapp_phone || "";
     $("#siteFormTitle").textContent = "Editar servicio / consorcio";
     $("#cancelSiteEditBtn").classList.remove("hidden");
     renderTab("sites");
+    scrollToActiveEditor("#siteForm");
   }
 
   async function deleteSite(id) {
@@ -3410,6 +3530,7 @@
     $("#assignmentFormTitle").textContent = "Editar asignación fija";
     $("#cancelAssignmentEditBtn").classList.remove("hidden");
     renderTab("assignments");
+    scrollToActiveEditor("#assignmentForm");
   }
 
   async function deleteAssignment(id) {
@@ -3553,6 +3674,7 @@
     $("#cancelUserEditBtn").classList.remove("hidden");
     syncUserFormFields();
     renderTab("users");
+    scrollToActiveEditor("#userForm");
   }
 
   async function deleteUser(id) {
@@ -4592,6 +4714,7 @@
       state.sectionSearch[tab] = event.target.value || "";
       syncContextSearchUI(tab);
       renderSectionForContextSearch(tab);
+      scheduleContextSearchAutoScroll();
     });
     $("#contextSearchInput")?.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
@@ -4652,15 +4775,20 @@
     }));
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
-      if (!$("#locationModal").classList.contains("hidden")) closeModal("locationModal");
+      if (!$("#serviceLocationModal").classList.contains("hidden")) closeModal("serviceLocationModal");
+      else if (!$("#locationModal").classList.contains("hidden")) closeModal("locationModal");
       else if (!$("#quickDetailModal").classList.contains("hidden")) closeModal("quickDetailModal");
     });
     $("#siteForm").addEventListener("submit", async (event) => {
       event.preventDefault();
-      await store.upsertSite(sitePayloadFromForm());
-      resetSiteForm();
-      toast("Servicio guardado.");
-      await renderSupervisorView();
+      try {
+        await store.upsertSite(sitePayloadFromForm());
+        resetSiteForm();
+        toast("Servicio guardado.");
+        await renderSupervisorView();
+      } catch (error) {
+        toast(error.message || "No se pudo guardar el servicio.");
+      }
     });
     $("#cancelSiteEditBtn").addEventListener("click", resetSiteForm);
     $("#selectAllSitesBtn").addEventListener("click", () => {

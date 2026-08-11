@@ -52,7 +52,9 @@
   };
 
   let attendanceMapInstance = null;
+  let serviceMapInstance = null;
   let passwordRecoveryActive = false;
+  let contextSearchAutoScrollTimer = null;
 
   const $ = (selector) => document.querySelector(selector);
   const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -65,6 +67,36 @@
   const normalizePhone = (raw) => String(raw || "").replace(/[^0-9]/g, "");
   const escapeHtml = (str) => String(str ?? "").replace(/[&<>'"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c]));
   const dayLabel = (id, variant = "short") => DAYS.find(d => d.id === Number(id))?.[variant] || id;
+
+  function parseCoordinatesInput(raw) {
+    const text = String(raw || "").trim().replace(/[()\[\]]/g, "");
+    const match = text.match(/^(-?\d+(?:\.\d+)?)\s*[,;]\s*(-?\d+(?:\.\d+)?)$/);
+    if (!match) throw new Error("Ingresá las coordenadas en formato latitud, longitud. Ej.: -34.5849798751733, -58.43825497202207");
+    const lat = Number(match[1]);
+    const lng = Number(match[2]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      throw new Error("Las coordenadas ingresadas no son válidas. Revisá latitud (-90 a 90) y longitud (-180 a 180).");
+    }
+    return { lat, lng };
+  }
+
+  function scrollElementIntoWorkingView(target, flash = false) {
+    const element = typeof target === "string" ? $(target) : target;
+    if (!element) return;
+    const rect = element.getBoundingClientRect();
+    const stickyOffset = typeof managedStickyTop === "function" ? managedStickyTop() : 8;
+    const top = Math.max(0, window.scrollY + rect.top - stickyOffset - 12);
+    window.scrollTo({ top, behavior: "smooth" });
+    if (flash) {
+      element.classList.remove("search-target-flash");
+      requestAnimationFrame(() => element.classList.add("search-target-flash"));
+      window.setTimeout(() => element.classList.remove("search-target-flash"), 1200);
+    }
+  }
+
+  function scrollToActiveEditor(selector) {
+    requestAnimationFrame(() => requestAnimationFrame(() => scrollElementIntoWorkingView(selector, true)));
+  }
 
   const TAB_SEARCH_META = {
     live: { label: "En vivo", placeholder: "Buscar operario o servicio...", noun: "coberturas", target: "#liveTable" },
@@ -146,10 +178,21 @@
     const meta = TAB_SEARCH_META[tab];
     const target = meta?.target ? $(meta.target) : null;
     if (!target) return;
-    target.scrollIntoView({ behavior: "smooth", block: "start" });
-    target.classList.remove("search-target-flash");
-    requestAnimationFrame(() => target.classList.add("search-target-flash"));
-    window.setTimeout(() => target.classList.remove("search-target-flash"), 1200);
+    const preferred = target.querySelector(".search-match-card")
+      || target.querySelector(".search-match-row")
+      || target.querySelector("tbody tr")
+      || target;
+    scrollElementIntoWorkingView(preferred, true);
+  }
+
+  function scheduleContextSearchAutoScroll() {
+    window.clearTimeout(contextSearchAutoScrollTimer);
+    const raw = String(state.sectionSearch?.[state.activeTab] || "").trim();
+    if (raw.length < 2) return;
+    contextSearchAutoScrollTimer = window.setTimeout(() => {
+      if (String(state.sectionSearch?.[state.activeTab] || "").trim() !== raw) return;
+      focusCurrentSearchResults();
+    }, 320);
   }
 
   function dateToISO(date) {
@@ -1584,69 +1627,212 @@
     return definition ? rows.filter(definition.matches) : rows;
   }
 
-  let liveScrollSyncLock = false;
+  let managedTableScrollSyncLock = false;
+  let managedTableActiveScrollWrap = null;
+  let managedTableActiveHeaderWrap = null;
+  let managedTableObserver = null;
+  let managedTableRefreshFrame = 0;
+  let managedHeaderNeedsRebuild = true;
 
-  function refreshLiveFloatingScrollbar() {
-    const tableWrap = $("#liveTable");
-    const proxy = $("#liveTableScrollProxy");
-    if (!tableWrap || !proxy) return;
-    const inner = proxy.querySelector(".floating-h-scroll-inner");
-    if (!inner) return;
+  function ensureManagedTableHelpers() {
+    let scrollProxy = $("#globalTableScrollProxy");
+    if (!scrollProxy) {
+      scrollProxy = document.createElement("div");
+      scrollProxy.id = "globalTableScrollProxy";
+      scrollProxy.className = "floating-h-scroll hidden";
+      scrollProxy.setAttribute("aria-hidden", "true");
+      scrollProxy.innerHTML = '<div class="floating-h-scroll-inner"></div>';
+      document.body.appendChild(scrollProxy);
+    }
 
-    const hasOverflow = tableWrap.scrollWidth > tableWrap.clientWidth + 2;
-    const rect = tableWrap.getBoundingClientRect();
+    let headerProxy = $("#globalTableHeaderProxy");
+    if (!headerProxy) {
+      headerProxy = document.createElement("div");
+      headerProxy.id = "globalTableHeaderProxy";
+      headerProxy.className = "floating-table-header hidden";
+      headerProxy.setAttribute("aria-hidden", "true");
+      headerProxy.innerHTML = '<div class="floating-table-header-scroll"></div>';
+      document.body.appendChild(headerProxy);
+    }
+
+    if (scrollProxy.dataset.bound !== "1") {
+      scrollProxy.dataset.bound = "1";
+      scrollProxy.addEventListener("scroll", () => {
+        const target = managedTableActiveScrollWrap;
+        if (!target || managedTableScrollSyncLock) return;
+        managedTableScrollSyncLock = true;
+        target.scrollLeft = scrollProxy.scrollLeft;
+        const headerScroll = headerProxy.querySelector(".floating-table-header-scroll");
+        if (managedTableActiveHeaderWrap === target && headerScroll) headerScroll.scrollLeft = scrollProxy.scrollLeft;
+        managedTableScrollSyncLock = false;
+      }, { passive: true });
+    }
+    return { scrollProxy, headerProxy };
+  }
+
+  function visibleResponsiveTables() {
+    return $$(".responsive-table").filter(wrap => {
+      if (!wrap.querySelector("table")) return false;
+      const style = window.getComputedStyle(wrap);
+      return style.display !== "none" && style.visibility !== "hidden" && wrap.getClientRects().length > 0;
+    });
+  }
+
+  function managedStickyTop() {
+    let top = 8;
+    [$(".topbar"), $("#contextSearchBar")].filter(Boolean).forEach(element => {
+      const rect = element.getBoundingClientRect();
+      // Solo cuenta como obstrucción cuando realmente está pegado a la parte superior.
+      if (rect.bottom > 0 && rect.top <= 18) top = Math.max(top, rect.bottom + 6);
+    });
+    return Math.min(top, Math.max(8, (window.innerHeight || 0) - 120));
+  }
+
+  function bindManagedTableWrap(wrap) {
+    if (wrap.dataset.managedTableBound === "1") return;
+    wrap.dataset.managedTableBound = "1";
+    wrap.addEventListener("scroll", () => {
+      const { scrollProxy, headerProxy } = ensureManagedTableHelpers();
+      if (!managedTableScrollSyncLock && managedTableActiveScrollWrap === wrap) {
+        managedTableScrollSyncLock = true;
+        scrollProxy.scrollLeft = wrap.scrollLeft;
+        managedTableScrollSyncLock = false;
+      }
+      if (managedTableActiveHeaderWrap === wrap) {
+        const headerScroll = headerProxy.querySelector(".floating-table-header-scroll");
+        if (headerScroll) headerScroll.scrollLeft = wrap.scrollLeft;
+      }
+    }, { passive: true });
+  }
+
+  function rebuildFloatingTableHeader(wrap, headerProxy) {
+    const sourceTable = wrap?.querySelector("table");
+    const sourceHead = sourceTable?.querySelector("thead");
+    const holder = headerProxy.querySelector(".floating-table-header-scroll");
+    if (!sourceTable || !sourceHead || !holder) return false;
+
+    const clonedHead = sourceHead.cloneNode(true);
+    clonedHead.querySelectorAll("[id]").forEach(element => element.removeAttribute("id"));
+    clonedHead.querySelectorAll("input, button, select, a").forEach(element => element.setAttribute("tabindex", "-1"));
+
+    const floatingTable = document.createElement("table");
+    floatingTable.setAttribute("aria-hidden", "true");
+    const sourceWidth = Math.max(sourceTable.scrollWidth, sourceTable.getBoundingClientRect().width, wrap.scrollWidth);
+    floatingTable.style.width = `${sourceWidth}px`;
+    floatingTable.style.minWidth = `${sourceWidth}px`;
+    floatingTable.appendChild(clonedHead);
+    holder.replaceChildren(floatingTable);
+
+    const sourceCells = Array.from(sourceHead.querySelectorAll("tr:first-child > th"));
+    const cloneCells = Array.from(clonedHead.querySelectorAll("tr:first-child > th"));
+    sourceCells.forEach((cell, index) => {
+      const clone = cloneCells[index];
+      if (!clone) return;
+      const width = cell.getBoundingClientRect().width;
+      clone.style.width = `${width}px`;
+      clone.style.minWidth = `${width}px`;
+      clone.style.maxWidth = `${width}px`;
+    });
+    managedHeaderNeedsRebuild = false;
+    return true;
+  }
+
+  function refreshManagedTableUX() {
+    managedTableRefreshFrame = 0;
+    const { scrollProxy, headerProxy } = ensureManagedTableHelpers();
+    const scrollInner = scrollProxy.querySelector(".floating-h-scroll-inner");
+    const wraps = visibleResponsiveTables();
+    wraps.forEach(bindManagedTableWrap);
+
     const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-    const tableIsOnScreen = rect.bottom > 0 && rect.top < viewportHeight;
-    const nativeBottomScrollbarIsBelowViewport = rect.bottom > viewportHeight - 2;
-    const shouldFloat = hasOverflow && tableIsOnScreen && nativeBottomScrollbarIsBelowViewport;
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+    const stickyTop = managedStickyTop();
 
-    inner.style.width = `${Math.max(tableWrap.scrollWidth, tableWrap.clientWidth)}px`;
+    // 1) Scrollbar horizontal: controla la tabla que atraviesa el borde inferior del viewport.
+    const scrollCandidates = wraps
+      .filter(wrap => wrap.scrollWidth > wrap.clientWidth + 2)
+      .map(wrap => ({ wrap, rect: wrap.getBoundingClientRect() }))
+      .filter(item => item.rect.top < viewportHeight - 8 && item.rect.bottom > viewportHeight - 2)
+      .sort((a, b) => b.rect.top - a.rect.top);
+    const scrollTarget = scrollCandidates[0]?.wrap || null;
 
-    if (!shouldFloat) {
-      proxy.classList.add("hidden");
-      return;
+    if (!scrollTarget || !scrollInner) {
+      managedTableActiveScrollWrap = null;
+      scrollProxy.classList.add("hidden");
+    } else {
+      const rect = scrollTarget.getBoundingClientRect();
+      const left = Math.max(8, rect.left);
+      const right = Math.min(viewportWidth - 8, rect.right);
+      if (right - left < 120) {
+        managedTableActiveScrollWrap = null;
+        scrollProxy.classList.add("hidden");
+      } else {
+        managedTableActiveScrollWrap = scrollTarget;
+        scrollInner.style.width = `${Math.max(scrollTarget.scrollWidth, scrollTarget.clientWidth)}px`;
+        scrollProxy.style.left = `${left}px`;
+        scrollProxy.style.width = `${right - left}px`;
+        scrollProxy.style.bottom = "8px";
+        scrollProxy.classList.remove("hidden");
+        if (!managedTableScrollSyncLock && Math.abs(scrollProxy.scrollLeft - scrollTarget.scrollLeft) > 1) {
+          scrollProxy.scrollLeft = scrollTarget.scrollLeft;
+        }
+      }
     }
 
-    const left = Math.max(8, rect.left);
-    const right = Math.min(window.innerWidth - 8, rect.right);
-    const width = Math.max(120, right - left);
-    proxy.style.left = `${left}px`;
-    proxy.style.width = `${width}px`;
-    proxy.style.bottom = "8px";
-    proxy.classList.remove("hidden");
+    // 2) Encabezado flotante: conserva los títulos de columna al bajar por cualquier tabla larga.
+    const headerCandidates = wraps.map(wrap => {
+      const table = wrap.querySelector("table");
+      const thead = table?.querySelector("thead");
+      return thead ? { wrap, table, thead, rect: wrap.getBoundingClientRect(), headRect: thead.getBoundingClientRect() } : null;
+    }).filter(Boolean)
+      .filter(item => item.rect.top < stickyTop && item.rect.bottom > stickyTop + 44 && item.headRect.bottom <= stickyTop + 2)
+      .sort((a, b) => b.rect.top - a.rect.top);
+    const headerTarget = headerCandidates[0]?.wrap || null;
 
-    if (!liveScrollSyncLock && Math.abs(proxy.scrollLeft - tableWrap.scrollLeft) > 1) {
-      proxy.scrollLeft = tableWrap.scrollLeft;
+    if (!headerTarget) {
+      managedTableActiveHeaderWrap = null;
+      headerProxy.classList.add("hidden");
+    } else {
+      const rect = headerTarget.getBoundingClientRect();
+      const left = Math.max(8, rect.left);
+      const right = Math.min(viewportWidth - 8, rect.right);
+      const targetChanged = managedTableActiveHeaderWrap !== headerTarget;
+      if (targetChanged) managedHeaderNeedsRebuild = true;
+      managedTableActiveHeaderWrap = headerTarget;
+      if (managedHeaderNeedsRebuild || targetChanged || !headerProxy.querySelector("thead")) {
+        rebuildFloatingTableHeader(headerTarget, headerProxy);
+      }
+      const headerScroll = headerProxy.querySelector(".floating-table-header-scroll");
+      headerProxy.style.left = `${left}px`;
+      headerProxy.style.width = `${Math.max(120, right - left)}px`;
+      headerProxy.style.top = `${stickyTop}px`;
+      headerProxy.classList.remove("hidden");
+      if (headerScroll) headerScroll.scrollLeft = headerTarget.scrollLeft;
     }
   }
 
-  function setupLiveFloatingScrollbar() {
-    const tableWrap = $("#liveTable");
-    const proxy = $("#liveTableScrollProxy");
-    if (!tableWrap || !proxy || proxy.dataset.bound === "1") {
-      refreshLiveFloatingScrollbar();
-      return;
-    }
-    proxy.dataset.bound = "1";
-
-    tableWrap.addEventListener("scroll", () => {
-      if (liveScrollSyncLock) return;
-      liveScrollSyncLock = true;
-      proxy.scrollLeft = tableWrap.scrollLeft;
-      liveScrollSyncLock = false;
-    }, { passive: true });
-
-    proxy.addEventListener("scroll", () => {
-      if (liveScrollSyncLock) return;
-      liveScrollSyncLock = true;
-      tableWrap.scrollLeft = proxy.scrollLeft;
-      liveScrollSyncLock = false;
-    }, { passive: true });
-
-    window.addEventListener("scroll", refreshLiveFloatingScrollbar, { passive: true });
-    window.addEventListener("resize", refreshLiveFloatingScrollbar, { passive: true });
-    refreshLiveFloatingScrollbar();
+  function scheduleManagedTableRefresh(rebuildHeader = false) {
+    if (rebuildHeader) managedHeaderNeedsRebuild = true;
+    if (managedTableRefreshFrame) return;
+    managedTableRefreshFrame = window.requestAnimationFrame(refreshManagedTableUX);
   }
+
+  function setupManagedTableUX() {
+    ensureManagedTableHelpers();
+    visibleResponsiveTables().forEach(bindManagedTableWrap);
+    if (!managedTableObserver) {
+      const root = $("#supervisorView") || document.body;
+      managedTableObserver = new MutationObserver(() => scheduleManagedTableRefresh(true));
+      managedTableObserver.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style"] });
+      window.addEventListener("scroll", () => scheduleManagedTableRefresh(false), { passive: true });
+      window.addEventListener("resize", () => scheduleManagedTableRefresh(true), { passive: true });
+    }
+    scheduleManagedTableRefresh(true);
+  }
+
+  // Compatibilidad con llamadas existentes de En vivo. Ahora el comportamiento es global.
+  function refreshLiveFloatingScrollbar() { scheduleManagedTableRefresh(false); }
+  function setupLiveFloatingScrollbar() { setupManagedTableUX(); }
 
   async function updateExtraValidation(shiftId, status) {
     if (!isManagementProfile()) return toast("No tenés permisos para validar este registro.");
@@ -1768,6 +1954,12 @@
       attendanceMapInstance.remove();
       attendanceMapInstance = null;
       const mapEl = $("#attendanceMap");
+      if (mapEl) mapEl.innerHTML = "";
+    }
+    if (id === "serviceLocationModal" && serviceMapInstance) {
+      serviceMapInstance.remove();
+      serviceMapInstance = null;
+      const mapEl = $("#serviceMap");
       if (mapEl) mapEl.innerHTML = "";
     }
     if ($$(".modal-backdrop:not(.hidden)").length === 0) document.body.classList.remove("modal-open");
@@ -1954,6 +2146,74 @@
     });
   }
 
+  function openServiceMap(siteId) {
+    if (!isManagementProfile()) return;
+    const site = byId(state.sites, siteId);
+    if (!site) return;
+    const lat = Number(site.lat);
+    const lng = Number(site.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      toast("Este servicio no tiene coordenadas GPS válidas cargadas.");
+      return;
+    }
+    if (!window.L) {
+      toast("No se pudo cargar el mapa. Revisá la conexión a internet.");
+      return;
+    }
+
+    $("#serviceLocationModalTitle").textContent = site.name || "Servicio";
+    $("#serviceLocationModalSubtitle").textContent = site.address || "Sin dirección";
+    $("#serviceLocationSummary").innerHTML = `
+      <div class="location-summary-card ok">
+        <strong>Coordenadas</strong>
+        <span>${lat}, ${lng}</span>
+      </div>
+      <div class="location-summary-card">
+        <strong>Radio GPS aceptado</strong>
+        <span>${Math.round(Number(site.gps_radius_m || 120))} m</span>
+      </div>
+      <div class="location-summary-card">
+        <strong>Servicio</strong>
+        <span>${escapeHtml(site.zone || "Sin zona")} · ${escapeHtml(site.supervisor_name || "Sin supervisor")}</span>
+      </div>`;
+
+    openModal("serviceLocationModal");
+    window.requestAnimationFrame(() => {
+      if (serviceMapInstance) serviceMapInstance.remove();
+      serviceMapInstance = window.L.map("serviceMap", { zoomControl: true });
+      window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>'
+      }).addTo(serviceMapInstance);
+
+      state.sites.forEach(candidate => {
+        const candidateLat = Number(candidate.lat);
+        const candidateLng = Number(candidate.lng);
+        if (!Number.isFinite(candidateLat) || !Number.isFinite(candidateLng)) return;
+        const selected = String(candidate.id) === String(site.id);
+        const marker = window.L.circleMarker([candidateLat, candidateLng], {
+          radius: selected ? 10 : 5,
+          color: selected ? "#a16207" : "#64748b",
+          weight: selected ? 4 : 2,
+          fillColor: selected ? "#f2b705" : "#94a3b8",
+          fillOpacity: selected ? .95 : .65
+        }).addTo(serviceMapInstance);
+        marker.bindPopup(`<strong>${escapeHtml(candidate.name || "Servicio")}</strong><br>${escapeHtml(candidate.address || "Sin dirección")}${selected ? "<br><strong>Servicio seleccionado</strong>" : ""}`);
+        if (selected) marker.openPopup();
+      });
+
+      window.L.circle([lat, lng], {
+        radius: Number(site.gps_radius_m || 120),
+        color: "#a16207",
+        weight: 2,
+        fillColor: "#fde68a",
+        fillOpacity: .13
+      }).addTo(serviceMapInstance);
+      serviceMapInstance.setView([lat, lng], 16);
+      window.setTimeout(() => serviceMapInstance?.invalidateSize(), 50);
+    });
+  }
+
   function assignmentMatchesSearch(site, assignments, term) {
     if (!term) return true;
     return valuesMatchSearch(
@@ -2026,6 +2286,7 @@
           </div>
         </div>
         <div class="list-item-actions">
+          <button class="secondary-btn small-btn" data-map-site="${site.id}" type="button">Ver mapa</button>
           <button class="secondary-btn small-btn" data-edit-site="${site.id}" type="button">Editar</button>
           <button class="danger-btn small-btn" data-delete-site="${site.id}" type="button">Eliminar</button>
         </div>
@@ -2037,6 +2298,7 @@
       input.closest(".list-item")?.classList.toggle("bulk-selected-item", input.checked);
       updateBulkSelectionSummaries();
     }));
+    list.querySelectorAll("[data-map-site]").forEach(btn => btn.addEventListener("click", () => openServiceMap(btn.dataset.mapSite)));
     list.querySelectorAll("[data-edit-site]").forEach(btn => btn.addEventListener("click", () => editSite(btn.dataset.editSite)));
     list.querySelectorAll("[data-delete-site]").forEach(btn => btn.addEventListener("click", () => deleteSite(btn.dataset.deleteSite)));
     updateBulkSelectionSummaries();
@@ -2044,6 +2306,7 @@
 
   function sitePayloadFromForm() {
     const id = $("#siteId").value || undefined;
+    const coordinates = parseCoordinatesInput($("#siteCoordinates").value);
     return {
       ...(id ? { id } : {}),
       name: $("#siteName").value.trim(),
@@ -2051,8 +2314,8 @@
       zone: $("#siteZone").value.trim(),
       supervisor_name: $("#siteSupervisor").value.trim(),
       service_type: $("#siteType").value.trim(),
-      lat: toNumber($("#siteLat").value),
-      lng: toNumber($("#siteLng").value),
+      lat: coordinates.lat,
+      lng: coordinates.lng,
       gps_radius_m: Number($("#siteRadius").value || 120),
       whatsapp_name: $("#siteContactName").value.trim(),
       whatsapp_phone: $("#siteWhatsapp").value.trim(),
@@ -2077,14 +2340,14 @@
     $("#siteZone").value = site.zone || "";
     $("#siteSupervisor").value = site.supervisor_name || "";
     $("#siteType").value = site.service_type || "";
-    $("#siteLat").value = site.lat || "";
-    $("#siteLng").value = site.lng || "";
+    $("#siteCoordinates").value = Number.isFinite(Number(site.lat)) && Number.isFinite(Number(site.lng)) ? `${site.lat}, ${site.lng}` : "";
     $("#siteRadius").value = site.gps_radius_m || 120;
     $("#siteContactName").value = site.whatsapp_name || "";
     $("#siteWhatsapp").value = site.whatsapp_phone || "";
     $("#siteFormTitle").textContent = "Editar servicio / consorcio";
     $("#cancelSiteEditBtn").classList.remove("hidden");
     renderTab("sites");
+    scrollToActiveEditor("#siteForm");
   }
 
   async function deleteSite(id) {
@@ -3267,6 +3530,7 @@
     $("#assignmentFormTitle").textContent = "Editar asignación fija";
     $("#cancelAssignmentEditBtn").classList.remove("hidden");
     renderTab("assignments");
+    scrollToActiveEditor("#assignmentForm");
   }
 
   async function deleteAssignment(id) {
@@ -3410,6 +3674,7 @@
     $("#cancelUserEditBtn").classList.remove("hidden");
     syncUserFormFields();
     renderTab("users");
+    scrollToActiveEditor("#userForm");
   }
 
   async function deleteUser(id) {
@@ -4449,6 +4714,7 @@
       state.sectionSearch[tab] = event.target.value || "";
       syncContextSearchUI(tab);
       renderSectionForContextSearch(tab);
+      scheduleContextSearchAutoScroll();
     });
     $("#contextSearchInput")?.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
@@ -4464,6 +4730,7 @@
     });
     $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => {
       renderTab(btn.dataset.tab);
+      scheduleManagedTableRefresh(true);
       if (btn.dataset.tab === "records") loadRecordsPeriod().catch(error => toast(error.message || "No se pudieron cargar los registros."));
       if (btn.dataset.tab === "analytics" && !state.analyticsLoaded) loadAnalyticsData().catch(error => toast(error.message || "No se pudo generar el análisis."));
       if (btn.dataset.tab === "fichaje") loadFichajePeriod().catch(error => toast(error.message || "No se pudo cargar el fichaje del período."));
@@ -4508,15 +4775,20 @@
     }));
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
-      if (!$("#locationModal").classList.contains("hidden")) closeModal("locationModal");
+      if (!$("#serviceLocationModal").classList.contains("hidden")) closeModal("serviceLocationModal");
+      else if (!$("#locationModal").classList.contains("hidden")) closeModal("locationModal");
       else if (!$("#quickDetailModal").classList.contains("hidden")) closeModal("quickDetailModal");
     });
     $("#siteForm").addEventListener("submit", async (event) => {
       event.preventDefault();
-      await store.upsertSite(sitePayloadFromForm());
-      resetSiteForm();
-      toast("Servicio guardado.");
-      await renderSupervisorView();
+      try {
+        await store.upsertSite(sitePayloadFromForm());
+        resetSiteForm();
+        toast("Servicio guardado.");
+        await renderSupervisorView();
+      } catch (error) {
+        toast(error.message || "No se pudo guardar el servicio.");
+      }
     });
     $("#cancelSiteEditBtn").addEventListener("click", resetSiteForm);
     $("#selectAllSitesBtn").addEventListener("click", () => {
@@ -4646,6 +4918,7 @@
     syncPeriodControls("records", false);
     syncPeriodControls("analytics", false);
     bindEvents();
+    setupManagedTableUX();
 
     store.onAuthStateChange((event, session) => {
       if (event === "PASSWORD_RECOVERY") {
