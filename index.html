@@ -8,10 +8,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Presentismo GPS" />
   <title>Clean It · Presentismo GPS</title>
-  <link rel="manifest" href="manifest.webmanifest?v=20260811-offline1" />
+  <link rel="manifest" href="manifest.webmanifest?v=20260812-francos1" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20260811-offline1" />
+  <link rel="stylesheet" href="styles.css?v=20260812-francos1" />
 </head>
 <body>
   <div class="app-shell">
@@ -586,6 +586,14 @@
               </div>
             </div>
             <div id="recordsRangeSummary" class="muted small records-range-summary"></div>
+            <div class="records-management-bar">
+              <div class="selection-actions">
+                <button class="secondary-btn small-btn" id="selectAllRecordsBtn" type="button">Seleccionar todo</button>
+                <button class="ghost-btn small-btn" id="clearSelectedRecordsBtn" type="button">Limpiar selección</button>
+                <button class="danger-btn small-btn" id="deleteSelectedRecordsBtn" type="button">Eliminar seleccionados</button>
+              </div>
+              <span id="recordsSelectionSummary" class="muted small">0 registros seleccionados.</span>
+            </div>
             <div id="recordsTable" class="responsive-table"></div>
           </div>
         </section>
@@ -618,6 +626,25 @@
         <button class="ghost-btn small-btn modal-close" type="button" data-close-modal="observationModal" aria-label="Cerrar">Cerrar</button>
       </div>
       <div id="observationModalBody" class="observation-modal-body"></div>
+    </section>
+  </div>
+
+  <div id="manualAttendanceModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="manualAttendanceModalTitle">
+    <section class="modal-panel manual-attendance-modal-panel">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Excepción operativa</p>
+          <h3 id="manualAttendanceModalTitle">Registrar marcación manual</h3>
+          <p id="manualAttendanceModalSubtitle" class="muted small no-margin"></p>
+        </div>
+        <button class="ghost-btn small-btn modal-close" type="button" data-close-modal="manualAttendanceModal" aria-label="Cerrar">Cerrar</button>
+      </div>
+      <form id="manualAttendanceForm" class="form-stack manual-attendance-form">
+        <label><span>Fecha y hora real</span><input id="manualAttendanceDateTime" type="datetime-local" required /></label>
+        <label><span>Motivo / observación</span><textarea id="manualAttendanceReason" required placeholder="Ej. El operario no pudo fichar por un problema excepcional con su teléfono."></textarea></label>
+        <div class="manual-attendance-warning">Esta marcación se guardará <strong>sin GPS</strong> y quedará identificada como cargada por supervisor/administrador.</div>
+        <button class="primary-btn" id="saveManualAttendanceBtn" type="submit">Guardar marcación manual</button>
+      </form>
     </section>
   </div>
 
@@ -666,7 +693,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="js/config.js"></script>
-  <script src="js/storage.js?v=20260811-offline1"></script>
-  <script src="js/app.js?v=20260811-offline1"></script>
+  <script src="js/storage.js?v=20260812-francos1"></script>
+  <script src="js/app.js?v=20260812-francos1"></script>
 </body>
 </html>

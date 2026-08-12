@@ -546,6 +546,44 @@
       return data || [];
     }
 
+    async markShiftDayOff(payload) {
+      const params = {
+        p_shift_id: payload.shift_id,
+        p_assignment_id: payload.assignment_id || null,
+        p_shift_date: payload.shift_date,
+        p_operator_id: payload.operator_id,
+        p_site_id: payload.site_id,
+        p_work_type: payload.work_type || "regular",
+        p_notes: payload.notes || null
+      };
+      const { data, error } = await this.client.rpc("mark_shift_day_off", params);
+      if (error) throw error;
+      return data;
+    }
+
+    async clearShiftDayOff(shiftId) {
+      const { data, error } = await this.client.rpc("clear_shift_day_off", { p_shift_id: shiftId });
+      if (error) throw error;
+      return Number(data || 0);
+    }
+
+    async deleteAttendanceEvents(ids, confirmation) {
+      const uniqueIds = [...new Set((ids || []).filter(Boolean))];
+      if (!uniqueIds.length) return 0;
+      let deleted = 0;
+      const chunkSize = 250;
+      for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+        const chunk = uniqueIds.slice(i, i + chunkSize);
+        const { data, error } = await this.client.rpc("secure_delete_attendance_events", {
+          p_ids: chunk,
+          p_confirmation: confirmation
+        });
+        if (error) throw error;
+        deleted += Number(data || 0);
+      }
+      return deleted;
+    }
+
     async upsertSite(payload) {
       const { data, error } = await this.client
         .from("sites")
