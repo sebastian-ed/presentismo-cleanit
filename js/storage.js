@@ -1,11 +1,19 @@
 (function () {
   const CONFIG = window.APP_CONFIG || {};
+  const APP_TIME_ZONE = CONFIG.TIMEZONE || CONFIG.TIME_ZONE || "America/Argentina/Buenos_Aires";
 
-  const todayISO = () => new Date().toISOString().slice(0, 10);
+  function dateISOInTimeZone(date = new Date(), timeZone = APP_TIME_ZONE) {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone, year: "numeric", month: "2-digit", day: "2-digit"
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.filter(part => part.type !== "literal").map(part => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}`;
+  }
+
+  const todayISO = () => dateISOInTimeZone(new Date());
 
   function isoDay(dateString) {
-    const d = new Date(`${dateString}T00:00:00`);
-    const day = d.getDay();
+    const day = new Date(`${dateString}T12:00:00Z`).getUTCDay();
     return day === 0 ? 7 : day;
   }
 

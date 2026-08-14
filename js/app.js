@@ -60,10 +60,69 @@
 
   const $ = (selector) => document.querySelector(selector);
   const $$ = (selector) => Array.from(document.querySelectorAll(selector));
-  const todayISO = () => new Date().toISOString().slice(0, 10);
-  const todayDayId = () => { const d = new Date().getDay(); return d === 0 ? 7 : d; };
+  const APP_TIME_ZONE = CONFIG.TIMEZONE || CONFIG.TIME_ZONE || "America/Argentina/Buenos_Aires";
+
+  function datePartsInTimeZone(date = new Date(), timeZone = APP_TIME_ZONE) {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.filter(part => part.type !== "literal").map(part => [part.type, part.value]));
+    return { year: values.year, month: values.month, day: values.day };
+  }
+
+  function dateISOInTimeZone(date = new Date(), timeZone = APP_TIME_ZONE) {
+    const { year, month, day } = datePartsInTimeZone(date, timeZone);
+    return `${year}-${month}-${day}`;
+  }
+
+  function timestampToBusinessDate(value) {
+    if (!value) return null;
+    const date = value instanceof Date ? value : new Date(value);
+    if (!Number.isFinite(date.getTime())) return null;
+    return dateISOInTimeZone(date);
+  }
+
+  function timeZoneOffsetMs(date, timeZone = APP_TIME_ZONE) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      hourCycle: "h23"
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.filter(part => part.type !== "literal").map(part => [part.type, part.value]));
+    const asUTC = Date.UTC(
+      Number(values.year), Number(values.month) - 1, Number(values.day),
+      Number(values.hour), Number(values.minute), Number(values.second)
+    );
+    return asUTC - date.getTime();
+  }
+
+  function zonedDateTimeToDate(dateString, timeString = "00:00", timeZone = APP_TIME_ZONE) {
+    const [year, month, day] = String(dateString || "").split("-").map(Number);
+    const [hour, minute, second = 0] = String(timeString || "00:00").split(":").map(Number);
+    if (![year, month, day, hour, minute, second].every(Number.isFinite)) return new Date(NaN);
+    const utcGuess = Date.UTC(year, month - 1, day, hour, minute, second);
+    let candidate = new Date(utcGuess);
+    let offset = timeZoneOffsetMs(candidate, timeZone);
+    candidate = new Date(utcGuess - offset);
+    const correctedOffset = timeZoneOffsetMs(candidate, timeZone);
+    if (correctedOffset !== offset) candidate = new Date(utcGuess - correctedOffset);
+    return candidate;
+  }
+
+  const todayISO = () => dateISOInTimeZone(new Date());
+  const todayDayId = () => isoDayId(todayISO());
   const byId = (items, id) => items.find(item => item.id === id);
-  const formatDateTime = (value) => value ? new Date(value).toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" }) : "—";
+  const formatDateTime = (value) => value ? new Date(value).toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short", timeZone: APP_TIME_ZONE }) : "—";
+
+  function shiftDateFromId(shiftId, fallback = todayISO()) {
+    const match = String(shiftId || "").match(/__(\d{4}-\d{2}-\d{2})(?:__|$)/);
+    return match?.[1] || fallback;
+  }
+
   const formatTime = (value) => value ? String(value).slice(0, 5) : "—";
   const toNumber = (value) => Number.parseFloat(value || 0);
   const normalizePhone = (raw) => String(raw || "").replace(/[^0-9]/g, "");
@@ -198,31 +257,41 @@
   }
 
   function dateToISO(date) {
-    const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, "0");
-    const d = String(date.getDate()).padStart(2, "0");
+    const y = date.getUTCFullYear();
+    const m = String(date.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(date.getUTCDate()).padStart(2, "0");
     return `${y}-${m}-${d}`;
   }
 
   function parseISODate(dateString) {
-    return new Date(`${dateString}T12:00:00`);
+    return new Date(`${dateString}T12:00:00Z`);
+  }
+
+  function isoDayId(dateString) {
+    const d = parseISODate(dateString).getUTCDay();
+    return d === 0 ? 7 : d;
+  }
+
+  function formatISODate(dateString, options = {}) {
+    if (!dateString) return "";
+    return parseISODate(dateString).toLocaleDateString("es-AR", { ...options, timeZone: "UTC" });
   }
 
   function addDaysISO(dateString, days) {
     const d = parseISODate(dateString);
-    d.setDate(d.getDate() + Number(days || 0));
+    d.setUTCDate(d.getUTCDate() + Number(days || 0));
     return dateToISO(d);
   }
 
   function monthStartISO(dateString) {
     const d = parseISODate(dateString);
-    d.setDate(1);
+    d.setUTCDate(1);
     return dateToISO(d);
   }
 
   function monthEndISO(dateString) {
     const d = parseISODate(dateString);
-    d.setMonth(d.getMonth() + 1, 0);
+    d.setUTCMonth(d.getUTCMonth() + 1, 0);
     return dateToISO(d);
   }
 
@@ -298,7 +367,7 @@
   function formatClock(value) {
     if (!value) return "";
     try {
-      return new Date(value).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" });
+      return new Date(value).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: APP_TIME_ZONE });
     } catch (_) {
       return "";
     }
@@ -710,7 +779,7 @@
 
   function assignmentAppliesOnDate(assignment, dateString) {
     if (!assignment || assignment.is_active === false) return false;
-    const day = (() => { const d = new Date(`${dateString}T12:00:00`).getDay(); return d === 0 ? 7 : d; })();
+    const day = isoDayId(dateString);
     if (!(assignment.days_of_week || []).map(Number).includes(day)) return false;
     if (assignment.valid_from && assignment.valid_from > dateString) return false;
     if (assignment.valid_to && assignment.valid_to < dateString) return false;
@@ -886,13 +955,15 @@
       .filter(a => (a.assignment_type || "fixed") !== "fixed" || !suppressors.some(extra => extra.id !== a.id && assignmentsOverlap(extra, a)))
       .sort((a, b) => String(a.scheduled_start).localeCompare(String(b.scheduled_start)));
 
-    const extraEvents = state.events.filter(e =>
-      e.operator_id === state.currentProfile.id &&
-      e.shift_date === today &&
-      e.assignment_id == null &&
-      e.entry_source === "operator_extra" &&
-      ["coverage", "reinforcement"].includes(String(e.work_type || ""))
-    );
+    const extraEvents = state.events.filter(e => {
+      if (e.operator_id !== state.currentProfile.id || e.assignment_id != null || e.entry_source !== "operator_extra") return false;
+      if (!["coverage", "reinforcement"].includes(String(e.work_type || ""))) return false;
+      if (e.shift_date === today) return true;
+      const yesterday = addDaysISO(today, -1);
+      if (e.shift_date !== yesterday) return false;
+      if (e.event_type !== "present") return state.events.some(x => x.shift_id === e.shift_id && x.event_type === "present" && !state.events.some(y => y.shift_id === e.shift_id && y.event_type === "checkout"));
+      return !state.events.some(x => x.shift_id === e.shift_id && x.event_type === "checkout");
+    });
     const extraGroups = new Map();
     extraEvents.forEach(event => {
       if (!extraGroups.has(event.shift_id)) extraGroups.set(event.shift_id, []);
@@ -947,7 +1018,7 @@
 
   function renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite = null, assignment = null, dayOffEvent = null) {
     if (dayOffEvent && !entryEvent && !exitEvent) {
-      const dateLabel = new Date().toLocaleDateString("es-AR", { weekday: "long", day: "numeric", month: "long" });
+      const dateLabel = formatISODate(todayISO(), { weekday: "long", day: "numeric", month: "long" });
       return `
         <article class="operator-card operator-dayoff-card">
           <div class="card-title-row">
@@ -985,7 +1056,7 @@
     else if (checkedIn) { statusLabel = "En servicio"; statusClass = "status-ok"; }
     else { statusLabel = "Sin marcar"; statusClass = "status-pending"; }
 
-    const dateLabel = new Date().toLocaleDateString("es-AR", { weekday: "long", day: "numeric", month: "long" });
+    const dateLabel = formatISODate(todayISO(), { weekday: "long", day: "numeric", month: "long" });
     const assignmentType = assignment?.assignment_type || "fixed";
     const isExtraAssignment = assignmentType !== "fixed";
     const coveredOperator = assignment?.covered_operator_id ? byId(state.profiles, assignment.covered_operator_id) : null;
@@ -1124,20 +1195,23 @@
     const site = byId(state.sites, siteId);
     if (!site) return toast("Seleccioná el servicio al que fuiste enviado.");
 
-    const existingOpen = state.events.some(e => e.operator_id === state.currentProfile.id && e.shift_date === todayISO() && e.assignment_id == null && e.entry_source === "operator_extra" && e.event_type === "present" && !state.events.some(x => x.shift_id === e.shift_id && x.event_type === "checkout"));
+    const earliestOpenExtraDate = addDaysISO(todayISO(), -1);
+    const existingOpen = state.events.some(e => e.operator_id === state.currentProfile.id && e.shift_date >= earliestOpenExtraDate && e.assignment_id == null && e.entry_source === "operator_extra" && e.event_type === "present" && !state.events.some(x => x.shift_id === e.shift_id && x.event_type === "checkout"));
     if (existingOpen) return toast("Ya tenés una cobertura/refuerzo extraordinario abierto. Registrá primero la salida.");
 
     try {
       toast("Solicitando GPS de alta precisión...");
       const position = await getPosition();
       const { latitude, longitude, accuracy } = position.coords;
+      const gpsMoment = new Date(position.timestamp || Date.now());
+      const shiftDate = dateISOInTimeZone(gpsMoment);
       const distance = haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng));
       const isInside = distance <= Number(site.gps_radius_m || 120);
-      const shiftId = `extra__${state.currentProfile.id}__${todayISO()}__${Date.now()}`;
+      const shiftId = `extra__${state.currentProfile.id}__${shiftDate}__${Date.now()}`;
       const savedEvent = await store.createEvent({
         shift_id: shiftId,
         assignment_id: null,
-        shift_date: todayISO(),
+        shift_date: shiftDate,
         operator_id: state.currentProfile.id,
         site_id: site.id,
         event_type: "present",
@@ -1151,7 +1225,7 @@
         gps_accuracy_m: accuracy,
         distance_m: distance,
         is_inside_site: isInside,
-        client_time: new Date().toISOString(),
+        client_time: gpsMoment.toISOString(),
         recorded_via: "operator",
         recorded_by: state.currentProfile?.id || null
       });
@@ -1179,7 +1253,7 @@
   }
 
   async function handleGpsCheckin(shiftId, assignment = null) {
-    const today = todayISO();
+    const shiftDate = shiftDateFromId(shiftId, todayISO());
     const existingEntry = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
     const checkbox = document.getElementById(`confirm-in-${shiftId}`);
     const notes = document.getElementById(`notes-in-${shiftId}`)?.value || "";
@@ -1191,6 +1265,7 @@
       toast("Solicitando GPS de alta precisión...");
       const position = await getPosition();
       const { latitude, longitude, accuracy } = position.coords;
+      const gpsMoment = new Date(position.timestamp || Date.now());
 
       const assignedSite = assignment ? byId(state.sites, assignment.site_id) : null;
 
@@ -1198,7 +1273,7 @@
         const savedEvent = await store.createEvent({
           shift_id: shiftId,
           assignment_id: null,
-          shift_date: today,
+          shift_date: shiftDate,
           operator_id: state.currentProfile.id,
           site_id: null,
           event_type: "present",
@@ -1212,7 +1287,7 @@
           gps_accuracy_m: accuracy,
           distance_m: null,
           is_inside_site: null,
-          client_time: new Date().toISOString(),
+          client_time: gpsMoment.toISOString(),
           recorded_via: "operator",
           recorded_by: state.currentProfile?.id || null
         });
@@ -1229,7 +1304,7 @@
       const savedEvent = await store.createEvent({
         shift_id: shiftId,
         assignment_id: assignment.id,
-        shift_date: today,
+        shift_date: shiftDate,
         operator_id: state.currentProfile.id,
         site_id: assignedSite.id,
         event_type: "present",
@@ -1243,7 +1318,7 @@
         gps_accuracy_m: accuracy,
         distance_m: distance,
         is_inside_site: isInside,
-        client_time: new Date().toISOString(),
+        client_time: gpsMoment.toISOString(),
         recorded_via: "operator",
         recorded_by: state.currentProfile?.id || null
       });
@@ -1262,7 +1337,6 @@
   }
 
   async function handleGpsCheckout(shiftId) {
-    const today = todayISO();
     const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
     const existingExit = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
     const checkbox = document.getElementById(`confirm-out-${shiftId}`);
@@ -1276,6 +1350,8 @@
       toast("Solicitando GPS de alta precisión...");
       const position = await getPosition();
       const { latitude, longitude, accuracy } = position.coords;
+      const gpsMoment = new Date(position.timestamp || Date.now());
+      const shiftDate = entryEvent.shift_date || shiftDateFromId(shiftId, dateISOInTimeZone(gpsMoment));
 
       // Use same site from entry event
       const site = byId(state.sites, entryEvent.site_id);
@@ -1285,7 +1361,7 @@
       const savedEvent = await store.createEvent({
         shift_id: shiftId,
         assignment_id: entryEvent.assignment_id || null,
-        shift_date: today,
+        shift_date: shiftDate,
         operator_id: state.currentProfile.id,
         site_id: entryEvent.site_id,
         event_type: "checkout",
@@ -1299,7 +1375,7 @@
         gps_accuracy_m: accuracy,
         distance_m: distance,
         is_inside_site: isInside,
-        client_time: new Date().toISOString(),
+        client_time: gpsMoment.toISOString(),
         recorded_via: "operator",
         recorded_by: state.currentProfile?.id || null
       });
@@ -1358,7 +1434,7 @@
         site_id: shift.site_id,
         event_type: "absent",
         observed_status: "absent",
-        notes: `Ausencia automática: ${operator?.full_name || "el operario"} no registró entrada en ${site?.name || "el servicio"} antes de las ${formatTime(`${autoTime.getHours().toString().padStart(2, "0")}:${autoTime.getMinutes().toString().padStart(2, "0")}`)}.`,
+        notes: `Ausencia automática: ${operator?.full_name || "el operario"} no registró entrada en ${site?.name || "el servicio"} antes de las ${formatClock(autoTime)}.`,
         client_time: autoTime.toISOString(),
         recorded_via: "system_auto",
         recorded_by: state.currentProfile?.id || null
@@ -1536,8 +1612,8 @@
       "Validación": r.validation_label,
       "Franco": r.is_day_off ? "Sí" : "No",
       "Registro entrada": r.entry_recorded_via,
-      "Hora entrada": r.entry_time ? new Date(r.entry_time).toLocaleString("es-AR") : "",
-      "Hora salida": r.exit_time ? new Date(r.exit_time).toLocaleString("es-AR") : "",
+      "Hora entrada": r.entry_time ? new Date(r.entry_time).toLocaleString("es-AR", { timeZone: APP_TIME_ZONE }) : "",
+      "Hora salida": r.exit_time ? new Date(r.exit_time).toLocaleString("es-AR", { timeZone: APP_TIME_ZONE }) : "",
       "Registro salida": r.exit_recorded_via,
       "Duración exacta (hh:mm:ss)": r.horasLabel === "—" ? "" : r.horasLabel,
       "Minutos trabajados": r.minutes ?? "",
@@ -1991,8 +2067,13 @@
   function localDateTimeInputValue(date) {
     const d = date instanceof Date ? date : new Date(date);
     if (Number.isNaN(d.getTime())) return "";
-    const pad = value => String(value).padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: APP_TIME_ZONE,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+    }).formatToParts(d);
+    const values = Object.fromEntries(parts.filter(part => part.type !== "literal").map(part => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}`;
   }
 
   async function markShiftAsDayOff(shiftId) {
@@ -2069,14 +2150,15 @@
     const reason = $("#manualAttendanceReason").value.trim();
     if (!dateTimeRaw) return toast("Indicá la fecha y hora real de la marcación.");
     if (!reason) return toast("Indicá el motivo de la carga manual.");
-    const moment = new Date(dateTimeRaw);
+    const [manualDate, manualTime] = String(dateTimeRaw).split("T");
+    const moment = zonedDateTimeToDate(manualDate, manualTime || "00:00");
     if (Number.isNaN(moment.getTime())) return toast("La fecha y hora ingresadas no son válidas.");
 
     const shiftDate = row.shift.shift_date;
-    const selectedDate = `${moment.getFullYear()}-${String(moment.getMonth()+1).padStart(2,'0')}-${String(moment.getDate()).padStart(2,'0')}`;
+    const selectedDate = manualDate;
     const hasSchedule = Boolean(row.shift.scheduled_start && row.shift.scheduled_end);
     const scheduledEnd = hasSchedule ? getScheduledDateTime(row.shift, "scheduled_end") : null;
-    const overnightAllowedDate = scheduledEnd ? `${scheduledEnd.getFullYear()}-${String(scheduledEnd.getMonth()+1).padStart(2,'0')}-${String(scheduledEnd.getDate()).padStart(2,'0')}` : shiftDate;
+    const overnightAllowedDate = scheduledEnd ? dateISOInTimeZone(scheduledEnd) : shiftDate;
     if (selectedDate !== shiftDate && !(context.type === 'checkout' && hasSchedule && selectedDate === overnightAllowedDate)) {
       return toast("La fecha de la marcación no coincide con el día del turno.");
     }
@@ -2224,7 +2306,7 @@
         </thead>
         <tbody>${tableRows || `<tr><td colspan="7">${rows.length ? "No hay personas que coincidan con este filtro." : "No hay cobertura programada para esta fecha."}</td></tr>`}</tbody>
       </table>`;
-    $("#lastRefreshLabel").textContent = `Actualizado ${new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })}`;
+    $("#lastRefreshLabel").textContent = `Actualizado ${new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: APP_TIME_ZONE })}`;
     setupLiveFloatingScrollbar();
     requestAnimationFrame(refreshLiveFloatingScrollbar);
   }
@@ -2238,7 +2320,7 @@
 
   function formatOperationalDate(dateString) {
     try {
-      return new Date(`${dateString}T12:00:00`).toLocaleDateString("es-AR", { weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" });
+      return formatISODate(dateString, { weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" });
     } catch (_) {
       return dateString;
     }
@@ -3692,7 +3774,7 @@
     if (!operatorId || !siteId || !date || !start || !end) throw new Error("Completá operario, servicio, fecha y horario.");
     if (end === start) throw new Error("Entrada y salida no pueden ser iguales. Los turnos nocturnos, por ejemplo 22:00 a 06:00, sí están permitidos.");
     if (absent <= grace) throw new Error("El margen de ausencia debe ser posterior a la tolerancia de demora.");
-    const day = (() => { const d = new Date(`${date}T12:00:00`).getDay(); return d === 0 ? 7 : d; })();
+    const day = isoDayId(date);
 
     await store.upsertAssignment({
       operator_id: operatorId,
@@ -4045,16 +4127,16 @@
     if (assignment.valid_to) return assignment.valid_to;
     if (assignment.is_active === false) {
       const changed = assignment.updated_at || assignment.created_at;
-      return changed ? String(changed).slice(0, 10) : null;
+      return changed ? timestampToBusinessDate(changed) : null;
     }
     return null;
   }
 
   function assignmentAppliesHistorically(assignment, dateString) {
-    const day = (() => { const d = parseISODate(dateString).getDay(); return d === 0 ? 7 : d; })();
+    const day = isoDayId(dateString);
     const days = Array.isArray(assignment.days_of_week) ? assignment.days_of_week.map(Number) : [];
     if (!days.includes(day)) return false;
-    const start = assignment.valid_from || String(assignment.created_at || "").slice(0, 10);
+    const start = assignment.valid_from || timestampToBusinessDate(assignment.created_at);
     const end = assignmentHistoricalEnd(assignment);
     if (start && start > dateString) return false;
     if (end && end < dateString) return false;
@@ -4073,9 +4155,12 @@
   }
 
   function scheduledRangeForShift(dateString, startTime, endTime) {
-    const start = new Date(`${dateString}T${String(startTime || "00:00").slice(0, 5)}:00`);
-    let end = new Date(`${dateString}T${String(endTime || "00:00").slice(0, 5)}:00`);
-    if (end.getTime() <= start.getTime()) end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
+    const startClock = String(startTime || "00:00").slice(0, 5);
+    const endClock = String(endTime || "00:00").slice(0, 5);
+    const start = zonedDateTimeToDate(dateString, startClock);
+    let endDateString = dateString;
+    if (endClock <= startClock) endDateString = addDaysISO(dateString, 1);
+    const end = zonedDateTimeToDate(endDateString, endClock);
     return { start, end };
   }
 
@@ -4182,7 +4267,7 @@
   function resolveCompleteOperationalPeriod(period, context) {
     if (!period.isAll) return period;
     const starts = [
-      ...context.assignments.map(a => a.valid_from || String(a.created_at || "").slice(0, 10)),
+      ...context.assignments.map(a => a.valid_from || timestampToBusinessDate(a.created_at)),
       ...context.events.map(e => e.shift_date)
     ];
     const earliest = minISO(starts) || todayISO();
@@ -4210,7 +4295,7 @@
     const reportNow = new Date();
 
     for (const assignment of context.assignments) {
-      let date = maxISO([resolved.from, assignment.valid_from || String(assignment.created_at || "").slice(0, 10)]) || resolved.from;
+      let date = maxISO([resolved.from, assignment.valid_from || timestampToBusinessDate(assignment.created_at)]) || resolved.from;
       const assignmentEnd = assignmentHistoricalEnd(assignment);
       const endDate = minISO([resolved.to, assignmentEnd]) || resolved.to;
       if (!date || !endDate || date > endDate) continue;
@@ -5345,9 +5430,7 @@
       if (button) deleteAttendanceRecords([button.dataset.deleteRecord]);
     });
 
-    const firstDay = new Date();
-    firstDay.setDate(1);
-    $("#fichajeFrom").value = firstDay.toISOString().slice(0, 10);
+    $("#fichajeFrom").value = monthStartISO(todayISO());
     $("#fichajeTo").value = todayISO();
     $("#applyFichajeBtn").addEventListener("click", () => loadFichajePeriod().catch(error => toast(error.message || "No se pudo cargar el fichaje.")));
     $("#exportFichajeBtn").addEventListener("click", () => exportFichajeExcel().catch(error => toast(error.message || "No se pudo exportar el fichaje.")));
