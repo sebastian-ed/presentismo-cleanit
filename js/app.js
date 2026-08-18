@@ -36,7 +36,12 @@
     analyticsProfiles: [],
     analyticsPeriodResolved: null,
     activeTab: "live",
-    sectionSearch: { live: "", analytics: "", fichaje: "", coverage: "", assignments: "", sites: "", users: "", records: "" },
+    sectionSearch: { live: "", opsmap: "", analytics: "", fichaje: "", coverage: "", assignments: "", sites: "", users: "", records: "" },
+    operationalMapLoaded: false,
+    operationalMapDate: null,
+    operationalMapRows: [],
+    operationalMapSites: [],
+    operationalMapFilter: "all",
     searchCounts: {},
     fichajeLoaded: false,
     fichajeEvents: [],
@@ -55,6 +60,8 @@
 
   let attendanceMapInstance = null;
   let serviceMapInstance = null;
+  let operationalStatusMapInstance = null;
+  let operationalMapRefreshTimer = null;
   let passwordRecoveryActive = false;
   let contextSearchAutoScrollTimer = null;
 
@@ -161,6 +168,7 @@
 
   const TAB_SEARCH_META = {
     live: { label: "En vivo", placeholder: "Buscar operario o servicio...", noun: "coberturas", target: "#liveTable" },
+    opsmap: { label: "Mapa operativo", placeholder: "Buscar servicio, operario o estado...", noun: "servicios", target: "#operationalStatusMap" },
     analytics: { label: "Análisis", placeholder: "Buscar operario o servicio...", noun: "coberturas", target: "#analyticsSummaryTable" },
     fichaje: { label: "Fichaje", placeholder: "Buscar operario o servicio...", noun: "fichajes", target: "#fichajeTable" },
     coverage: { label: "Cobertura", placeholder: "Buscar servicio, zona u operario...", noun: "servicios", target: "#coverageGrid" },
@@ -222,6 +230,7 @@
 
   function renderSectionForContextSearch(tab = state.activeTab) {
     if (tab === "live") return renderDashboard();
+    if (tab === "opsmap") return renderOperationalMapFromState();
     if (tab === "analytics") return renderAnalyticsFromState();
     if (tab === "fichaje") {
       if (state.fichajeLoaded) return renderFichaje(state.fichajeEvents, state.fichajeProfiles, state.fichajeSites);
@@ -1662,6 +1671,241 @@
     window.XLSX.writeFile(wb, `fichaje-cleanit-${dateFrom}-al-${dateTo}.xlsx`);
   }
 
+  const OPERATIONAL_MAP_STATUS = {
+    good: { label: "Correcto", longLabel: "Cubierto correctamente", tone: "good", priority: 60 },
+    pending: { label: "Pendiente", longLabel: "Pendiente / programado", tone: "pending", priority: 50 },
+    late: { label: "Demora", longLabel: "Demora / alerta horaria", tone: "late", priority: 30 },
+    outside: { label: "Fuera de radio", longLabel: "Fichaje fuera de radio", tone: "outside", priority: 20 },
+    critical: { label: "Ausente / crítico", longLabel: "Ausencia / alerta crítica", tone: "critical", priority: 10 },
+    inactive: { label: "Sin cobertura", longLabel: "Franco / sin cobertura programada", tone: "inactive", priority: 70 }
+  };
+
+  function classifyOperationalMapRow(row) {
+    const alerts = normalizeSearchText(row?.["Alertas RRHH"] || "");
+    const entry = normalizeSearchText(row?.["Estado entrada"] || "");
+    const exit = normalizeSearchText(row?.["Estado salida"] || "");
+    const operational = normalizeSearchText(row?.["Estado operativo"] || "");
+    if (row?.Franco === "Sí" || entry === "franco") return "inactive";
+    if (alerts.includes("ausencia / sin entrada") || entry.includes("ausente") || entry.includes("ausencia")) return "critical";
+    if (alerts.includes("salida no registrada") || exit.includes("salida no registrada")) return "critical";
+    if (alerts.includes("fuera de radio") || entry.includes("fuera de radio") || exit.includes("fuera de radio") || operational.includes("fuera de radio")) return "outside";
+    if (alerts.includes("llegada tarde") || alerts.includes("salida anticipada") || entry.includes("tarde") || entry.includes("demora") || exit.includes("anticipada")) return "late";
+    if (operational.includes("pendiente") || operational.includes("programado") || entry === "pendiente") return "pending";
+    if (row?.["Hora entrada"] || operational.includes("jornada") || operational.includes("en servicio")) return "good";
+    return "pending";
+  }
+
+  function operationalMapAggregateStatus(rows) {
+    if (!rows?.length) return { key: "inactive", label: "Sin cobertura programada", counts: {} };
+    const activeRows = rows.filter(row => classifyOperationalMapRow(row) !== "inactive");
+    if (!activeRows.length) return { key: "inactive", label: "Franco / sin cobertura activa", counts: { inactive: rows.length } };
+    const counts = {};
+    activeRows.forEach(row => {
+      const key = classifyOperationalMapRow(row);
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    const priorityOrder = ["critical", "outside", "late", "pending", "good"];
+    const key = priorityOrder.find(item => counts[item]) || "good";
+    let label = OPERATIONAL_MAP_STATUS[key].longLabel;
+    if (key === "critical") {
+      const absenceCount = activeRows.filter(row => normalizeSearchText(row?.["Alertas RRHH"] || "").includes("ausencia / sin entrada") || normalizeSearchText(row?.["Estado entrada"] || "").includes("ausen")).length;
+      const missingExitCount = activeRows.filter(row => normalizeSearchText(row?.["Alertas RRHH"] || "").includes("salida no registrada")).length;
+      if (absenceCount) label = `Con ausencia${absenceCount > 1 ? "s" : ""} (${absenceCount})`;
+      else if (missingExitCount) label = `Salida no registrada (${missingExitCount})`;
+    } else if (key === "outside") label = `Fuera de radio (${counts.outside})`;
+    else if (key === "late") label = `Demora / alerta horaria (${counts.late})`;
+    else if (key === "pending") label = `Pendiente (${counts.pending})`;
+    else if (key === "good") label = "Cubierto correctamente";
+    return { key, label, counts };
+  }
+
+  function buildOperationalMapServices(rows, sites) {
+    const rowsBySite = new Map();
+    (rows || []).forEach(row => {
+      const siteId = row?.["Site ID"];
+      if (!siteId) return;
+      if (!rowsBySite.has(siteId)) rowsBySite.set(siteId, []);
+      rowsBySite.get(siteId).push(row);
+    });
+    return (sites || [])
+      .filter(site => site?.is_active !== false)
+      .map(site => {
+        const siteRows = rowsBySite.get(site.id) || [];
+        return { site, rows: siteRows, aggregate: operationalMapAggregateStatus(siteRows) };
+      });
+  }
+
+  function operationalMapFilterDefinitions(items) {
+    const count = key => items.filter(item => item.aggregate.key === key).length;
+    const alerts = items.filter(item => ["critical", "outside", "late"].includes(item.aggregate.key)).length;
+    return [
+      { key: "all", label: "Todos", count: items.length, tone: "all" },
+      { key: "alerts", label: "Con alerta", count: alerts, tone: "alert" },
+      { key: "good", label: "Correctos", count: count("good"), tone: "good" },
+      { key: "late", label: "Demora", count: count("late"), tone: "late" },
+      { key: "outside", label: "Fuera de radio", count: count("outside"), tone: "outside" },
+      { key: "critical", label: "Ausentes / críticos", count: count("critical"), tone: "critical" },
+      { key: "pending", label: "Pendientes", count: count("pending"), tone: "pending" },
+      { key: "inactive", label: "Sin cobertura / franco", count: count("inactive"), tone: "inactive" }
+    ];
+  }
+
+  function renderOperationalMapFilters(items) {
+    const container = $("#operationalMapFilters");
+    if (!container) return;
+    const defs = operationalMapFilterDefinitions(items);
+    if (!defs.some(def => def.key === state.operationalMapFilter)) state.operationalMapFilter = "all";
+    container.innerHTML = `<span class="live-filter-label">Filtrar:</span>` + defs.map(def => `
+      <button class="status-filter-btn ops-filter-${def.tone} ${state.operationalMapFilter === def.key ? "active" : ""}" type="button" data-ops-map-filter="${def.key}" aria-pressed="${state.operationalMapFilter === def.key ? "true" : "false"}">
+        <span class="filter-dot" aria-hidden="true"></span>${escapeHtml(def.label)} <strong class="filter-count">${def.count}</strong>
+      </button>`).join("");
+  }
+
+  function operationalMapItemMatchesSearch(item, term) {
+    if (!term) return true;
+    return valuesMatchSearch(term,
+      item.site?.name, item.site?.address, item.site?.zone, item.site?.supervisor_name,
+      item.aggregate?.label,
+      ...item.rows.map(row => [row.Operario, row["Estado operativo"], row["Estado entrada"], row["Estado salida"], row["Alertas RRHH"]])
+    );
+  }
+
+  function operationalMapPopupHtml(item) {
+    const site = item.site;
+    const rows = item.rows || [];
+    const rowHtml = rows.length ? rows.map(row => {
+      const rowKey = classifyOperationalMapRow(row);
+      const status = OPERATIONAL_MAP_STATUS[rowKey] || OPERATIONAL_MAP_STATUS.pending;
+      return `<div class="ops-popup-row">
+        <div><strong>${escapeHtml(row.Operario || "Operario")}</strong><span>${escapeHtml(row["Horario programado"] || "Sin horario")}</span></div>
+        <span class="ops-popup-status ops-tone-${status.tone}">${escapeHtml(row["Estado operativo"] || row["Estado entrada"] || status.longLabel)}</span>
+      </div>`;
+    }).join("") : `<div class="ops-popup-empty">No hay cobertura programada para esta fecha.</div>`;
+    return `<div class="ops-map-popup">
+      <div class="ops-popup-head"><strong>${escapeHtml(site?.name || "Servicio")}</strong><span class="ops-popup-main-status ops-tone-${escapeHtml(OPERATIONAL_MAP_STATUS[item.aggregate.key]?.tone || "inactive")}">${escapeHtml(item.aggregate.label)}</span></div>
+      <div class="ops-popup-address">${escapeHtml(site?.address || "Sin dirección cargada")}</div>
+      <div class="ops-popup-rows">${rowHtml}</div>
+    </div>`;
+  }
+
+  function operationalMapMarkerIcon(statusKey) {
+    const tone = OPERATIONAL_MAP_STATUS[statusKey]?.tone || "inactive";
+    return window.L.divIcon({
+      className: "ops-map-marker-shell",
+      html: `<span class="ops-map-pin ops-tone-${tone}"></span>`,
+      iconSize: [28, 28],
+      iconAnchor: [14, 14],
+      popupAnchor: [0, -14]
+    });
+  }
+
+  function renderOperationalMapFromState() {
+    const mapEl = $("#operationalStatusMap");
+    if (!mapEl || state.activeTab !== "opsmap") return;
+    const date = $("#operationalMapDate")?.value || state.operationalMapDate || todayISO();
+    const isToday = date === todayISO();
+    const liveBadge = $("#operationalMapLiveBadge");
+    if (liveBadge) liveBadge.classList.toggle("hidden", !isToday);
+    const dateLabel = $("#operationalMapDateLabel");
+    if (dateLabel) dateLabel.textContent = isToday ? "Hoy · estado en vivo" : formatOperationalDate(date);
+
+    const items = buildOperationalMapServices(state.operationalMapRows, state.operationalMapSites);
+    renderOperationalMapFilters(items);
+    const searchTerm = sectionSearchTerm("opsmap");
+    const filtered = items.filter(item => {
+      if (state.operationalMapFilter === "alerts" && !["critical", "outside", "late"].includes(item.aggregate.key)) return false;
+      if (!["all", "alerts"].includes(state.operationalMapFilter) && item.aggregate.key !== state.operationalMapFilter) return false;
+      return operationalMapItemMatchesSearch(item, searchTerm);
+    });
+    updateSectionSearchCount("opsmap", filtered.length, items.length);
+
+    const counts = items.reduce((acc, item) => {
+      acc.total++;
+      acc[item.aggregate.key] = (acc[item.aggregate.key] || 0) + 1;
+      if (["critical", "outside", "late"].includes(item.aggregate.key)) acc.alerts++;
+      return acc;
+    }, { total: 0, alerts: 0 });
+    const kpis = $("#operationalMapKpis");
+    if (kpis) kpis.innerHTML = `
+      ${kpi("Servicios activos", counts.total || 0)}
+      ${kpi("Cubiertos correctamente", counts.good || 0, "status-present")}
+      ${kpi("Con alerta", counts.alerts || 0, counts.alerts ? "status-late" : "status-present")}
+      ${kpi("Ausentes / críticos", counts.critical || 0, counts.critical ? "status-absent" : "")}`;
+
+    if (!window.L) {
+      mapEl.innerHTML = `<div class="empty-state">No se pudo cargar el mapa. Revisá la conexión a internet.</div>`;
+      return;
+    }
+    if (operationalStatusMapInstance) {
+      operationalStatusMapInstance.remove();
+      operationalStatusMapInstance = null;
+    }
+    mapEl.innerHTML = "";
+    operationalStatusMapInstance = window.L.map("operationalStatusMap", { zoomControl: true });
+    window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>'
+    }).addTo(operationalStatusMapInstance);
+
+    const mapped = filtered.filter(item => Number.isFinite(Number(item.site?.lat)) && Number.isFinite(Number(item.site?.lng)));
+    const bounds = [];
+    mapped.forEach(item => {
+      const lat = Number(item.site.lat);
+      const lng = Number(item.site.lng);
+      const marker = window.L.marker([lat, lng], { icon: operationalMapMarkerIcon(item.aggregate.key), title: `${item.site.name} · ${item.aggregate.label}` })
+        .addTo(operationalStatusMapInstance)
+        .bindTooltip(`<strong>${escapeHtml(item.site.name)}</strong><br>${escapeHtml(item.aggregate.label)}`, { direction: "top", offset: [0, -10] })
+        .bindPopup(operationalMapPopupHtml(item), { maxWidth: 390 });
+      bounds.push(marker.getLatLng());
+    });
+    if (bounds.length === 1) operationalStatusMapInstance.setView(bounds[0], 15);
+    else if (bounds.length > 1) operationalStatusMapInstance.fitBounds(window.L.latLngBounds(bounds), { padding: [28, 28], maxZoom: 15 });
+    else operationalStatusMapInstance.setView([-34.6037, -58.3816], 11);
+
+    const noCoords = filtered.filter(item => !Number.isFinite(Number(item.site?.lat)) || !Number.isFinite(Number(item.site?.lng))).length;
+    const foot = $("#operationalMapFootnote");
+    if (foot) foot.textContent = `${mapped.length} servicio${mapped.length === 1 ? "" : "s"} visible${mapped.length === 1 ? "" : "s"} en el mapa${noCoords ? ` · ${noCoords} sin coordenadas GPS cargadas` : ""}. Un servicio con varios operarios toma el estado de mayor prioridad operativa.`;
+    window.setTimeout(() => operationalStatusMapInstance?.invalidateSize(), 80);
+  }
+
+  async function loadOperationalMapData({ quiet = false } = {}) {
+    if (!isManagementProfile()) return;
+    const date = $("#operationalMapDate")?.value || state.operationalMapDate || todayISO();
+    state.operationalMapDate = date;
+    const refreshLabel = $("#operationalMapRefreshLabel");
+    if (refreshLabel && !quiet) refreshLabel.textContent = "Actualizando estado de servicios…";
+    try {
+      const period = { from: date, to: date, isAll: false, label: date };
+      const context = await fetchReportContext(period);
+      const built = buildOperationalExportRows(period, context);
+      state.operationalMapRows = built.rows || [];
+      state.operationalMapSites = (context.sites || []).filter(site => site?.is_active !== false);
+      state.operationalMapLoaded = true;
+      renderOperationalMapFromState();
+      if (refreshLabel) {
+        const isToday = date === todayISO();
+        const nowLabel = new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: APP_TIME_ZONE });
+        refreshLabel.textContent = isToday ? `Actualizado ${nowLabel} · actualización automática cada 60 segundos.` : `Estado histórico actualizado ${nowLabel}.`;
+      }
+    } catch (error) {
+      if (refreshLabel) refreshLabel.textContent = "No se pudo actualizar el mapa.";
+      if (!quiet) toast(error.message || "No se pudo cargar el mapa operativo.");
+    }
+    scheduleOperationalMapAutoRefresh();
+  }
+
+  function scheduleOperationalMapAutoRefresh() {
+    window.clearInterval(operationalMapRefreshTimer);
+    operationalMapRefreshTimer = null;
+    const date = $("#operationalMapDate")?.value || state.operationalMapDate;
+    if (state.activeTab !== "opsmap" || date !== todayISO()) return;
+    operationalMapRefreshTimer = window.setInterval(() => {
+      if (state.activeTab === "opsmap" && ($("#operationalMapDate")?.value || state.operationalMapDate) === todayISO()) {
+        loadOperationalMapData({ quiet: true });
+      }
+    }, 60000);
+  }
+
   async function renderSupervisorView() {
     const date = $("#dashboardDate").value || todayISO();
     await refreshBaseData(date);
@@ -1672,6 +1916,7 @@
     }
     renderTab(state.activeTab);
     renderDashboard();
+    if (state.activeTab === "opsmap") await loadOperationalMapData({ quiet: true });
     renderFichaje();
     renderCoverage();
     renderSites();
@@ -5232,6 +5477,11 @@
     $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => {
       renderTab(btn.dataset.tab);
       scheduleManagedTableRefresh(true);
+      scheduleOperationalMapAutoRefresh();
+      if (btn.dataset.tab === "opsmap") {
+        if (!state.operationalMapLoaded || state.operationalMapDate !== ($("#operationalMapDate")?.value || todayISO())) loadOperationalMapData().catch(error => toast(error.message || "No se pudo cargar el mapa operativo."));
+        else renderOperationalMapFromState();
+      }
       if (btn.dataset.tab === "records") loadRecordsPeriod().catch(error => toast(error.message || "No se pudieron cargar los registros."));
       if (btn.dataset.tab === "analytics" && !state.analyticsLoaded) loadAnalyticsData().catch(error => toast(error.message || "No se pudo generar el análisis."));
       if (btn.dataset.tab === "fichaje") loadFichajePeriod().catch(error => toast(error.message || "No se pudo cargar el fichaje del período."));
@@ -5240,6 +5490,24 @@
     $("#dashboardDate").addEventListener("change", async () => {
       syncPeriodControls("live", false);
       await renderSupervisorView();
+    });
+    $("#operationalMapDate")?.addEventListener("change", () => {
+      state.operationalMapDate = $("#operationalMapDate").value || todayISO();
+      state.operationalMapLoaded = false;
+      loadOperationalMapData().catch(error => toast(error.message || "No se pudo cargar el mapa operativo."));
+    });
+    $("#operationalMapTodayBtn")?.addEventListener("click", () => {
+      $("#operationalMapDate").value = todayISO();
+      state.operationalMapDate = todayISO();
+      state.operationalMapLoaded = false;
+      loadOperationalMapData().catch(error => toast(error.message || "No se pudo cargar el mapa operativo."));
+    });
+    $("#refreshOperationalMapBtn")?.addEventListener("click", () => loadOperationalMapData().catch(error => toast(error.message || "No se pudo cargar el mapa operativo.")));
+    $("#operationalMapFilters")?.addEventListener("click", event => {
+      const button = event.target.closest("[data-ops-map-filter]");
+      if (!button) return;
+      state.operationalMapFilter = button.dataset.opsMapFilter || "all";
+      renderOperationalMapFromState();
     });
     $("#liveExportPeriod").addEventListener("change", () => syncPeriodControls("live", false));
     $("#analyticsPeriod")?.addEventListener("change", () => { syncPeriodControls("analytics", false); state.analyticsLoaded = false; });
@@ -5510,6 +5778,8 @@
     renderLoginMode();
     renderAssignmentSchedule();
     $("#dashboardDate").value = todayISO();
+    if ($("#operationalMapDate")) $("#operationalMapDate").value = todayISO();
+    state.operationalMapDate = todayISO();
     $("#assignmentValidFrom").value = todayISO();
     if ($("#assignmentAuditEffectiveDate")) $("#assignmentAuditEffectiveDate").value = todayISO();
     if ($("#extraAssignmentDate")) $("#extraAssignmentDate").value = todayISO();

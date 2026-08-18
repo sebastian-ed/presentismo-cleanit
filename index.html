@@ -8,10 +8,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Presentismo GPS" />
   <title>Clean It · Presentismo GPS</title>
-  <link rel="manifest" href="manifest.webmanifest?v=20260818-pwa1" />
+  <link rel="manifest" href="manifest.webmanifest?v=20260818-map1" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20260818-pwa1" />
+  <link rel="stylesheet" href="styles.css?v=20260818-map1" />
 </head>
 <body>
   <div class="app-shell">
@@ -132,6 +132,7 @@
 
         <nav class="tabbar" aria-label="Panel supervisor">
           <button class="tab-btn active" data-tab="live" type="button">En vivo</button>
+          <button class="tab-btn" data-tab="opsmap" type="button">Mapa operativo</button>
           <button class="tab-btn" data-tab="analytics" type="button">Análisis</button>
           <button class="tab-btn" data-tab="fichaje" type="button">Fichaje</button>
           <button class="tab-btn" data-tab="coverage" type="button">Cobertura</button>
@@ -237,6 +238,49 @@
             </div>
             <div id="liveStatusFilters" class="live-status-filters" aria-label="Filtros rápidos de estado"></div>
             <div id="liveTable" class="responsive-table"></div>
+          </div>
+        </section>
+
+        <section id="opsmapTab" class="tab-panel">
+          <div class="data-card operational-map-hero">
+            <div class="card-title-row operational-map-title-row">
+              <div>
+                <p class="eyebrow">Control territorial</p>
+                <h3>Mapa operativo de servicios</h3>
+                <p class="muted small no-margin">Vista rápida de cobertura, ausencias y alertas del día. Para fechas anteriores reconstruye el estado con las asignaciones y marcaciones históricas.</p>
+              </div>
+              <span id="operationalMapLiveBadge" class="operational-map-live-badge">EN VIVO</span>
+            </div>
+            <div class="operational-map-toolbar">
+              <label>
+                <span>Fecha</span>
+                <input id="operationalMapDate" type="date" />
+              </label>
+              <div class="operational-map-toolbar-actions">
+                <button class="secondary-btn" id="operationalMapTodayBtn" type="button">Hoy</button>
+                <button class="primary-btn" id="refreshOperationalMapBtn" type="button">Actualizar mapa</button>
+              </div>
+              <div class="operational-map-refresh-copy">
+                <strong id="operationalMapDateLabel">Hoy</strong>
+                <span id="operationalMapRefreshLabel" class="muted small">Actualización automática cada 60 segundos cuando mirás el día de hoy.</span>
+              </div>
+            </div>
+          </div>
+
+          <div id="operationalMapKpis" class="kpi-grid operational-map-kpis"></div>
+
+          <div class="data-card operational-map-card">
+            <div id="operationalMapFilters" class="live-status-filters operational-map-filters" aria-label="Filtros del mapa operativo"></div>
+            <div class="operational-map-legend" aria-label="Referencias del mapa operativo">
+              <span><i class="ops-legend-dot ops-tone-good"></i>Cubierto correctamente</span>
+              <span><i class="ops-legend-dot ops-tone-late"></i>Demora / alerta horaria</span>
+              <span><i class="ops-legend-dot ops-tone-outside"></i>Fuera de radio</span>
+              <span><i class="ops-legend-dot ops-tone-critical"></i>Ausente / crítico</span>
+              <span><i class="ops-legend-dot ops-tone-pending"></i>Pendiente</span>
+              <span><i class="ops-legend-dot ops-tone-inactive"></i>Franco / sin cobertura</span>
+            </div>
+            <div id="operationalStatusMap" class="operational-status-map" aria-label="Mapa del estado operativo de los servicios"></div>
+            <div id="operationalMapFootnote" class="muted small operational-map-footnote"></div>
           </div>
         </section>
 
@@ -697,7 +741,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="js/config.js"></script>
-  <script src="js/storage.js?v=20260818-pwa1"></script>
-  <script src="js/app.js?v=20260818-pwa1"></script>
+  <script src="js/storage.js?v=20260818-map1"></script>
+  <script src="js/app.js?v=20260818-map1"></script>
 </body>
 </html>
