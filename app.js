@@ -5436,6 +5436,75 @@
     $("#exportFichajeBtn").addEventListener("click", () => exportFichajeExcel().catch(error => toast(error.message || "No se pudo exportar el fichaje.")));
   }
 
+  let deferredPwaInstallPrompt = null;
+
+  function isPwaStandalone() {
+    return window.matchMedia?.("(display-mode: standalone)")?.matches === true
+      || window.navigator.standalone === true;
+  }
+
+  function isIosDevice() {
+    return /iphone|ipad|ipod/i.test(window.navigator.userAgent || "");
+  }
+
+  function isChromiumBrowser() {
+    const ua = window.navigator.userAgent || "";
+    return /Chrome|Chromium|CriOS|Edg/i.test(ua) && !/Firefox|FxiOS/i.test(ua);
+  }
+
+  function syncPwaInstallUi() {
+    const button = $("#installPwaBtn");
+    const badge = $("#pwaInstalledBadge");
+    if (!button || !badge) return;
+    const installed = isPwaStandalone();
+    badge.classList.toggle("hidden", !installed);
+    button.classList.toggle("hidden", installed);
+    button.textContent = deferredPwaInstallPrompt ? "Instalar app" : "Instalar app";
+  }
+
+  async function requestPwaInstall() {
+    if (isPwaStandalone()) {
+      toast("Presentismo ya está instalado como app.", "success");
+      return;
+    }
+
+    if (deferredPwaInstallPrompt) {
+      const promptEvent = deferredPwaInstallPrompt;
+      deferredPwaInstallPrompt = null;
+      await promptEvent.prompt();
+      const choice = await promptEvent.userChoice.catch(() => null);
+      if (choice?.outcome === "accepted") toast("Instalando Presentismo…", "success");
+      else syncPwaInstallUi();
+      return;
+    }
+
+    if (isIosDevice()) {
+      toast("En iPhone/iPad: Compartir → Agregar a pantalla de inicio.");
+      return;
+    }
+
+    if (isChromiumBrowser()) {
+      toast("Chrome todavía está validando la instalación. Usá la app al menos 30 segundos, tocá alguna opción y luego volvé a presionar “Instalar app”.");
+      return;
+    }
+
+    toast("Abrí el menú del navegador y elegí Instalar app / Agregar a pantalla de inicio.");
+  }
+
+  window.addEventListener("beforeinstallprompt", (event) => {
+    event.preventDefault();
+    deferredPwaInstallPrompt = event;
+    syncPwaInstallUi();
+  });
+
+  window.addEventListener("appinstalled", () => {
+    deferredPwaInstallPrompt = null;
+    syncPwaInstallUi();
+    toast("Presentismo quedó instalado como aplicación.", "success");
+  });
+
+  window.matchMedia?.("(display-mode: standalone)")?.addEventListener?.("change", syncPwaInstallUi);
+
   async function init() {
     renderConnectionMode();
     renderLoginMode();
@@ -5449,9 +5518,13 @@
     syncPeriodControls("analytics", false);
     bindEvents();
     setupManagedTableUX();
+    $("#installPwaBtn")?.addEventListener("click", () => requestPwaInstall().catch(() => toast("No se pudo abrir el instalador. Probá nuevamente.")));
+    syncPwaInstallUi();
 
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw.js").catch(() => { /* la app sigue funcionando online */ });
+      navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" })
+        .then(registration => registration.update().catch(() => {}))
+        .catch(() => { /* la app sigue funcionando online */ });
     }
     window.addEventListener("offline", () => {
       if (state.currentProfile?.role === "operator") renderOperatorConnectivity();

@@ -8,10 +8,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Presentismo GPS" />
   <title>Clean It · Presentismo GPS</title>
-  <link rel="manifest" href="manifest.webmanifest?v=20260814-timezone1" />
+  <link rel="manifest" href="manifest.webmanifest?v=20260818-pwa1" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20260814-timezone1" />
+  <link rel="stylesheet" href="styles.css?v=20260818-pwa1" />
 </head>
 <body>
   <div class="app-shell">
@@ -22,6 +22,10 @@
           <p class="eyebrow">Clean It</p>
           <h1>Presentismo GPS</h1>
         </div>
+      </div>
+      <div class="topbar-actions">
+        <span id="pwaInstalledBadge" class="connection-pill pwa-installed-badge hidden" aria-live="polite">App instalada</span>
+        <button id="installPwaBtn" class="secondary-btn small-btn pwa-install-btn hidden" type="button">Instalar app</button>
       </div>
     </header>
 
@@ -693,7 +697,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="js/config.js"></script>
-  <script src="js/storage.js?v=20260814-timezone1"></script>
-  <script src="js/app.js?v=20260814-timezone1"></script>
+  <script src="js/storage.js?v=20260818-pwa1"></script>
+  <script src="js/app.js?v=20260818-pwa1"></script>
 </body>
 </html>

@@ -1,12 +1,12 @@
-const CACHE_NAME = "cleanit-presentismo-shell-20260814-timezone1";
+const CACHE_NAME = "cleanit-presentismo-shell-20260818-pwa1";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=20260814-timezone1",
+  "./styles.css?v=20260818-pwa1",
   "./js/config.js",
-  "./js/storage.js?v=20260814-timezone1",
-  "./js/app.js?v=20260814-timezone1",
-  "./manifest.webmanifest?v=20260814-timezone1",
+  "./js/storage.js?v=20260818-pwa1",
+  "./js/app.js?v=20260818-pwa1",
+  "./manifest.webmanifest?v=20260818-pwa1",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2",

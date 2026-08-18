@@ -1411,3 +1411,27 @@ body.modal-open { overflow: hidden; }
 }
 .dayoff-operator-message strong { color: #334155; }
 .dayoff-operator-message small { margin-top: 4px; color: #64748b; }
+
+/* PWA / instalación */
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pwa-install-btn {
+  white-space: nowrap;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, .08);
+}
+.pwa-installed-badge {
+  background: #dcfce7;
+  color: var(--success);
+  border-color: #bbf7d0;
+}
+@media (max-width: 520px) {
+  .topbar { align-items: center; }
+  .topbar-actions { margin-left: auto; }
+  .pwa-install-btn { padding-inline: 10px; }
+  .pwa-installed-badge { display: none !important; }
+}
