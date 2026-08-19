@@ -7,7 +7,7 @@ window.APP_CONFIG = {
   TIMEZONE: "America/Argentina/Buenos_Aires",
 
   // Protección para evitar que un operario registre salida inmediatamente después de la entrada.
-  EXIT_PROTECTION_MINUTES: 5,
+  EXIT_PROTECTION_MINUTES: 10,
 
   // Nombre operativo usado en mensajes al consorcio.
   COMPANY_NAME: "Clean It"
