@@ -1,12 +1,12 @@
-const CACHE_NAME = "cleanit-presentismo-shell-20260818-map1";
+const CACHE_NAME = "cleanit-presentismo-shell-20260819-exitguard1";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=20260818-map1",
-  "./js/config.js",
-  "./js/storage.js?v=20260818-map1",
-  "./js/app.js?v=20260818-map1",
-  "./manifest.webmanifest?v=20260818-map1",
+  "./styles.css?v=20260819-exitguard1",
+  "./js/config.js?v=20260819-exitguard1",
+  "./js/storage.js?v=20260819-exitguard1",
+  "./js/app.js?v=20260819-exitguard1",
+  "./manifest.webmanifest?v=20260819-exitguard1",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2",

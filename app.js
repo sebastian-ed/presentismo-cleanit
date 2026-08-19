@@ -64,10 +64,12 @@
   let operationalMapRefreshTimer = null;
   let passwordRecoveryActive = false;
   let contextSearchAutoScrollTimer = null;
+  let operatorExitProtectionTimer = null;
 
   const $ = (selector) => document.querySelector(selector);
   const $$ = (selector) => Array.from(document.querySelectorAll(selector));
   const APP_TIME_ZONE = CONFIG.TIMEZONE || CONFIG.TIME_ZONE || "America/Argentina/Buenos_Aires";
+  const EXIT_PROTECTION_MINUTES = Math.max(1, Number(CONFIG.EXIT_PROTECTION_MINUTES || 10));
 
   function datePartsInTimeZone(date = new Date(), timeZone = APP_TIME_ZONE) {
     const parts = new Intl.DateTimeFormat("en-CA", {
@@ -131,6 +133,41 @@
   }
 
   const formatTime = (value) => value ? String(value).slice(0, 5) : "—";
+
+  function exitProtectionState(entryEvent) {
+    if (!entryEvent?.assignment_id) return { active: false, remainingMs: 0, unlockAt: null };
+    const value = eventTimestamp(entryEvent);
+    const enteredAt = value ? new Date(value) : null;
+    if (!enteredAt || !Number.isFinite(enteredAt.getTime())) return { active: false, remainingMs: 0, unlockAt: null };
+    const unlockAt = new Date(enteredAt.getTime() + EXIT_PROTECTION_MINUTES * 60000);
+    const remainingMs = unlockAt.getTime() - Date.now();
+    return { active: remainingMs > 0, remainingMs: Math.max(0, remainingMs), unlockAt };
+  }
+
+  function formatExitProtectionRemaining(ms) {
+    const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    if (minutes <= 0) return `${seconds} s`;
+    return `${minutes} min${seconds ? ` ${String(seconds).padStart(2, "0")} s` : ""}`;
+  }
+
+  function scheduleOperatorExitProtectionRefresh(container) {
+    if (operatorExitProtectionTimer) {
+      clearTimeout(operatorExitProtectionTimer);
+      operatorExitProtectionTimer = null;
+    }
+    const futureUnlocks = Array.from(container?.querySelectorAll?.("[data-exit-unlock-at]") || [])
+      .map(el => Number(el.dataset.exitUnlockAt))
+      .filter(value => Number.isFinite(value) && value > Date.now());
+    if (!futureUnlocks.length) return;
+    const delay = Math.max(250, Math.min(...futureUnlocks) - Date.now() + 250);
+    operatorExitProtectionTimer = window.setTimeout(() => {
+      operatorExitProtectionTimer = null;
+      if (state.currentProfile?.role !== "operator") return;
+      renderOperatorView().catch(error => console.error("No se pudo actualizar la habilitación de salida", error));
+    }, delay);
+  }
   const toNumber = (value) => Number.parseFloat(value || 0);
   const normalizePhone = (raw) => String(raw || "").replace(/[^0-9]/g, "");
   const escapeHtml = (str) => String(str ?? "").replace(/[&<>'"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c]));
@@ -939,6 +976,10 @@
   }
 
   async function logout() {
+    if (operatorExitProtectionTimer) {
+      clearTimeout(operatorExitProtectionTimer);
+      operatorExitProtectionTimer = null;
+    }
     await store.signOut();
     state.currentUser = null;
     state.currentProfile = null;
@@ -950,6 +991,10 @@
   }
 
   async function renderOperatorView() {
+    if (operatorExitProtectionTimer) {
+      clearTimeout(operatorExitProtectionTimer);
+      operatorExitProtectionTimer = null;
+    }
     const today = todayISO();
     const [sites, events, assignments] = await Promise.all([store.listSites(), store.listEvents(), store.listAssignments()]);
     state.sites = sites;
@@ -1023,6 +1068,7 @@
     });
     container.querySelector("[data-extra-checkin]")?.addEventListener("click", handleExtraDutyCheckin);
     await renderOperatorConnectivity();
+    scheduleOperatorExitProtectionRefresh(container);
   }
 
   function renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite = null, assignment = null, dayOffEvent = null) {
@@ -1051,7 +1097,13 @@
     const displaySite = detectedSite || assignedSite;
 
     const entryDisabled = checkedIn ? "disabled" : "";
-    const exitDisabled = !checkedIn || checkedOut ? "disabled" : "";
+    const exitProtection = checkedIn && !checkedOut ? exitProtectionState(entryEvent) : { active: false, remainingMs: 0, unlockAt: null };
+    const exitProtected = exitProtection.active;
+    const exitDisabled = !checkedIn || checkedOut || exitProtected ? "disabled" : "";
+    const exitUnlockAtMs = exitProtection.unlockAt?.getTime?.() || null;
+    const exitProtectionNotice = exitProtected
+      ? `<div class="inline-warning" data-exit-unlock-at="${exitUnlockAtMs}"><strong>Protección contra salida accidental activa.</strong><br>La salida se habilita a las ${escapeHtml(exitProtection.unlockAt.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: APP_TIME_ZONE }))} (faltan ${escapeHtml(formatExitProtectionRemaining(exitProtection.remainingMs))}). Si realmente necesitás cerrar el turno antes, avisá al supervisor para una salida manual.</div>`
+      : "";
 
     const entryInfo = entryEvent
       ? `${formatDateTime(entryEvent.client_time || entryEvent.created_at)} · ${entryEvent.recorded_via === "supervisor_manual" ? recordedViaLabel(entryEvent) : gpsSummary(entryEvent)}`
@@ -1112,13 +1164,14 @@
         <div class="checkin-box exit-box">
           <div class="checkpoint-title-row">
             <strong>Salida del servicio</strong>
-            <span class="status-pill ${checkedOut ? "status-present" : "status-pending"}">${checkedOut ? "Registrada" : "Pendiente"}</span>
+            <span class="status-pill ${checkedOut ? "status-present" : exitProtected ? "status-pending" : "status-pending"}">${checkedOut ? "Registrada" : exitProtected ? "Bloqueada temporalmente" : "Pendiente"}</span>
           </div>
+          ${exitProtectionNotice}
           <label class="checkbox-row">
             <input type="checkbox" id="confirm-out-${escapeHtml(shiftId)}" ${exitDisabled} />
             <span>
               <strong>Confirmo que estoy saliendo del servicio</strong><br />
-              <span class="muted small">${checkedOut ? "La salida ya fue registrada." : !checkedIn ? "Primero registrá la entrada." : "Se registra hora y ubicación GPS de salida."}</span>
+              <span class="muted small">${checkedOut ? "La salida ya fue registrada." : !checkedIn ? "Primero registrá la entrada." : exitProtected ? `La salida se habilita ${EXIT_PROTECTION_MINUTES} minutos después de registrar la entrada para evitar una doble marcación accidental.` : "Se registra hora y ubicación GPS de salida."}</span>
             </span>
           </label>
           <label>
@@ -1353,7 +1406,18 @@
 
     if (!entryEvent) return toast("Primero tenés que registrar la entrada.");
     if (existingExit) return toast("La salida ya fue registrada para hoy.");
+
+    const protection = exitProtectionState(entryEvent);
+    if (protection.active) {
+      const unlockTime = protection.unlockAt.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: APP_TIME_ZONE });
+      return toast(`Para evitar una salida accidental, la salida se habilita a las ${unlockTime}. Faltan ${formatExitProtectionRemaining(protection.remainingMs)}.`);
+    }
+
     if (!checkbox?.checked) return toast("Primero marcá el checkbox de salida.");
+
+    const exitSite = byId(state.sites, entryEvent.site_id);
+    const confirmed = window.confirm(`Vas a registrar la SALIDA${exitSite?.name ? ` de ${exitSite.name}` : ""}. Esta acción cierra el turno y no podrás volver a registrar otra salida. ¿Confirmás que realmente estás finalizando el servicio?`);
+    if (!confirmed) return;
 
     try {
       toast("Solicitando GPS de alta precisión...");
