@@ -9,6 +9,9 @@ window.APP_CONFIG = {
   // Protección para evitar que un operario registre salida inmediatamente después de la entrada.
   EXIT_PROTECTION_MINUTES: 10,
 
+  // Cierre automático de turnos sin salida. La misma demora está aplicada en la función SQL de Supabase.
+  AUTO_CHECKOUT_DELAY_MINUTES: 45,
+
   // Nombre operativo usado en mensajes al consorcio.
   COMPANY_NAME: "Clean It"
 };

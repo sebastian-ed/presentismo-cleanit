@@ -554,6 +554,7 @@
   function recordedViaLabel(event) {
     if (!event) return "";
     if (event.recorded_via === "supervisor_manual") return "Carga manual supervisor/admin · sin GPS";
+    if (event.recorded_via === "system_auto" && event.event_type === "checkout") return "Cierre automático del sistema · sin GPS";
     if (event.recorded_via === "system_auto") return "Generado automáticamente por el sistema";
     if (event.recorded_via === "operator") return "Registrado por el operario";
     if (event.event_type === "absent") return "Generado por el sistema";
@@ -607,6 +608,7 @@
 
     if (exitEvent) {
       const manual = exitEvent.recorded_via === "supervisor_manual";
+      if (exitEvent.recorded_via === "system_auto") return { key: "auto_checkout", label: "Cierre automático", className: "status-auto" };
       if (exitEvent.is_inside_site === false) return { key: "exit_outside", label: manual ? "Salida manual · fuera de radio" : "Salida fuera de radio", className: "status-outside" };
       if (exitEvent.observed_status === "early_exit") return { key: "early_exit", label: manual ? "Salida manual · anticipada" : "Salida anticipada", className: "status-late" };
       return { key: "completed", label: manual ? "Salida manual" : "Salida registrada", className: "status-present" };
@@ -634,7 +636,7 @@
     const entryStatus = getEntryStatus(shift, entryEvent, manualEvent, at);
     const exitStatus = getExitStatus(shift, entryEvent, exitEvent, at);
 
-    if (["completed", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(exitStatus.key)) return exitStatus;
+    if (["completed", "auto_checkout", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(exitStatus.key)) return exitStatus;
     if (entryEvent && ["in_service", "in_service_outside", "in_service_late"].includes(exitStatus.key)) {
       if (entryStatus.key === "outside") return { key: "in_service_outside", label: "En servicio · entrada fuera de radio", className: "status-outside" };
       if (entryStatus.key === "late") return { key: "in_service_late", label: "En servicio · entrada tarde", className: "status-late" };
@@ -685,6 +687,9 @@
     }
     if (status.key === "completed") {
       return `${base}\n\nEl operario ${name} registró la salida del servicio correspondiente al horario de ${formatTime(shift.scheduled_start)} a ${formatTime(shift.scheduled_end)}.\n\nQuedamos atentos ante cualquier novedad.`;
+    }
+    if (status.key === "auto_checkout") {
+      return `${base}\n\nEl sistema cerró automáticamente el turno del operario ${name} porque no registró la salida. El horario previsto de finalización era ${formatTime(shift.scheduled_end)}. Estamos revisando la novedad operativa.\n\nQuedamos atentos.`;
     }
     if (status.key === "early_exit") {
       return `${base}\n\nDetectamos una salida anticipada del operario ${name} respecto del horario previsto de finalización (${formatTime(shift.scheduled_end)}). Estamos revisando la situación operativa.\n\nDisculpen las molestias.`;
@@ -991,6 +996,8 @@
   }
 
   async function renderOperatorView() {
+    // Respaldo del cron: si quedó un turno vencido abierto, se cierra antes de mostrar la jornada siguiente.
+    await store.runAutomaticCheckouts?.();
     if (operatorExitProtectionTimer) {
       clearTimeout(operatorExitProtectionTimer);
       operatorExitProtectionTimer = null;
@@ -1106,14 +1113,19 @@
       : "";
 
     const entryInfo = entryEvent
-      ? `${formatDateTime(entryEvent.client_time || entryEvent.created_at)} · ${entryEvent.recorded_via === "supervisor_manual" ? recordedViaLabel(entryEvent) : gpsSummary(entryEvent)}`
+      ? `${formatDateTime(entryEvent.client_time || entryEvent.created_at)} · ${["supervisor_manual", "system_auto"].includes(entryEvent.recorded_via) ? recordedViaLabel(entryEvent) : gpsSummary(entryEvent)}`
       : "Sin entrada registrada";
+    const autoClosed = exitEvent?.recorded_via === "system_auto";
     const exitInfo = exitEvent
-      ? `${formatDateTime(exitEvent.client_time || exitEvent.created_at)} · ${exitEvent.recorded_via === "supervisor_manual" ? recordedViaLabel(exitEvent) : gpsSummary(exitEvent)}`
+      ? `${formatDateTime(exitEvent.client_time || exitEvent.created_at)} · ${["supervisor_manual", "system_auto"].includes(exitEvent.recorded_via) ? recordedViaLabel(exitEvent) : gpsSummary(exitEvent)}${autoClosed && exitEvent.created_at ? ` · procesado ${formatDateTime(exitEvent.created_at)}` : ""}`
       : "Sin salida registrada";
+    const autoCheckoutNotice = autoClosed
+      ? `<div class="inline-warning auto-checkout-notice"><strong>Este turno fue cerrado automáticamente.</strong><br>El operario no registró la salida. Para no dejar el turno abierto, el sistema imputó la salida al horario programado y dejó registrada la hora real en que ejecutó el cierre.</div>`
+      : "";
 
     let statusLabel, statusClass;
-    if (checkedOut) { statusLabel = "Servicio completado"; statusClass = "status-present"; }
+    if (autoClosed) { statusLabel = "Cerrado automáticamente"; statusClass = "status-auto"; }
+    else if (checkedOut) { statusLabel = "Servicio completado"; statusClass = "status-present"; }
     else if (checkedIn) { statusLabel = "En servicio"; statusClass = "status-ok"; }
     else { statusLabel = "Sin marcar"; statusClass = "status-pending"; }
 
@@ -1164,8 +1176,9 @@
         <div class="checkin-box exit-box">
           <div class="checkpoint-title-row">
             <strong>Salida del servicio</strong>
-            <span class="status-pill ${checkedOut ? "status-present" : exitProtected ? "status-pending" : "status-pending"}">${checkedOut ? "Registrada" : exitProtected ? "Bloqueada temporalmente" : "Pendiente"}</span>
+            <span class="status-pill ${autoClosed ? "status-auto" : checkedOut ? "status-present" : exitProtected ? "status-pending" : "status-pending"}">${autoClosed ? "Cierre automático" : checkedOut ? "Registrada" : exitProtected ? "Bloqueada temporalmente" : "Pendiente"}</span>
           </div>
+          ${autoCheckoutNotice}
           ${exitProtectionNotice}
           <label class="checkbox-row">
             <input type="checkbox" id="confirm-out-${escapeHtml(shiftId)}" ${exitDisabled} />
@@ -1753,6 +1766,7 @@
     if (alerts.includes("ausencia / sin entrada") || entry.includes("ausente") || entry.includes("ausencia")) return "critical";
     if (alerts.includes("salida no registrada") || exit.includes("salida no registrada")) return "critical";
     if (alerts.includes("fuera de radio") || entry.includes("fuera de radio") || exit.includes("fuera de radio") || operational.includes("fuera de radio")) return "outside";
+    if (alerts.includes("cierre automatico") || operational.includes("cerrada automaticamente")) return "late";
     if (alerts.includes("llegada tarde") || alerts.includes("salida anticipada") || entry.includes("tarde") || entry.includes("demora") || exit.includes("anticipada")) return "late";
     if (operational.includes("pendiente") || operational.includes("programado") || entry === "pendiente") return "pending";
     if (row?.["Hora entrada"] || operational.includes("jornada") || operational.includes("en servicio")) return "good";
@@ -1971,6 +1985,8 @@
   }
 
   async function renderSupervisorView() {
+    // El cierre principal lo ejecuta Supabase Cron. Esta llamada sirve como respaldo inmediato al abrir el panel.
+    await store.runAutomaticCheckouts?.();
     const date = $("#dashboardDate").value || todayISO();
     await refreshBaseData(date);
     const createdAbsences = await syncAutomaticAbsenceEvents(date);
@@ -2003,9 +2019,9 @@
 
   function statusDetailCell(status, event, emptyText) {
     const when = event ? formatDateTime(event.client_time || event.created_at) : emptyText;
-    const gps = event && event.recorded_via !== "supervisor_manual" && event.event_type !== "day_off" ? `<br><span class="muted small">${escapeHtml(gpsSummary(event))}</span>` : "";
+    const gps = event && !["supervisor_manual", "system_auto"].includes(event.recorded_via) && event.event_type !== "day_off" ? `<br><span class="muted small">${escapeHtml(gpsSummary(event))}</span>` : "";
     const source = event && ["supervisor_manual", "system_auto"].includes(event.recorded_via)
-      ? `<br><span class="event-source-note">${escapeHtml(recordedViaLabel(event))}</span>`
+      ? `<br><span class="event-source-note">${escapeHtml(recordedViaLabel(event))}${event.recorded_via === "system_auto" && event.event_type === "checkout" && event.created_at ? ` · ejecutado ${escapeHtml(formatDateTime(event.created_at))}` : ""}</span>`
       : "";
     return `<span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${escapeHtml(when)}</span>${gps}${source}`;
   }
@@ -2016,7 +2032,7 @@
 
   function hasOperationalAlert(row) {
     return ["late", "absent", "outside"].includes(row.entryStatus.key)
-      || ["early_exit", "exit_outside", "missing_exit", "exit_due"].includes(row.exitStatus.key)
+      || ["auto_checkout", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(row.exitStatus.key)
       || (row.isSelfReportedExtra && ["pending", "rejected"].includes(row.extraValidationStatus));
   }
 
@@ -2028,6 +2044,7 @@
       outside: { label: "Entrada fuera de radio", className: "status-outside" }
     };
     const exitItems = {
+      auto_checkout: { label: "Cierre automático por falta de salida", className: "status-auto" },
       early_exit: { label: "Salida anticipada", className: "status-late" },
       exit_outside: { label: "Salida fuera de radio", className: "status-outside" },
       missing_exit: { label: "Salida no registrada", className: "status-absent" },
@@ -2048,7 +2065,7 @@
     const keys = [row.entryStatus.key, row.exitStatus.key];
     if (keys.includes("absent") || keys.includes("missing_exit")) return 1;
     if (keys.includes("outside") || keys.includes("exit_outside")) return 2;
-    if (keys.includes("early_exit")) return 3;
+    if (keys.includes("auto_checkout") || keys.includes("early_exit")) return 3;
     return 4;
   }
 
@@ -2114,7 +2131,7 @@
   }
 
   function liveStatusFilterDefinitions(rows) {
-    const exitAlertKeys = ["early_exit", "exit_outside", "missing_exit", "exit_due"];
+    const exitAlertKeys = ["auto_checkout", "early_exit", "exit_outside", "missing_exit", "exit_due"];
     const definitions = [
       { key: "all", label: "Todos", tone: "neutral", matches: () => true },
       { key: "alerts", label: "Con alerta", tone: "alert", matches: row => hasOperationalAlert(row) },
@@ -2125,6 +2142,7 @@
       { key: "day_off", label: "Francos", tone: "dayoff", matches: row => row.entryStatus.key === "day_off" },
       { key: "pending", label: "Pendientes", tone: "pending", matches: row => ["scheduled", "on_window"].includes(row.entryStatus.key) },
       { key: "extra", label: "Coberturas / refuerzos", tone: "extra", matches: row => row.isSelfReportedExtra || ["coverage", "reinforcement"].includes(String(row.shift.assignment_type || "")) },
+      { key: "auto_checkout", label: "Cierres automáticos", tone: "exit", matches: row => row.exitStatus.key === "auto_checkout" },
       { key: "exit_alert", label: "Alertas de salida", tone: "exit", matches: row => exitAlertKeys.includes(row.exitStatus.key) }
     ];
     return definitions.map(def => ({ ...def, count: rows.filter(def.matches).length }));
@@ -4520,8 +4538,9 @@
     let exitStatus = dayOffEvent && !entry ? "Franco" : "Sin entrada";
     let exitKey = dayOffEvent && !entry ? "day_off" : "not_started";
     if (exit) {
-      source = source === "Programación" ? (exit.recorded_via === "supervisor_manual" ? "Marcación manual supervisor/admin" : "Marcación") : source;
-      if (exit.is_inside_site === false) { exitStatus = "Salida fuera de radio"; exitKey = "exit_outside"; }
+      source = source === "Programación" ? (exit.recorded_via === "system_auto" ? "Cierre automático del sistema" : exit.recorded_via === "supervisor_manual" ? "Marcación manual supervisor/admin" : "Marcación") : source;
+      if (exit.recorded_via === "system_auto") { exitStatus = "Cierre automático · operario no registró salida"; exitKey = "auto_checkout"; }
+      else if (exit.is_inside_site === false) { exitStatus = "Salida fuera de radio"; exitKey = "exit_outside"; }
       else if (exit.observed_status === "early_exit" || new Date(eventTimestamp(exit)).getTime() < end.getTime() - grace * 60000) { exitStatus = "Salida anticipada"; exitKey = "early_exit"; }
       else { exitStatus = "Salida correcta"; exitKey = "completed"; }
     } else if (entry) {
@@ -4537,6 +4556,7 @@
     if (entryKey === "late" || entryIsLate) alerts.push("Llegada tarde");
     if (entryKey === "outside") alerts.push("Entrada fuera de radio");
     if (entryKey === "absent") alerts.push("Ausencia / sin entrada");
+    if (exitKey === "auto_checkout") alerts.push("Cierre automático por falta de salida");
     if (exitKey === "early_exit") alerts.push("Salida anticipada");
     if (exitKey === "exit_outside") alerts.push("Salida fuera de radio");
     if (exitKey === "missing_exit") alerts.push("Salida no registrada");
@@ -4546,7 +4566,8 @@
     else if (entryKey === "absent") operational = entryStatus;
     else if (entry && !exit) operational = exitStatus;
     else if (entry && exit) {
-      if (exitKey === "early_exit") operational = "Jornada con salida anticipada";
+      if (exitKey === "auto_checkout") operational = "Jornada cerrada automáticamente";
+      else if (exitKey === "early_exit") operational = "Jornada con salida anticipada";
       else if (exitKey === "exit_outside") operational = "Jornada · salida fuera de radio";
       else if (entryKey === "outside") operational = "Jornada completa · entrada fuera de radio";
       else if (entryKey === "late") operational = "Jornada completa · entrada tarde";
@@ -4700,6 +4721,7 @@
       const alerts = [];
       if (entry?.observed_status === "late") alerts.push("Llegada tarde");
       if (entry?.is_inside_site === false) alerts.push("Entrada fuera de radio");
+      if (exit?.recorded_via === "system_auto") alerts.push("Cierre automático por falta de salida");
       if (exit?.observed_status === "early_exit") alerts.push("Salida anticipada");
       if (exit?.is_inside_site === false) alerts.push("Salida fuera de radio");
       const duration = workedDuration(entry, exit);
@@ -4730,14 +4752,14 @@
         "Duración trabajada": duration.label,
         "Minutos trabajados": duration.minutes ?? "",
         "Horas trabajadas (decimal)": duration.decimalHours ?? "",
-        "Estado salida": exit ? (exit.is_inside_site === false ? "Salida fuera de radio" : exit.observed_status === "early_exit" ? "Salida anticipada" : "Salida registrada") : "",
+        "Estado salida": exit ? (exit.recorded_via === "system_auto" ? "Cierre automático · operario no registró salida" : exit.is_inside_site === false ? "Salida fuera de radio" : exit.observed_status === "early_exit" ? "Salida anticipada" : "Salida registrada") : "",
         "Minutos salida anticipada": "",
         "Salida dentro radio": eventInsideLabel(exit),
         "Distancia salida (m)": exit?.distance_m != null ? Math.round(Number(exit.distance_m)) : "",
         "Precisión salida (m)": exit?.gps_accuracy_m != null ? Math.round(Number(exit.gps_accuracy_m)) : "",
         "Lat salida": exit?.lat ?? "",
         "Lng salida": exit?.lng ?? "",
-        "Estado operativo": entry ? (exit ? "Jornada con fichajes" : "En servicio / sin salida") : (dayOff ? "Franco" : eventTypeLabel(sample.event_type)),
+        "Estado operativo": entry ? (exit ? (exit.recorded_via === "system_auto" ? "Jornada cerrada automáticamente" : "Jornada con fichajes") : "En servicio / sin salida") : (dayOff ? "Franco" : eventTypeLabel(sample.event_type)),
         "Alertas RRHH": alerts.join(" | "),
         "Origen del estado": dayOff ? "Franco cargado por supervisor/admin" : "Marcación sin turno reconstruido",
         "Observaciones": events.map(e => e.notes).filter(Boolean).join(" | "),
@@ -4823,6 +4845,7 @@
         "Ausencias registradas": 0,
         "Sin entrada inferido": 0,
         "Salidas anticipadas": 0,
+        "Cierres automáticos": 0,
         "Salidas no registradas": 0
       });
       const item = map.get(key);
@@ -4843,6 +4866,7 @@
       if (row["Origen del estado"] === "Ausencia registrada") item["Ausencias registradas"]++;
       if (row["Origen del estado"] === "Inferido por programación") item["Sin entrada inferido"]++;
       if (String(row["Alertas RRHH"]).includes("Salida anticipada")) item["Salidas anticipadas"]++;
+      if (String(row["Alertas RRHH"]).includes("Cierre automático")) item["Cierres automáticos"]++;
       if (String(row["Alertas RRHH"]).includes("Salida no registrada")) item["Salidas no registradas"]++;
     });
     const dailyHours = operationalHoursByOperatorDate(rows);
@@ -4869,7 +4893,7 @@
     const map = new Map();
     rows.forEach(row => {
       const key = row.Fecha || "Sin fecha";
-      if (!map.has(key)) map.set(key, { "Fecha": key, "Coberturas": 0, "Francos": 0, "Horas confirmadas": "0 h 00 min", "Horas confirmadas (decimal)": 0, "Minutos confirmados": 0, "Ingresos correctos": 0, "Llegadas tarde": 0, "Fichajes fuera de radio": 0, "Ausencias / sin entrada": 0, "Ausencias registradas": 0, "Sin entrada inferido": 0, "Alertas de salida": 0 });
+      if (!map.has(key)) map.set(key, { "Fecha": key, "Coberturas": 0, "Francos": 0, "Horas confirmadas": "0 h 00 min", "Horas confirmadas (decimal)": 0, "Minutos confirmados": 0, "Ingresos correctos": 0, "Llegadas tarde": 0, "Fichajes fuera de radio": 0, "Ausencias / sin entrada": 0, "Ausencias registradas": 0, "Sin entrada inferido": 0, "Cierres automáticos": 0, "Alertas de salida": 0 });
       const item = map.get(key);
       item["Coberturas"]++;
       if (row["Franco"] === "Sí" || row["Estado entrada"] === "Franco") item["Francos"]++;
@@ -4880,7 +4904,8 @@
       if (String(row["Alertas RRHH"]).includes("Ausencia / sin entrada")) item["Ausencias / sin entrada"]++;
       if (row["Origen del estado"] === "Ausencia registrada") item["Ausencias registradas"]++;
       if (row["Origen del estado"] === "Inferido por programación") item["Sin entrada inferido"]++;
-      if (/Salida anticipada|Salida no registrada|Salida fuera de radio/.test(String(row["Alertas RRHH"]))) item["Alertas de salida"]++;
+      if (String(row["Alertas RRHH"]).includes("Cierre automático")) item["Cierres automáticos"]++;
+      if (/Salida anticipada|Salida no registrada|Salida fuera de radio|Cierre automático/.test(String(row["Alertas RRHH"]))) item["Alertas de salida"]++;
     });
     return Array.from(map.values()).map(item => {
       item["Horas confirmadas"] = minutesToHoursLabel(item["Minutos confirmados"]);
@@ -5043,6 +5068,7 @@
       "Salidas fuera de radio": 0,
       "Fichajes fuera de radio": 0,
       "Salidas anticipadas": 0,
+      "Cierres automáticos": 0,
       "Salidas no registradas": 0,
       "Asistencia %": null,
       "Puntualidad %": null
@@ -5069,6 +5095,7 @@
       if (String(row["Estado entrada"] || "").toLowerCase().includes("fuera de radio")) item["Entradas fuera de radio"]++;
       if (String(row["Estado salida"] || "").toLowerCase().includes("fuera de radio")) item["Salidas fuera de radio"]++;
       if (alerts.includes("Salida anticipada")) item["Salidas anticipadas"]++;
+      if (alerts.includes("Cierre automático")) item["Cierres automáticos"]++;
       if (alerts.includes("Salida no registrada")) item["Salidas no registradas"]++;
     });
 
@@ -5159,6 +5186,7 @@
     const lates = summary.reduce((acc, item) => acc + Number(item["Llegadas tarde"] || 0), 0);
     const outside = summary.reduce((acc, item) => acc + Number(item["Fichajes fuera de radio"] || 0), 0);
     const complete = summary.reduce((acc, item) => acc + Number(item["Jornadas completas"] || 0), 0);
+    const autoCheckouts = summary.reduce((acc, item) => acc + Number(item["Cierres automáticos"] || 0), 0);
 
     $("#analyticsKpis").innerHTML = `
       ${kpi("Horas confirmadas", minutesToHoursLabel(totalConfirmed), "status-present")}
@@ -5168,6 +5196,7 @@
       ${kpi("Francos", dayOffs, "status-dayoff")}
       ${kpi("Llegadas tarde", lates, lates ? "status-late" : "status-present")}
       ${kpi("Fichajes fuera de radio", outside, outside ? "status-outside" : "status-present")}
+      ${kpi("Cierres automáticos", autoCheckouts, autoCheckouts ? "status-auto" : "status-present")}
     `;
 
     renderAnalyticsBars("#analyticsHoursChart", summary, "Minutos confirmados", value => minutesToHoursLabel(value), "hours");
@@ -5189,11 +5218,12 @@
         <td>${item["Llegadas tarde"]}<br><span class="muted small">${item["Minutos demora acumulados"]} min acum.</span></td>
         <td>${item["Fichajes fuera de radio"]}</td>
         <td>${item["Salidas anticipadas"]}</td>
+        <td>${item["Cierres automáticos"]}</td>
         <td>${item["Salidas no registradas"]}</td>
         <td>${item["Asistencia %"] == null ? "—" : `${item["Asistencia %"].toFixed(1)}%`}</td>
         <td>${item["Puntualidad %"] == null ? "—" : `${item["Puntualidad %"].toFixed(1)}%`}</td>
       </tr>`).join("");
-    $("#analyticsSummaryTable").innerHTML = `<table><thead><tr><th>Operario</th><th>Horas confirmadas</th><th>Horas pendientes</th><th>Jornadas completas</th><th>Francos</th><th>Ausencias</th><th>Tardanzas</th><th>Fuera de radio</th><th>Salidas anticipadas</th><th>Sin salida</th><th>Asistencia</th><th>Puntualidad</th></tr></thead><tbody>${rowsHtml || `<tr><td colspan="12">Sin datos para el período seleccionado.</td></tr>`}</tbody></table>`;
+    $("#analyticsSummaryTable").innerHTML = `<table><thead><tr><th>Operario</th><th>Horas confirmadas</th><th>Horas pendientes</th><th>Jornadas completas</th><th>Francos</th><th>Ausencias</th><th>Tardanzas</th><th>Fuera de radio</th><th>Salidas anticipadas</th><th>Cierres automáticos</th><th>Sin salida</th><th>Asistencia</th><th>Puntualidad</th></tr></thead><tbody>${rowsHtml || `<tr><td colspan="13">Sin datos para el período seleccionado.</td></tr>`}</tbody></table>`;
 
     const period = state.analyticsPeriodResolved;
     const serviceLabel = service ? ($("#analyticsService")?.selectedOptions?.[0]?.textContent || "Servicio filtrado") : "Todos los servicios";
@@ -5236,6 +5266,7 @@
       "Salidas fuera de radio": item["Salidas fuera de radio"],
       "Fichajes fuera de radio": item["Fichajes fuera de radio"],
       "Salidas anticipadas": item["Salidas anticipadas"],
+      "Cierres automáticos": item["Cierres automáticos"],
       "Salidas no registradas": item["Salidas no registradas"],
       "Asistencia %": item["Asistencia %"],
       "Puntualidad %": item["Puntualidad %"]
@@ -5293,6 +5324,7 @@
     const recorder = event.recorded_by ? byId(profiles, event.recorded_by) : null;
     return {
       "Fecha y hora": eventTimestamp(event) || event.created_at || "",
+      "Hora procesamiento sistema": event.recorded_via === "system_auto" ? (event.created_at || "") : "",
       "Fecha servicio": event.shift_date || "",
       "Operario": op?.full_name || event.operator_id || "",
       "Servicio": site?.name || event.site_id || "",
@@ -5305,7 +5337,7 @@
       "Tipo": event.event_type || "",
       "Tipo legible": eventTypeLabel(event.event_type),
       "Estado": event.observed_status || "",
-      "Estado legible": observedStatusLabel(event.observed_status),
+      "Estado legible": event.recorded_via === "system_auto" && event.event_type === "checkout" ? "Cierre automático por falta de salida" : observedStatusLabel(event.observed_status),
       "Lat": event.lat ?? "",
       "Lng": event.lng ?? "",
       "Precisión (m)": event.gps_accuracy_m ?? "",
@@ -5371,7 +5403,8 @@
       const op = byId(profiles, event.operator_id);
       const site = byId(sites, event.site_id);
       const recorder = event.recorded_by ? byId(profiles, event.recorded_by) : null;
-      return valuesMatchSearch(searchTerm, op?.full_name, site?.name, site?.address, site?.zone, workTypeLabel(event.work_type || "regular"), eventTypeLabel(event.event_type), observedStatusLabel(event.observed_status), recordedViaLabel(event), recorder?.full_name, event.notes, event.shift_date);
+      const eventStatusLabel = event.recorded_via === "system_auto" && event.event_type === "checkout" ? "Cierre automático por falta de salida" : observedStatusLabel(event.observed_status);
+      return valuesMatchSearch(searchTerm, op?.full_name, site?.name, site?.address, site?.zone, workTypeLabel(event.work_type || "regular"), eventTypeLabel(event.event_type), eventStatusLabel, recordedViaLabel(event), recorder?.full_name, event.notes, event.shift_date);
     });
   }
 
@@ -5434,8 +5467,8 @@
           <td>${escapeHtml(op?.full_name || event.operator_id || "—")}</td>
           <td>${escapeHtml(site?.name || event.site_id || "—")}</td>
           <td>${escapeHtml(workTypeLabel(event.work_type || "regular"))}${event.entry_source === "operator_extra" ? `<br><span class="muted small">Declarado por operario · ${escapeHtml(validationLabel(event.validation_status || "pending"))}</span>` : ""}</td>
-          <td><strong>${escapeHtml(eventTypeLabel(event.event_type))}</strong><br><span class="muted small">${escapeHtml(observedStatusLabel(event.observed_status))}</span></td>
-          <td><strong>${escapeHtml(recordedViaLabel(event))}</strong>${recorder?.full_name ? `<br><span class="muted small">${escapeHtml(recorder.full_name)}</span>` : ""}</td>
+          <td><strong>${escapeHtml(eventTypeLabel(event.event_type))}</strong><br><span class="muted small">${escapeHtml(event.recorded_via === "system_auto" && event.event_type === "checkout" ? "Cierre automático" : observedStatusLabel(event.observed_status))}</span></td>
+          <td><strong>${escapeHtml(recordedViaLabel(event))}</strong>${recorder?.full_name ? `<br><span class="muted small">${escapeHtml(recorder.full_name)}</span>` : ""}${event.recorded_via === "system_auto" && event.created_at ? `<br><span class="muted small">Ejecutado ${escapeHtml(formatDateTime(event.created_at))}</span>` : ""}</td>
           <td>${event.lat != null ? `${Number(event.lat).toFixed(6)}, ${Number(event.lng).toFixed(6)}` : "—"}</td>
           <td>${event.gps_accuracy_m != null ? `${Math.round(Number(event.gps_accuracy_m))} m` : "—"}</td>
           <td>${event.distance_m != null ? `${Math.round(Number(event.distance_m))} m` : "—"}</td>

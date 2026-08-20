@@ -554,6 +554,18 @@
       return data || [];
     }
 
+    async runAutomaticCheckouts() {
+      try {
+        const { data, error } = await this.client.rpc("auto_close_overdue_shifts");
+        if (error) throw error;
+        return Number(data || 0);
+      } catch (error) {
+        // Si todavía no se ejecutó la migración o no hay conexión, el fichaje normal sigue funcionando.
+        console.warn("No se pudo ejecutar el cierre automático de salidas", error);
+        return 0;
+      }
+    }
+
     async markShiftDayOff(payload) {
       const params = {
         p_shift_id: payload.shift_id,

@@ -92,6 +92,7 @@ h3 { margin-bottom: 12px; font-size: 1.06rem; }
   white-space: nowrap;
 }
 .status-present { background: #dcfce7; color: var(--success); border-color: #bbf7d0; }
+.status-auto { background: #ffedd5; color: #c2410c; border-color: #fed7aa; }
 .status-late, .status-pending { background: #fef3c7; color: var(--warning); border-color: #fde68a; }
 /* Semántica visual: rojo queda reservado para ausencia/incumplimiento crítico.
    Fuera de radio usa violeta para indicar fichaje existente pero geográficamente atípico. */
