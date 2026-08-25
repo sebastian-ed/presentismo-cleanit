@@ -1,0 +1,1 @@
+Se agregó selección múltiple de gráficos, rankings y tablas en Análisis, con descarga en JPG/PNG y ZIP de la selección.

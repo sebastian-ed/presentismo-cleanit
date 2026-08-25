@@ -1,12 +1,12 @@
-const CACHE_NAME = "cleanit-presentismo-shell-20260825-analyticsexport1";
+const CACHE_NAME = "cleanit-presentismo-shell-20260825-analyticsexport2";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=20260825-analyticsexport1",
-  "./js/config.js?v=20260825-analyticsexport1",
-  "./js/storage.js?v=20260825-analyticsexport1",
-  "./js/app.js?v=20260825-analyticsexport1",
-  "./manifest.webmanifest?v=20260825-analyticsexport1",
+  "./styles.css?v=20260825-analyticsexport2",
+  "./js/config.js?v=20260825-analyticsexport2",
+  "./js/storage.js?v=20260825-analyticsexport2",
+  "./js/app.js?v=20260825-analyticsexport2",
+  "./manifest.webmanifest?v=20260825-analyticsexport2",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2",

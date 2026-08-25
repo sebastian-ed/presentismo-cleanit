@@ -5311,8 +5311,18 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  function syncAnalyticsImageFormatControls(source = null) {
+    const toolbar = $("#analyticsImageFormat");
+    const selection = $("#analyticsSelectionImageFormat");
+    const normalized = source === "jpg" ? "jpg" : "png";
+    if (toolbar && toolbar.value !== normalized) toolbar.value = normalized;
+    if (selection && selection.value !== normalized) selection.value = normalized;
+    return normalized;
+  }
+
   function analyticsImageFormat() {
-    return $("#analyticsImageFormat")?.value === "jpg" ? "jpg" : "png";
+    const preferred = $("#analyticsSelectionImageFormat")?.value || $("#analyticsImageFormat")?.value || "png";
+    return syncAnalyticsImageFormatControls(preferred);
   }
 
   function analyticsExportContext() {
@@ -5577,6 +5587,125 @@
   function analyticsWorkbookBlob(wb = buildAnalyticsWorkbook()) {
     const data = window.XLSX.write(wb, { bookType: "xlsx", type: "array" });
     return new Blob([data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  }
+
+  function analyticsSelectionCheckboxes() {
+    return Array.from(document.querySelectorAll('[data-analytics-selection]'));
+  }
+
+  function getSelectedAnalyticsExports() {
+    return analyticsSelectionCheckboxes().filter(input => input.checked).map(input => ({
+      type: input.dataset.analyticsSelection || "image",
+      key: input.value
+    }));
+  }
+
+  function updateAnalyticsSelectionSummary() {
+    const summaryEl = $("#analyticsSelectionSummary");
+    if (!summaryEl) return;
+    const selected = getSelectedAnalyticsExports();
+    const imageCount = selected.filter(item => item.type === "image").length;
+    const tableCount = selected.filter(item => item.type === "table").length;
+    if (!selected.length) {
+      summaryEl.textContent = "No hay elementos seleccionados.";
+      return;
+    }
+    const parts = [];
+    if (imageCount) parts.push(`${imageCount} imagen${imageCount === 1 ? "" : "es"}`);
+    if (tableCount) parts.push(`${tableCount} tabla${tableCount === 1 ? "" : "s"}`);
+    summaryEl.textContent = `${selected.length} seleccionado${selected.length === 1 ? "" : "s"}: ${parts.join(" y ")}.`;
+  }
+
+  function setAnalyticsSelection(mode) {
+    const boxes = analyticsSelectionCheckboxes();
+    boxes.forEach(input => {
+      if (mode === "clear") input.checked = false;
+      else if (mode === "images") input.checked = input.dataset.analyticsSelection === "image";
+      else if (mode === "tables") input.checked = input.dataset.analyticsSelection === "table";
+      else if (mode === "charts") input.checked = input.dataset.analyticsSelection === "image" && !String(input.value || "").startsWith("ranking-");
+      else if (mode === "rankings") input.checked = input.dataset.analyticsSelection === "image" && String(input.value || "").startsWith("ranking-");
+      else if (mode === "all") input.checked = true;
+    });
+    updateAnalyticsSelectionSummary();
+  }
+
+  function buildAnalyticsSingleTableWorkbook(key) {
+    if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+    const wb = window.XLSX.utils.book_new();
+    if (key === "summary") {
+      const rows = analyticsExportSummaryRows();
+      const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Operario": "Sin datos" }]);
+      applyWorksheetUsability(ws, [30, 20, 22, 20, 24, 20, 20, 20, 22, 22, 20, 18, 24, 22, 22, 22, 22, 22, 22, 16, 16]);
+      window.XLSX.utils.book_append_sheet(wb, ws, "Resumen operarios");
+      return { wb, filename: "resumen-operarios" };
+    }
+    const definition = ANALYTICS_TABLE_DEFINITIONS[key];
+    if (!definition) throw new Error("Tabla no reconocida.");
+    const rows = analyticsRankingSheetRows(key);
+    const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Operario": "Sin datos" }]);
+    applyWorksheetUsability(ws, [12, 34, 24, 22, 22, 22, 22, 22, 18, 18]);
+    window.XLSX.utils.book_append_sheet(wb, ws, definition.title.slice(0, 31));
+    return { wb, filename: definition.filename };
+  }
+
+  async function exportSelectedAnalytics() {
+    const button = $("#downloadSelectedAnalyticsBtn");
+    await withExportButton(button, "Preparando...", async () => {
+      await ensureAnalyticsData();
+      if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+      const selected = getSelectedAnalyticsExports();
+      if (!selected.length) throw new Error("Seleccioná al menos un gráfico, ranking o tabla.");
+      const format = analyticsImageFormat();
+      const context = analyticsExportContext();
+
+      if (selected.length === 1) {
+        const item = selected[0];
+        if (item.type === "image") {
+          const definition = ANALYTICS_EXPORT_DEFINITIONS[item.key];
+          if (!definition) throw new Error("No se encontró la imagen seleccionada.");
+          const blob = await buildAnalyticsImageBlob(item.key, format);
+          downloadBlob(blob, `${definition.filename}-${context.label}.${format}`);
+          toast(`${definition.title} descargado en ${format.toUpperCase()}.`, "success");
+          return;
+        }
+        if (item.key === "workbook") {
+          const wb = buildAnalyticsWorkbook();
+          window.XLSX.writeFile(wb, `analisis-presentismo-cleanit-${context.label}.xlsx`);
+          toast("Excel completo descargado.", "success");
+          return;
+        }
+        const { wb, filename } = buildAnalyticsSingleTableWorkbook(item.key);
+        window.XLSX.writeFile(wb, `${filename}-${context.label}.xlsx`);
+        toast("Tabla Excel descargada.", "success");
+        return;
+      }
+
+      if (!window.JSZip) throw new Error("No se pudo cargar el módulo para generar el ZIP. Verificá tu conexión y volvé a intentar.");
+      const zip = new window.JSZip();
+      const imagesFolder = zip.folder("imagenes");
+      const tablesFolder = zip.folder("tablas");
+      const imageItems = selected.filter(item => item.type === "image");
+      const tableItems = selected.filter(item => item.type === "table");
+
+      for (const item of imageItems) {
+        const definition = ANALYTICS_EXPORT_DEFINITIONS[item.key];
+        if (!definition) continue;
+        imagesFolder.file(`${definition.filename}.${format}`, await buildAnalyticsImageBlob(item.key, format));
+      }
+      for (const item of tableItems) {
+        if (item.key === "workbook") {
+          tablesFolder.file(`analisis-completo-${context.label}.xlsx`, analyticsWorkbookBlob(buildAnalyticsWorkbook()));
+          continue;
+        }
+        const { wb, filename } = buildAnalyticsSingleTableWorkbook(item.key);
+        tablesFolder.file(`${filename}-${context.label}.xlsx`, analyticsWorkbookBlob(wb));
+      }
+      const selectionLines = selected.map(item => `- ${item.type === "image" ? "Imagen" : "Tabla"}: ${item.key}`).join("\n");
+      zip.file("LEEME.txt", `Clean It · Presentismo GPS\nPeríodo: ${context.periodText}\nServicio: ${context.serviceLabel}\nOrden rankings: ${context.orderText}\nFormato imágenes: ${format.toUpperCase()}\n\nSelección incluida:\n${selectionLines}\n`);
+      const bundle = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+      downloadBlob(bundle, `analisis-seleccion-${context.label}.zip`);
+      toast("Selección exportada correctamente.", "success");
+    });
   }
 
   async function exportAnalyticsImage(key, button = null) {
@@ -5966,6 +6095,17 @@
     $("#applyAnalyticsBtn")?.addEventListener("click", () => loadAnalyticsData().catch(error => toast(error.message || "No se pudo generar el análisis.")));
     $("#analyticsService")?.addEventListener("change", renderAnalyticsFromState);
     $("#analyticsOrder")?.addEventListener("change", renderAnalyticsFromState);
+    $("#analyticsImageFormat")?.addEventListener("change", event => syncAnalyticsImageFormatControls(event.target.value));
+    $("#analyticsSelectionImageFormat")?.addEventListener("change", event => syncAnalyticsImageFormatControls(event.target.value));
+    analyticsSelectionCheckboxes().forEach(input => input.addEventListener("change", updateAnalyticsSelectionSummary));
+    $("#analyticsSelectAllChartsBtn")?.addEventListener("click", () => setAnalyticsSelection("charts"));
+    $("#analyticsSelectAllRankingsBtn")?.addEventListener("click", () => setAnalyticsSelection("rankings"));
+    $("#analyticsSelectAllTablesBtn")?.addEventListener("click", () => setAnalyticsSelection("tables"));
+    $("#analyticsSelectEverythingBtn")?.addEventListener("click", () => setAnalyticsSelection("all"));
+    $("#analyticsClearSelectionBtn")?.addEventListener("click", () => setAnalyticsSelection("clear"));
+    $("#downloadSelectedAnalyticsBtn")?.addEventListener("click", () => exportSelectedAnalytics().catch(error => toast(error.message || "No se pudo descargar la selección.")));
+    updateAnalyticsSelectionSummary();
+    syncAnalyticsImageFormatControls($("#analyticsSelectionImageFormat")?.value || $("#analyticsImageFormat")?.value || "png");
     $("#exportAnalyticsCsvBtn")?.addEventListener("click", () => exportAnalyticsCsv().catch(error => toast(error.message || "No se pudo exportar el análisis a CSV.")));
     $("#exportAnalyticsExcelBtn")?.addEventListener("click", () => exportAnalyticsExcel().catch(error => toast(error.message || "No se pudo exportar el análisis a Excel.")));
     $("#downloadAnalyticsBundleBtn")?.addEventListener("click", () => exportAnalyticsBundle().catch(error => toast(error.message || "No se pudo generar el paquete completo.")));

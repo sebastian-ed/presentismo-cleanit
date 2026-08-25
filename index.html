@@ -8,10 +8,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Presentismo GPS" />
   <title>Clean It · Presentismo GPS</title>
-  <link rel="manifest" href="manifest.webmanifest?v=20260825-analyticsexport1" />
+  <link rel="manifest" href="manifest.webmanifest?v=20260825-analyticsexport2" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20260825-analyticsexport1" />
+  <link rel="stylesheet" href="styles.css?v=20260825-analyticsexport2" />
 </head>
 <body>
   <div class="app-shell">
@@ -331,6 +331,66 @@
               </div>
             </div>
             <div id="analyticsRangeSummary" class="muted small analytics-range-summary"></div>
+            <div class="analytics-export-panel">
+              <div class="analytics-export-panel-head">
+                <div>
+                  <h4>Descarga seleccionable de gráficos y tablas</h4>
+                  <p class="muted small no-margin">Elegí uno, varios o todos los gráficos, rankings y tablas. Si seleccionás más de un archivo, se descargan juntos en un ZIP.</p>
+                </div>
+              </div>
+              <div class="analytics-export-panel-toolbar">
+                <label>
+                  <span>Formato de imágenes</span>
+                  <select id="analyticsSelectionImageFormat">
+                    <option value="png" selected>PNG · máxima calidad</option>
+                    <option value="jpg">JPG · alta calidad</option>
+                  </select>
+                </label>
+                <div class="analytics-export-panel-actions">
+                  <button class="ghost-btn small-btn" id="analyticsSelectAllChartsBtn" type="button">Seleccionar gráficos</button>
+                  <button class="ghost-btn small-btn" id="analyticsSelectAllRankingsBtn" type="button">Seleccionar rankings</button>
+                  <button class="ghost-btn small-btn" id="analyticsSelectAllTablesBtn" type="button">Seleccionar tablas</button>
+                  <button class="ghost-btn small-btn" id="analyticsSelectEverythingBtn" type="button">Seleccionar todo</button>
+                  <button class="ghost-btn small-btn" id="analyticsClearSelectionBtn" type="button">Limpiar</button>
+                </div>
+              </div>
+              <div class="analytics-export-selection-grid">
+                <article class="analytics-export-group">
+                  <div class="analytics-export-group-head">
+                    <h5>Gráficos</h5>
+                    <span class="muted small">Imágenes del dashboard</span>
+                  </div>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="image" value="hours" checked /> <span>Horas confirmadas</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="image" value="absence" checked /> <span>Ausencias / sin entrada</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="image" value="late" checked /> <span>Llegadas tarde</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="image" value="outside" checked /> <span>Fichajes fuera de radio</span></label>
+                </article>
+                <article class="analytics-export-group">
+                  <div class="analytics-export-group-head">
+                    <h5>Rankings</h5>
+                    <span class="muted small">Imágenes de rankings</span>
+                  </div>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="image" value="ranking-absence" checked /> <span>Ranking de ausencias</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="image" value="ranking-late" checked /> <span>Ranking de tardanzas</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="image" value="ranking-outside" checked /> <span>Ranking fuera de radio</span></label>
+                </article>
+                <article class="analytics-export-group">
+                  <div class="analytics-export-group-head">
+                    <h5>Tablas Excel</h5>
+                    <span class="muted small">Resumen y rankings</span>
+                  </div>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="table" value="summary" /> <span>Resumen completo por operario</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="table" value="absence" /> <span>Tabla ranking de ausencias</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="table" value="late" /> <span>Tabla ranking de tardanzas</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="table" value="outside" /> <span>Tabla ranking fuera de radio</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="table" value="workbook" checked /> <span>Excel completo del análisis</span></label>
+                </article>
+              </div>
+              <div class="analytics-export-panel-footer">
+                <span id="analyticsSelectionSummary" class="muted small">8 seleccionados: 7 imágenes y 1 tabla.</span>
+                <button class="primary-btn small-btn" id="downloadSelectedAnalyticsBtn" type="button">Descargar selección</button>
+              </div>
+            </div>
           </div>
 
           <div id="analyticsKpis" class="kpi-grid analytics-kpis"></div>
@@ -759,8 +819,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="js/config.js?v=20260825-analyticsexport1"></script>
-  <script src="js/storage.js?v=20260825-analyticsexport1"></script>
-  <script src="js/app.js?v=20260825-analyticsexport1"></script>
+  <script src="js/config.js?v=20260825-analyticsexport2"></script>
+  <script src="js/storage.js?v=20260825-analyticsexport2"></script>
+  <script src="js/app.js?v=20260825-analyticsexport2"></script>
 </body>
 </html>
