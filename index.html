@@ -8,10 +8,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Presentismo GPS" />
   <title>Clean It · Presentismo GPS</title>
-  <link rel="manifest" href="manifest.webmanifest?v=20260820-autocheckout1" />
+  <link rel="manifest" href="manifest.webmanifest?v=20260825-analyticsexport1" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20260820-autocheckout1" />
+  <link rel="stylesheet" href="styles.css?v=20260825-analyticsexport1" />
 </head>
 <body>
   <div class="app-shell">
@@ -316,10 +316,18 @@
                 <span>Orden ranking</span>
                 <select id="analyticsOrder"><option value="desc">Mayor a menor</option><option value="asc">Menor a mayor</option></select>
               </label>
+              <label>
+                <span>Formato imágenes</span>
+                <select id="analyticsImageFormat">
+                  <option value="png" selected>PNG · máxima calidad</option>
+                  <option value="jpg">JPG · alta calidad</option>
+                </select>
+              </label>
               <div class="analytics-toolbar-actions">
                 <button class="secondary-btn small-btn" id="applyAnalyticsBtn" type="button">Actualizar análisis</button>
                 <button class="secondary-btn small-btn" id="exportAnalyticsCsvBtn" type="button">Descargar CSV</button>
-                <button class="primary-btn small-btn" id="exportAnalyticsExcelBtn" type="button">Descargar Excel</button>
+                <button class="secondary-btn small-btn" id="exportAnalyticsExcelBtn" type="button">Excel completo</button>
+                <button class="primary-btn small-btn" id="downloadAnalyticsBundleBtn" type="button">Descargar todo (ZIP)</button>
               </div>
             </div>
             <div id="analyticsRangeSummary" class="muted small analytics-range-summary"></div>
@@ -329,34 +337,44 @@
 
           <div class="analytics-chart-grid">
             <article class="data-card analytics-chart-card">
-              <div class="analytics-card-head"><h3>Horas confirmadas</h3><span class="muted small">Top operarios</span></div>
+              <div class="analytics-card-head"><div><h3>Horas confirmadas</h3><span class="muted small">Top operarios</span></div><button class="secondary-btn tiny-btn" data-export-analytics-image="hours" type="button">Descargar imagen</button></div>
               <div id="analyticsHoursChart" class="analytics-bars"></div>
             </article>
             <article class="data-card analytics-chart-card">
-              <div class="analytics-card-head"><h3>Ausencias / sin entrada</h3><span class="muted small">Incidencias</span></div>
+              <div class="analytics-card-head"><div><h3>Ausencias / sin entrada</h3><span class="muted small">Incidencias</span></div><button class="secondary-btn tiny-btn" data-export-analytics-image="absence" type="button">Descargar imagen</button></div>
               <div id="analyticsAbsenceChart" class="analytics-bars"></div>
             </article>
             <article class="data-card analytics-chart-card">
-              <div class="analytics-card-head"><h3>Llegadas tarde</h3><span class="muted small">Incidencias</span></div>
+              <div class="analytics-card-head"><div><h3>Llegadas tarde</h3><span class="muted small">Incidencias</span></div><button class="secondary-btn tiny-btn" data-export-analytics-image="late" type="button">Descargar imagen</button></div>
               <div id="analyticsLateChart" class="analytics-bars"></div>
             </article>
             <article class="data-card analytics-chart-card">
-              <div class="analytics-card-head"><h3>Fichajes fuera de radio</h3><span class="muted small">Entradas + salidas</span></div>
+              <div class="analytics-card-head"><div><h3>Fichajes fuera de radio</h3><span class="muted small">Entradas + salidas</span></div><button class="secondary-btn tiny-btn" data-export-analytics-image="outside" type="button">Descargar imagen</button></div>
               <div id="analyticsOutsideChart" class="analytics-bars"></div>
             </article>
           </div>
 
           <div class="data-card">
-            <div class="card-title-row">
+            <div class="card-title-row analytics-table-title-row">
               <div><h3>Resumen completo por operario</h3><p class="muted small no-margin">Incluye horas confirmadas, pendientes de validar y principales incidencias.</p></div>
+              <button class="secondary-btn small-btn" data-export-analytics-table="summary" type="button">Descargar tabla Excel</button>
             </div>
             <div id="analyticsSummaryTable" class="responsive-table"></div>
           </div>
 
           <div class="analytics-ranking-grid">
-            <article class="data-card ranking-card"><div class="analytics-card-head"><h3>Ranking de ausencias</h3><span class="muted small">Todos los operarios</span></div><div id="analyticsAbsenceRanking" class="ranking-list"></div></article>
-            <article class="data-card ranking-card"><div class="analytics-card-head"><h3>Ranking de tardanzas</h3><span class="muted small">Todos los operarios</span></div><div id="analyticsLateRanking" class="ranking-list"></div></article>
-            <article class="data-card ranking-card"><div class="analytics-card-head"><h3>Ranking fuera de radio</h3><span class="muted small">Todos los operarios</span></div><div id="analyticsOutsideRanking" class="ranking-list"></div></article>
+            <article class="data-card ranking-card">
+              <div class="analytics-card-head"><div><h3>Ranking de ausencias</h3><span class="muted small">Todos los operarios</span></div><div class="analytics-card-actions"><button class="secondary-btn tiny-btn" data-export-analytics-image="ranking-absence" type="button">Imagen</button><button class="secondary-btn tiny-btn" data-export-analytics-table="absence" type="button">Excel</button></div></div>
+              <div id="analyticsAbsenceRanking" class="ranking-list"></div>
+            </article>
+            <article class="data-card ranking-card">
+              <div class="analytics-card-head"><div><h3>Ranking de tardanzas</h3><span class="muted small">Todos los operarios</span></div><div class="analytics-card-actions"><button class="secondary-btn tiny-btn" data-export-analytics-image="ranking-late" type="button">Imagen</button><button class="secondary-btn tiny-btn" data-export-analytics-table="late" type="button">Excel</button></div></div>
+              <div id="analyticsLateRanking" class="ranking-list"></div>
+            </article>
+            <article class="data-card ranking-card">
+              <div class="analytics-card-head"><div><h3>Ranking fuera de radio</h3><span class="muted small">Todos los operarios</span></div><div class="analytics-card-actions"><button class="secondary-btn tiny-btn" data-export-analytics-image="ranking-outside" type="button">Imagen</button><button class="secondary-btn tiny-btn" data-export-analytics-table="outside" type="button">Excel</button></div></div>
+              <div id="analyticsOutsideRanking" class="ranking-list"></div>
+            </article>
           </div>
         </section>
 
@@ -739,9 +757,10 @@
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="js/config.js?v=20260820-autocheckout1"></script>
-  <script src="js/storage.js?v=20260820-autocheckout1"></script>
-  <script src="js/app.js?v=20260820-autocheckout1"></script>
+  <script src="js/config.js?v=20260825-analyticsexport1"></script>
+  <script src="js/storage.js?v=20260825-analyticsexport1"></script>
+  <script src="js/app.js?v=20260825-analyticsexport1"></script>
 </body>
 </html>

@@ -1,16 +1,17 @@
-const CACHE_NAME = "cleanit-presentismo-shell-20260820-autocheckout1";
+const CACHE_NAME = "cleanit-presentismo-shell-20260825-analyticsexport1";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=20260820-autocheckout1",
-  "./js/config.js?v=20260820-autocheckout1",
-  "./js/storage.js?v=20260820-autocheckout1",
-  "./js/app.js?v=20260820-autocheckout1",
-  "./manifest.webmanifest?v=20260820-autocheckout1",
+  "./styles.css?v=20260825-analyticsexport1",
+  "./js/config.js?v=20260825-analyticsexport1",
+  "./js/storage.js?v=20260825-analyticsexport1",
+  "./js/app.js?v=20260825-analyticsexport1",
+  "./manifest.webmanifest?v=20260825-analyticsexport1",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2",
   "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js",
+  "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js",
   "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js",
   "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
 ];

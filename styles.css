@@ -1567,3 +1567,47 @@ body.modal-open { overflow: hidden; }
 .ops-popup-main-status.ops-tone-critical, .ops-popup-status.ops-tone-critical { background: #fee2e2 !important; color: #b91c1c; border-color: #fecaca; }
 .ops-popup-main-status.ops-tone-pending, .ops-popup-status.ops-tone-pending { background: #e0f2fe !important; color: #0369a1; border-color: #bae6fd; }
 .ops-popup-main-status.ops-tone-inactive, .ops-popup-status.ops-tone-inactive { background: #eef2f7 !important; color: #475569; border-color: #cbd5e1; }
+
+/* Exportaciones de Análisis · 2026-08-25 */
+.tiny-btn {
+  min-height: 30px;
+  padding: 6px 9px;
+  font-size: .72rem;
+  line-height: 1.1;
+  border-radius: 9px;
+  white-space: nowrap;
+}
+.analytics-card-head > div:first-child {
+  min-width: 0;
+}
+.analytics-card-head > div:first-child .muted {
+  display: block;
+  margin-top: 2px;
+}
+.analytics-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+}
+.analytics-table-title-row {
+  align-items: center;
+}
+@media (max-width: 720px) {
+  .analytics-card-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .analytics-card-actions,
+  .analytics-card-head > .tiny-btn {
+    width: 100%;
+  }
+  .analytics-card-actions .tiny-btn,
+  .analytics-card-head > .tiny-btn {
+    flex: 1 1 auto;
+  }
+  .analytics-table-title-row {
+    align-items: stretch;
+  }
+}

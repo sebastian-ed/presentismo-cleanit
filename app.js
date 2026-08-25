@@ -5273,6 +5273,383 @@
     }));
   }
 
+  const ANALYTICS_EXPORT_DEFINITIONS = {
+    hours: { kind: "chart", title: "Horas confirmadas", subtitle: "Top operarios", metric: "Minutos confirmados", tone: "#0f766e", formatter: value => minutesToHoursLabel(value), filename: "horas-confirmadas" },
+    absence: { kind: "chart", title: "Ausencias / sin entrada", subtitle: "Incidencias", metric: "Ausencias / sin entrada", tone: "#b91c1c", formatter: value => String(value), filename: "ausencias" },
+    late: { kind: "chart", title: "Llegadas tarde", subtitle: "Incidencias", metric: "Llegadas tarde", tone: "#b45309", formatter: value => String(value), filename: "llegadas-tarde" },
+    outside: { kind: "chart", title: "Fichajes fuera de radio", subtitle: "Entradas + salidas", metric: "Fichajes fuera de radio", tone: "#6d28d9", formatter: value => String(value), filename: "fuera-de-radio" },
+    "ranking-absence": { kind: "ranking", title: "Ranking de ausencias", subtitle: "Ausencias / sin entrada", metric: "Ausencias / sin entrada", tone: "#b91c1c", formatter: value => String(value), filename: "ranking-ausencias" },
+    "ranking-late": { kind: "ranking", title: "Ranking de tardanzas", subtitle: "Llegadas tarde", metric: "Llegadas tarde", tone: "#b45309", formatter: value => String(value), filename: "ranking-tardanzas" },
+    "ranking-outside": { kind: "ranking", title: "Ranking fuera de radio", subtitle: "Entradas + salidas fuera del radio", metric: "Fichajes fuera de radio", tone: "#6d28d9", formatter: value => String(value), filename: "ranking-fuera-de-radio" }
+  };
+
+  const ANALYTICS_TABLE_DEFINITIONS = {
+    absence: { title: "Ranking de ausencias", metric: "Ausencias / sin entrada", valueHeader: "Ausencias / sin entrada", formatter: value => String(value), filename: "ranking-ausencias" },
+    late: { title: "Ranking de tardanzas", metric: "Llegadas tarde", valueHeader: "Llegadas tarde", formatter: value => String(value), filename: "ranking-tardanzas" },
+    outside: { title: "Ranking fuera de radio", metric: "Fichajes fuera de radio", valueHeader: "Fichajes fuera de radio", formatter: value => String(value), filename: "ranking-fuera-de-radio" },
+    hours: { title: "Ranking de horas confirmadas", metric: "Minutos confirmados", valueHeader: "Minutos confirmados", formatter: value => minutesToHoursLabel(value), filename: "ranking-horas-confirmadas" }
+  };
+
+  function safeFilenamePart(value, fallback = "periodo") {
+    const normalized = String(value || fallback)
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-zA-Z0-9._-]+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .toLowerCase();
+    return normalized || fallback;
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function analyticsImageFormat() {
+    return $("#analyticsImageFormat")?.value === "jpg" ? "jpg" : "png";
+  }
+
+  function analyticsExportContext() {
+    const period = state.analyticsPeriodResolved;
+    const service = $("#analyticsService")?.value || "";
+    const serviceLabel = service ? ($("#analyticsService")?.selectedOptions?.[0]?.textContent || "Servicio filtrado") : "Todos los servicios";
+    const periodText = period ? `${period.from || "Inicio"} → ${period.to || todayISO()}` : "Período seleccionado";
+    const orderText = $("#analyticsOrder")?.value === "asc" ? "Menor a mayor" : "Mayor a menor";
+    const label = safeFilenamePart(period?.label || periodText);
+    return { periodText, serviceLabel, orderText, label };
+  }
+
+  async function ensureAnalyticsData() {
+    if (!state.analyticsLoaded || !Array.isArray(state.analyticsSummary)) await loadAnalyticsData();
+  }
+
+  function analyticsSortedRows(metric, limit = null) {
+    const rows = analyticsSort(state.analyticsSummary || [], metric);
+    return Number.isFinite(limit) ? rows.slice(0, limit) : rows;
+  }
+
+  function truncateCanvasText(ctx, value, maxWidth) {
+    const text = String(value ?? "");
+    if (ctx.measureText(text).width <= maxWidth) return text;
+    const ellipsis = "…";
+    let low = 0;
+    let high = text.length;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (ctx.measureText(text.slice(0, mid) + ellipsis).width <= maxWidth) low = mid;
+      else high = mid - 1;
+    }
+    return text.slice(0, low) + ellipsis;
+  }
+
+  function roundedCanvasRect(ctx, x, y, width, height, radius) {
+    const r = Math.max(0, Math.min(radius, width / 2, height / 2));
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + width, y, x + width, y + height, r);
+    ctx.arcTo(x + width, y + height, x, y + height, r);
+    ctx.arcTo(x, y + height, x, y, r);
+    ctx.arcTo(x, y, x + width, y, r);
+    ctx.closePath();
+  }
+
+  function drawAnalyticsImageHeader(ctx, width, title, subtitle, accent) {
+    const context = analyticsExportContext();
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, ctx.canvas.height);
+    ctx.fillStyle = "#0f172a";
+    ctx.font = "800 46px Arial, sans-serif";
+    ctx.fillText("CLEAN IT · PRESENTISMO GPS", 110, 105);
+    ctx.fillStyle = accent;
+    roundedCanvasRect(ctx, 110, 142, 150, 10, 5);
+    ctx.fill();
+    ctx.fillStyle = "#0f172a";
+    ctx.font = "800 72px Arial, sans-serif";
+    ctx.fillText(title, 110, 245);
+    ctx.fillStyle = "#475569";
+    ctx.font = "500 32px Arial, sans-serif";
+    ctx.fillText(subtitle, 110, 296);
+    ctx.font = "500 28px Arial, sans-serif";
+    ctx.fillText(`${context.periodText} · ${context.serviceLabel} · Orden: ${context.orderText}`, 110, 345);
+  }
+
+  function drawAnalyticsImageFooter(ctx, width, height) {
+    ctx.strokeStyle = "#e2e8f0";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(110, height - 92);
+    ctx.lineTo(width - 110, height - 92);
+    ctx.stroke();
+    ctx.fillStyle = "#64748b";
+    ctx.font = "500 25px Arial, sans-serif";
+    ctx.fillText(`Generado ${formatDateTime(new Date().toISOString())}`, 110, height - 46);
+    ctx.textAlign = "right";
+    ctx.fillText("Clean It · Análisis de presentismo", width - 110, height - 46);
+    ctx.textAlign = "left";
+  }
+
+  function buildAnalyticsChartCanvas(definition) {
+    const rows = analyticsSortedRows(definition.metric, 10);
+    const width = 2400;
+    const height = 1600;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    drawAnalyticsImageHeader(ctx, width, definition.title, definition.subtitle, definition.tone);
+
+    const left = 110;
+    const right = 110;
+    const contentWidth = width - left - right;
+    const startY = 410;
+    const rowHeight = 105;
+    const max = Math.max(0, ...rows.map(item => Number(item[definition.metric] || 0)));
+
+    if (!rows.length) {
+      ctx.fillStyle = "#64748b";
+      ctx.font = "600 38px Arial, sans-serif";
+      ctx.fillText("Sin datos para el período seleccionado.", left, startY + 80);
+    } else {
+      rows.forEach((item, index) => {
+        const y = startY + index * rowHeight;
+        const value = Number(item[definition.metric] || 0);
+        const ratio = max > 0 ? value / max : 0;
+        const label = `${index + 1}. ${item.Operario || "Sin identificar"}`;
+        ctx.font = "700 30px Arial, sans-serif";
+        ctx.fillStyle = "#334155";
+        ctx.fillText(truncateCanvasText(ctx, label, contentWidth - 420), left, y + 30);
+        ctx.textAlign = "right";
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "800 30px Arial, sans-serif";
+        ctx.fillText(definition.formatter(value, item), width - right, y + 30);
+        ctx.textAlign = "left";
+
+        const barY = y + 49;
+        const barH = 30;
+        ctx.fillStyle = "#e2e8f0";
+        roundedCanvasRect(ctx, left, barY, contentWidth, barH, 15);
+        ctx.fill();
+        if (ratio > 0) {
+          ctx.fillStyle = definition.tone;
+          roundedCanvasRect(ctx, left, barY, Math.max(18, contentWidth * ratio), barH, 15);
+          ctx.fill();
+        }
+      });
+    }
+    drawAnalyticsImageFooter(ctx, width, height);
+    return canvas;
+  }
+
+  function buildAnalyticsRankingCanvas(definition) {
+    const rows = analyticsSortedRows(definition.metric);
+    const width = 2200;
+    const rowHeight = 72;
+    const height = Math.max(1150, Math.min(16000, 520 + Math.max(1, rows.length) * rowHeight));
+    const maxRows = Math.max(1, Math.floor((height - 520) / rowHeight));
+    const visibleRows = rows.slice(0, maxRows);
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    drawAnalyticsImageHeader(ctx, width, definition.title, definition.subtitle, definition.tone);
+
+    const x = 110;
+    const tableWidth = width - 220;
+    const startY = 395;
+    ctx.fillStyle = "#0f172a";
+    roundedCanvasRect(ctx, x, startY, tableWidth, 64, 16);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "800 27px Arial, sans-serif";
+    ctx.fillText("#", x + 28, startY + 42);
+    ctx.fillText("OPERARIO", x + 118, startY + 42);
+    ctx.textAlign = "right";
+    ctx.fillText("VALOR", x + tableWidth - 28, startY + 42);
+    ctx.textAlign = "left";
+
+    if (!visibleRows.length) {
+      ctx.fillStyle = "#64748b";
+      ctx.font = "600 34px Arial, sans-serif";
+      ctx.fillText("Sin datos para el período seleccionado.", x + 28, startY + 130);
+    } else {
+      visibleRows.forEach((item, index) => {
+        const y = startY + 64 + index * rowHeight;
+        ctx.fillStyle = index % 2 === 0 ? "#f8fafc" : "#ffffff";
+        ctx.fillRect(x, y, tableWidth, rowHeight);
+        ctx.strokeStyle = "#e2e8f0";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, y + rowHeight);
+        ctx.lineTo(x + tableWidth, y + rowHeight);
+        ctx.stroke();
+        ctx.fillStyle = definition.tone;
+        ctx.font = "800 28px Arial, sans-serif";
+        ctx.fillText(String(index + 1), x + 28, y + 46);
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "700 28px Arial, sans-serif";
+        ctx.fillText(truncateCanvasText(ctx, item.Operario || "Sin identificar", tableWidth - 520), x + 118, y + 46);
+        ctx.textAlign = "right";
+        ctx.font = "800 28px Arial, sans-serif";
+        ctx.fillText(definition.formatter(Number(item[definition.metric] || 0), item), x + tableWidth - 28, y + 46);
+        ctx.textAlign = "left";
+      });
+    }
+    if (rows.length > visibleRows.length) {
+      ctx.fillStyle = "#b45309";
+      ctx.font = "700 25px Arial, sans-serif";
+      ctx.fillText(`La imagen incluye los primeros ${visibleRows.length} de ${rows.length} operarios. El Excel incluye el ranking completo.`, x, height - 120);
+    }
+    drawAnalyticsImageFooter(ctx, width, height);
+    return canvas;
+  }
+
+  function canvasToImageBlob(canvas, format) {
+    const mime = format === "jpg" ? "image/jpeg" : "image/png";
+    const quality = format === "jpg" ? 0.95 : undefined;
+    return new Promise((resolve, reject) => {
+      canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error("No se pudo generar la imagen.")), mime, quality);
+    });
+  }
+
+  async function buildAnalyticsImageBlob(key, format = analyticsImageFormat()) {
+    const definition = ANALYTICS_EXPORT_DEFINITIONS[key];
+    if (!definition) throw new Error("Exportación no reconocida.");
+    const canvas = definition.kind === "ranking" ? buildAnalyticsRankingCanvas(definition) : buildAnalyticsChartCanvas(definition);
+    return canvasToImageBlob(canvas, format);
+  }
+
+  function analyticsRankingSheetRows(key) {
+    const definition = ANALYTICS_TABLE_DEFINITIONS[key];
+    if (!definition) return [];
+    return analyticsSortedRows(definition.metric).map((item, index) => ({
+      "Posición": index + 1,
+      "Operario": item.Operario,
+      [definition.valueHeader]: Number(item[definition.metric] || 0),
+      "Valor legible": definition.formatter(Number(item[definition.metric] || 0), item),
+      "Horas confirmadas": item["Horas confirmadas"],
+      "Ausencias / sin entrada": item["Ausencias / sin entrada"],
+      "Llegadas tarde": item["Llegadas tarde"],
+      "Fichajes fuera de radio": item["Fichajes fuera de radio"],
+      "Asistencia %": item["Asistencia %"],
+      "Puntualidad %": item["Puntualidad %"]
+    }));
+  }
+
+  function buildAnalyticsWorkbook() {
+    if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+    const summary = analyticsExportSummaryRows();
+    const daily = state.analyticsDaily || [];
+    const detail = state.analyticsRows || [];
+    const byDate = operationalSummaryByDate(detail);
+    const wb = window.XLSX.utils.book_new();
+
+    const wsSummary = window.XLSX.utils.json_to_sheet(summary.length ? summary : [{ "Operario": "Sin datos" }]);
+    applyWorksheetUsability(wsSummary, [30, 20, 22, 20, 24, 20, 20, 20, 22, 22, 20, 18, 24, 22, 22, 22, 22, 22, 22, 16, 16]);
+    window.XLSX.utils.book_append_sheet(wb, wsSummary, "Resumen operarios");
+
+    const wsDaily = window.XLSX.utils.json_to_sheet(daily.length ? daily : [{ "Fecha": "Sin datos" }]);
+    applyWorksheetUsability(wsDaily, [14, 38, 30, 42, 22, 20, 20, 22, 24, 24, 22, 20]);
+    window.XLSX.utils.book_append_sheet(wb, wsDaily, "Horas por operario y día");
+
+    const wsDetail = window.XLSX.utils.json_to_sheet(detail.length ? detail : [{ "Sin datos": "No hay registros en el período seleccionado." }]);
+    applyWorksheetUsability(wsDetail, [14, 30, 30, 28, 20, 24, 18, 30, 20, 18, 28, 24, 18, 16, 18, 22, 18, 18, 18, 22, 18, 20, 18, 18, 18, 18, 36, 40, 30, 42]);
+    window.XLSX.utils.book_append_sheet(wb, wsDetail, "Detalle RRHH");
+
+    const wsDate = window.XLSX.utils.json_to_sheet(byDate.length ? byDate : [{ "Fecha": "Sin datos" }]);
+    applyWorksheetUsability(wsDate, [14, 18, 22, 22, 20, 20, 20, 20, 22, 22, 22, 20]);
+    window.XLSX.utils.book_append_sheet(wb, wsDate, "Resumen por día");
+
+    [["hours", "Ranking horas"], ["absence", "Ranking ausencias"], ["late", "Ranking tardanzas"], ["outside", "Ranking fuera radio"]].forEach(([key, sheetName]) => {
+      const rows = analyticsRankingSheetRows(key);
+      const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Operario": "Sin datos" }]);
+      applyWorksheetUsability(ws, [12, 34, 24, 22, 22, 22, 22, 22, 18, 18]);
+      window.XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    });
+    return wb;
+  }
+
+  function analyticsWorkbookBlob(wb = buildAnalyticsWorkbook()) {
+    const data = window.XLSX.write(wb, { bookType: "xlsx", type: "array" });
+    return new Blob([data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  }
+
+  async function exportAnalyticsImage(key, button = null) {
+    await withExportButton(button, "Generando...", async () => {
+      await ensureAnalyticsData();
+      const definition = ANALYTICS_EXPORT_DEFINITIONS[key];
+      if (!definition) throw new Error("No se encontró el gráfico o ranking.");
+      const format = analyticsImageFormat();
+      const blob = await buildAnalyticsImageBlob(key, format);
+      const context = analyticsExportContext();
+      downloadBlob(blob, `${definition.filename}-${context.label}.${format}`);
+      toast(`${definition.title} descargado en ${format.toUpperCase()} de alta resolución.`, "success");
+    });
+  }
+
+  async function exportAnalyticsTable(key, button = null) {
+    await withExportButton(button, "Generando...", async () => {
+      await ensureAnalyticsData();
+      if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+      const context = analyticsExportContext();
+      const wb = window.XLSX.utils.book_new();
+      if (key === "summary") {
+        const rows = analyticsExportSummaryRows();
+        const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Operario": "Sin datos" }]);
+        applyWorksheetUsability(ws, [30, 20, 22, 20, 24, 20, 20, 20, 22, 22, 20, 18, 24, 22, 22, 22, 22, 22, 22, 16, 16]);
+        window.XLSX.utils.book_append_sheet(wb, ws, "Resumen operarios");
+        window.XLSX.writeFile(wb, `resumen-operarios-${context.label}.xlsx`);
+        toast("Tabla resumen descargada en Excel.", "success");
+        return;
+      }
+      const definition = ANALYTICS_TABLE_DEFINITIONS[key];
+      if (!definition) throw new Error("Tabla no reconocida.");
+      const rows = analyticsRankingSheetRows(key);
+      const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Operario": "Sin datos" }]);
+      applyWorksheetUsability(ws, [12, 34, 24, 22, 22, 22, 22, 22, 18, 18]);
+      window.XLSX.utils.book_append_sheet(wb, ws, definition.title.slice(0, 31));
+      window.XLSX.writeFile(wb, `${definition.filename}-${context.label}.xlsx`);
+      toast(`${definition.title} descargado en Excel.`, "success");
+    });
+  }
+
+  async function exportAnalyticsBundle() {
+    const button = $("#downloadAnalyticsBundleBtn");
+    await withExportButton(button, "Armando ZIP...", async () => {
+      await ensureAnalyticsData();
+      if (!window.JSZip) throw new Error("No se pudo cargar el módulo para generar el ZIP. Verificá tu conexión y volvé a intentar.");
+      if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+      const format = analyticsImageFormat();
+      const context = analyticsExportContext();
+      const zip = new window.JSZip();
+      const chartFolder = zip.folder("graficos");
+      const rankingFolder = zip.folder("rankings");
+      const tableFolder = zip.folder("tablas");
+
+      for (const key of ["hours", "absence", "late", "outside"]) {
+        const definition = ANALYTICS_EXPORT_DEFINITIONS[key];
+        chartFolder.file(`${definition.filename}.${format}`, await buildAnalyticsImageBlob(key, format));
+      }
+      for (const key of ["ranking-absence", "ranking-late", "ranking-outside"]) {
+        const definition = ANALYTICS_EXPORT_DEFINITIONS[key];
+        rankingFolder.file(`${definition.filename}.${format}`, await buildAnalyticsImageBlob(key, format));
+      }
+
+      const wb = buildAnalyticsWorkbook();
+      tableFolder.file(`analisis-completo-${context.label}.xlsx`, analyticsWorkbookBlob(wb));
+      zip.file("LEEME.txt", `Clean It · Presentismo GPS\nPeríodo: ${context.periodText}\nServicio: ${context.serviceLabel}\nOrden rankings: ${context.orderText}\nFormato imágenes: ${format.toUpperCase()}\n\nIncluye 4 gráficos, 3 rankings en imagen y un Excel con resumen, horas por día, detalle RRHH y rankings completos.\n`);
+
+      const bundle = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+      downloadBlob(bundle, `analisis-presentismo-cleanit-${context.label}.zip`);
+      toast("Paquete completo generado: gráficos, rankings y tablas Excel.", "success");
+    });
+  }
+
   async function exportAnalyticsCsv() {
     const button = $("#exportAnalyticsCsvBtn");
     await withExportButton(button, "Generando...", async () => {
@@ -5288,33 +5665,11 @@
   async function exportAnalyticsExcel() {
     const button = $("#exportAnalyticsExcelBtn");
     await withExportButton(button, "Generando...", async () => {
-      if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
-      await loadAnalyticsData();
-      const summary = analyticsExportSummaryRows();
-      const daily = state.analyticsDaily || [];
-      const detail = state.analyticsRows || [];
-      const byDate = operationalSummaryByDate(detail);
-      const wb = window.XLSX.utils.book_new();
-
-      const wsSummary = window.XLSX.utils.json_to_sheet(summary.length ? summary : [{ "Operario": "Sin datos" }]);
-      applyWorksheetUsability(wsSummary, [30, 20, 22, 20, 24, 20, 20, 20, 22, 22, 20, 18, 24, 22, 22, 22, 22, 22, 22, 16, 16]);
-      window.XLSX.utils.book_append_sheet(wb, wsSummary, "Resumen operarios");
-
-      const wsDaily = window.XLSX.utils.json_to_sheet(daily.length ? daily : [{ "Fecha": "Sin datos" }]);
-      applyWorksheetUsability(wsDaily, [14, 38, 30, 42, 22, 20, 20, 22, 24, 24, 22, 20]);
-      window.XLSX.utils.book_append_sheet(wb, wsDaily, "Horas por operario y día");
-
-      const wsDetail = window.XLSX.utils.json_to_sheet(detail.length ? detail : [{ "Sin datos": "No hay registros en el período seleccionado." }]);
-      applyWorksheetUsability(wsDetail, [14, 30, 30, 28, 20, 24, 18, 30, 20, 18, 28, 24, 18, 16, 18, 22, 18, 18, 18, 22, 18, 20, 18, 18, 18, 18, 36, 40, 30, 42]);
-      window.XLSX.utils.book_append_sheet(wb, wsDetail, "Detalle RRHH");
-
-      const wsDate = window.XLSX.utils.json_to_sheet(byDate.length ? byDate : [{ "Fecha": "Sin datos" }]);
-      applyWorksheetUsability(wsDate, [14, 18, 22, 22, 20, 20, 20, 20, 22, 22, 22, 20]);
-      window.XLSX.utils.book_append_sheet(wb, wsDate, "Resumen por día");
-
+      await ensureAnalyticsData();
+      const wb = buildAnalyticsWorkbook();
       const label = state.analyticsPeriodResolved?.label || "periodo";
       window.XLSX.writeFile(wb, `analisis-presentismo-cleanit-${label}.xlsx`);
-      toast("Excel de análisis generado con resumen, horas diarias y detalle RRHH.", "success");
+      toast("Excel completo generado con resumen, horas diarias, detalle RRHH y rankings.", "success");
     });
   }
 
@@ -5613,6 +5968,16 @@
     $("#analyticsOrder")?.addEventListener("change", renderAnalyticsFromState);
     $("#exportAnalyticsCsvBtn")?.addEventListener("click", () => exportAnalyticsCsv().catch(error => toast(error.message || "No se pudo exportar el análisis a CSV.")));
     $("#exportAnalyticsExcelBtn")?.addEventListener("click", () => exportAnalyticsExcel().catch(error => toast(error.message || "No se pudo exportar el análisis a Excel.")));
+    $("#downloadAnalyticsBundleBtn")?.addEventListener("click", () => exportAnalyticsBundle().catch(error => toast(error.message || "No se pudo generar el paquete completo.")));
+    $("#analyticsTab")?.addEventListener("click", event => {
+      const imageButton = event.target.closest("[data-export-analytics-image]");
+      if (imageButton) {
+        exportAnalyticsImage(imageButton.dataset.exportAnalyticsImage, imageButton).catch(error => toast(error.message || "No se pudo descargar la imagen."));
+        return;
+      }
+      const tableButton = event.target.closest("[data-export-analytics-table]");
+      if (tableButton) exportAnalyticsTable(tableButton.dataset.exportAnalyticsTable, tableButton).catch(error => toast(error.message || "No se pudo descargar la tabla."));
+    });
     $("#exportLiveCsvBtn").addEventListener("click", () => exportLiveCsv().catch(error => toast(error.message || "No se pudo exportar el estado operativo.")));
     $("#exportLiveExcelBtn").addEventListener("click", () => exportLiveExcel().catch(error => toast(error.message || "No se pudo exportar el estado operativo.")));
     $("#kpiGrid").addEventListener("click", (event) => {
