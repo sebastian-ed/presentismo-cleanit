@@ -561,6 +561,40 @@
     return "Registrado por el operario";
   }
 
+  function getEntryTimingInfo(shift, entryEvent) {
+    const empty = {
+      isLate: false,
+      isAfterAbsenceThreshold: false,
+      lateMinutes: null,
+      graceMinutes: Number(shift?.grace_minutes ?? 10),
+      absenceAfterMinutes: Number(shift?.absence_after_minutes ?? 30),
+      entryMoment: null,
+      start: null
+    };
+    if (!shift || !entryEvent || !shift.scheduled_start) return empty;
+
+    const start = getScheduledDateTime(shift, "scheduled_start");
+    const entryMoment = new Date(entryEvent.client_time || entryEvent.created_at);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(entryMoment.getTime())) return { ...empty, start, entryMoment };
+
+    const graceMinutes = Number(shift.grace_minutes ?? 10);
+    const absenceAfterMinutes = Number(shift.absence_after_minutes ?? 30);
+    const rawMinutes = Math.max(0, Math.round((entryMoment.getTime() - start.getTime()) / 60000));
+    const isLateByTime = entryMoment.getTime() > start.getTime() + graceMinutes * 60000;
+    const isLate = isLateByTime || entryEvent.observed_status === "late";
+    const isAfterAbsenceThreshold = entryMoment.getTime() >= start.getTime() + absenceAfterMinutes * 60000;
+
+    return {
+      isLate,
+      isAfterAbsenceThreshold: isLate && isAfterAbsenceThreshold,
+      lateMinutes: isLate ? rawMinutes : 0,
+      graceMinutes,
+      absenceAfterMinutes,
+      entryMoment,
+      start
+    };
+  }
+
   function getEntryStatus(shift, entryEvent = getEntryEvent(shift), manualEvent = getManualEvent(shift), at = new Date()) {
     const start = getScheduledDateTime(shift, "scheduled_start");
     const grace = Number(shift.grace_minutes ?? 10);
@@ -568,9 +602,33 @@
 
     if (entryEvent) {
       const manual = entryEvent.recorded_via === "supervisor_manual";
-      if (entryEvent.is_inside_site === false) return { key: "outside", label: manual ? "Entrada manual · fuera de radio" : "Entrada fuera de radio", className: "status-outside" };
-      if (entryEvent.observed_status === "late") return { key: "late", label: manual ? "Entrada manual · tarde" : "Entrada tarde", className: "status-late" };
-      return { key: "present", label: manual ? "Entrada manual" : "Entrada registrada", className: "status-present" };
+      const timing = getEntryTimingInfo(shift, entryEvent);
+      if (entryEvent.is_inside_site === false) {
+        const timingSuffix = timing.isAfterAbsenceThreshold ? " · fuera de horario" : timing.isLate ? " · tarde" : "";
+        return {
+          key: "outside",
+          label: `${manual ? "Entrada manual · fuera de radio" : "Entrada fuera de radio"}${timingSuffix}`,
+          className: "status-outside",
+          ...timing
+        };
+      }
+      if (timing.isAfterAbsenceThreshold) {
+        return {
+          key: "late",
+          label: manual ? "Entrada manual · tarde · fuera de horario" : "Entrada tarde · fuera de horario",
+          className: "status-late-critical",
+          ...timing
+        };
+      }
+      if (timing.isLate) {
+        return {
+          key: "late",
+          label: manual ? "Entrada manual · tarde" : "Entrada tarde",
+          className: "status-late",
+          ...timing
+        };
+      }
+      return { key: "present", label: manual ? "Entrada manual" : "Entrada registrada", className: "status-present", ...timing };
     }
 
     if (manualEvent?.event_type === "day_off") return { key: "day_off", label: "Franco", className: "status-dayoff" };
@@ -579,7 +637,7 @@
     const elapsed = diffMinutes(at, start);
     if (elapsed < 0) return { key: "scheduled", label: "Pendiente", className: "status-ok" };
     if (elapsed <= grace) return { key: "on_window", label: "En ventana horaria", className: "status-ok" };
-    if (elapsed > absentAfter) {
+    if (elapsed >= absentAfter) {
       return {
         key: "absent",
         label: manualEvent?.event_type === "late" ? "Ausente tras demora" : "Ausente",
@@ -599,7 +657,7 @@
     if (getEntryEvent(shift)) return false;
     if (latestEventForShift(shift.id, "day_off")) return false;
     if (latestEventForShift(shift.id, "absent")) return false;
-    return at.getTime() > getAutomaticAbsenceTime(shift).getTime();
+    return at.getTime() >= getAutomaticAbsenceTime(shift).getTime();
   }
 
   function getExitStatus(shift, entryEvent = getEntryEvent(shift), exitEvent = getExitEvent(shift), at = new Date()) {
@@ -621,8 +679,13 @@
     if (minutesAfterEnd < 0) {
       // Mientras el operario sigue trabajando, la columna Salida también conserva
       // visualmente una anomalía de ingreso para evitar que un azul "normal" la oculte.
-      if (entryEvent.is_inside_site === false) return { key: "in_service_outside", label: "En servicio · entrada fuera de radio", className: "status-outside" };
-      if (entryEvent.observed_status === "late") return { key: "in_service_late", label: "En servicio · entrada tarde", className: "status-late" };
+      const entryTiming = getEntryTimingInfo(shift, entryEvent);
+      if (entryEvent.is_inside_site === false) {
+        const timingSuffix = entryTiming.isAfterAbsenceThreshold ? " · fuera de horario" : entryTiming.isLate ? " · tarde" : "";
+        return { key: "in_service_outside", label: `En servicio · entrada fuera de radio${timingSuffix}`, className: "status-outside" };
+      }
+      if (entryTiming.isAfterAbsenceThreshold) return { key: "in_service_late", label: "En servicio · ingreso fuera de horario", className: "status-late-critical" };
+      if (entryTiming.isLate) return { key: "in_service_late", label: "En servicio · entrada tarde", className: "status-late" };
       return { key: "in_service", label: "En servicio", className: "status-ok" };
     }
     if (minutesAfterEnd <= grace) return { key: "exit_due", label: "Debe registrar salida", className: "status-late" };
@@ -638,8 +701,12 @@
 
     if (["completed", "auto_checkout", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(exitStatus.key)) return exitStatus;
     if (entryEvent && ["in_service", "in_service_outside", "in_service_late"].includes(exitStatus.key)) {
-      if (entryStatus.key === "outside") return { key: "in_service_outside", label: "En servicio · entrada fuera de radio", className: "status-outside" };
-      if (entryStatus.key === "late") return { key: "in_service_late", label: "En servicio · entrada tarde", className: "status-late" };
+      if (entryStatus.key === "outside") return { key: "in_service_outside", label: exitStatus.label || "En servicio · entrada fuera de radio", className: "status-outside" };
+      if (entryStatus.key === "late") return {
+        key: "in_service_late",
+        label: entryStatus.isAfterAbsenceThreshold ? "En servicio · ingreso fuera de horario" : "En servicio · entrada tarde",
+        className: entryStatus.className || "status-late"
+      };
       return { key: "in_service", label: "En servicio", className: "status-present" };
     }
     return entryStatus;
@@ -1375,6 +1442,18 @@
 
       const distance = haversineMeters(latitude, longitude, Number(assignedSite.lat), Number(assignedSite.lng));
       const isInside = distance <= Number(assignedSite.gps_radius_m || 120);
+      const entryShift = {
+        shift_date: shiftDate,
+        scheduled_start: assignment.scheduled_start,
+        scheduled_end: assignment.scheduled_end,
+        grace_minutes: assignment.grace_minutes ?? 10,
+        absence_after_minutes: assignment.absence_after_minutes ?? 30
+      };
+      const entryTiming = getEntryTimingInfo(entryShift, { client_time: gpsMoment.toISOString(), observed_status: "present" });
+      const timingNote = entryTiming.isAfterAbsenceThreshold
+        ? `Ingreso fuera de horario: +${entryTiming.lateMinutes} min sobre el horario previsto; umbral de ausencia +${entryTiming.absenceAfterMinutes} min.`
+        : entryTiming.isLate ? `Ingreso tarde: +${entryTiming.lateMinutes} min sobre el horario previsto.` : "";
+      const entryNotes = [isInside ? notes : `Fuera de radio. ${notes}`.trim(), timingNote].filter(Boolean).join(" · ");
 
       const savedEvent = await store.createEvent({
         shift_id: shiftId,
@@ -1383,11 +1462,11 @@
         operator_id: state.currentProfile.id,
         site_id: assignedSite.id,
         event_type: "present",
-        observed_status: "present",
+        observed_status: entryTiming.isLate ? "late" : "present",
         work_type: assignment.assignment_type === "coverage" ? "coverage" : assignment.assignment_type === "reinforcement" ? "reinforcement" : "regular",
         entry_source: "assignment",
         validation_status: "confirmed",
-        notes: isInside ? notes : `Fuera de radio. ${notes}`.trim(),
+        notes: entryNotes,
         lat: latitude,
         lng: longitude,
         gps_accuracy_m: accuracy,
@@ -2032,17 +2111,14 @@
 
   function hasOperationalAlert(row) {
     return ["late", "absent", "outside"].includes(row.entryStatus.key)
+      || row.entryTiming?.isLate === true
       || ["auto_checkout", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(row.exitStatus.key)
       || (row.isSelfReportedExtra && ["pending", "rejected"].includes(row.extraValidationStatus));
   }
 
   function operationalAlertItems(row) {
     const items = [];
-    const entryItems = {
-      late: { label: "Entrada tarde / demorada", className: "status-late" },
-      absent: { label: "Ausencia", className: "status-absent" },
-      outside: { label: "Entrada fuera de radio", className: "status-outside" }
-    };
+    const entryTiming = row.entryTiming || getEntryTimingInfo(row.shift, row.entryEvent);
     const exitItems = {
       auto_checkout: { label: "Cierre automático por falta de salida", className: "status-auto" },
       early_exit: { label: "Salida anticipada", className: "status-late" },
@@ -2050,7 +2126,20 @@
       missing_exit: { label: "Salida no registrada", className: "status-absent" },
       exit_due: { label: "Salida pendiente", className: "status-late" }
     };
-    if (entryItems[row.entryStatus.key]) items.push(entryItems[row.entryStatus.key]);
+
+    if (row.entryEvent && entryTiming.isLate) {
+      items.push({
+        label: entryTiming.isAfterAbsenceThreshold
+          ? `Ingreso tarde fuera de horario · +${entryTiming.lateMinutes} min`
+          : `Entrada tarde · +${entryTiming.lateMinutes} min`,
+        className: entryTiming.isAfterAbsenceThreshold ? "status-late-critical" : "status-late"
+      });
+    } else if (row.entryStatus.key === "late") {
+      items.push({ label: "Entrada tarde / demorada", className: "status-late" });
+    }
+    if (row.entryStatus.key === "absent") items.push({ label: "Ausencia", className: "status-absent" });
+    if (row.entryStatus.key === "outside") items.push({ label: "Entrada fuera de radio", className: "status-outside" });
+
     if (exitItems[row.exitStatus.key]) items.push(exitItems[row.exitStatus.key]);
     if (row.isSelfReportedExtra && row.extraValidationStatus === "pending") items.push({ label: "Trabajo extraordinario pendiente de validar", className: "status-extra" });
     if (row.isSelfReportedExtra && row.extraValidationStatus === "rejected") items.push({ label: "Trabajo extraordinario rechazado", className: "status-rejected" });
@@ -2125,7 +2214,8 @@
       const exitStatus = getExitStatus(shift, entryEvent, exitEvent);
       const status = getShiftStatus(shift);
       const lastEvent = latestEventForShift(shift.id);
-      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent, isSelfReportedExtra: false };
+      const entryTiming = getEntryTimingInfo(shift, entryEvent);
+      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent, entryTiming, isSelfReportedExtra: false };
     });
     return [...regularRows, ...getSelfReportedExtraDashboardRows()].sort((a, b) => `${a.shift.scheduled_start || "99:99"}|${byId(state.sites, a.shift.site_id)?.name || ""}`.localeCompare(`${b.shift.scheduled_start || "99:99"}|${byId(state.sites, b.shift.site_id)?.name || ""}`));
   }
@@ -2135,8 +2225,8 @@
     const definitions = [
       { key: "all", label: "Todos", tone: "neutral", matches: () => true },
       { key: "alerts", label: "Con alerta", tone: "alert", matches: row => hasOperationalAlert(row) },
-      { key: "on_time", label: "Ingreso correcto", tone: "present", matches: row => row.entryStatus.key === "present" },
-      { key: "late", label: "Llegada tarde", tone: "late", matches: row => row.entryStatus.key === "late" || row.entryEvent?.observed_status === "late" },
+      { key: "on_time", label: "Ingreso correcto", tone: "present", matches: row => row.entryStatus.key === "present" && !row.entryTiming?.isLate },
+      { key: "late", label: "Llegada tarde", tone: "late", matches: row => row.entryStatus.key === "late" || row.entryTiming?.isLate === true || row.entryEvent?.observed_status === "late" },
       { key: "outside", label: "Fuera de radio", tone: "outside", matches: row => row.entryStatus.key === "outside" },
       { key: "absent", label: "Ausentes", tone: "absent", matches: row => row.entryStatus.key === "absent" },
       { key: "day_off", label: "Francos", tone: "dayoff", matches: row => row.entryStatus.key === "day_off" },
@@ -2605,13 +2695,21 @@
         ? `<button class="secondary-btn small-btn" data-manual-attendance="present" data-manual-shift="${escapeHtml(shift.id)}" type="button">Entrada manual</button>` : "";
       const manualExitButton = entryEvent && !exitEvent
         ? `<button class="secondary-btn small-btn" data-manual-attendance="checkout" data-manual-shift="${escapeHtml(shift.id)}" type="button">Salida manual</button>` : "";
+      const entryTiming = row.entryTiming || getEntryTimingInfo(shift, entryEvent);
+      const lateEntryNote = entryEvent && entryTiming.isLate
+        ? `<div class="late-entry-note ${entryTiming.isAfterAbsenceThreshold ? "critical" : ""}">${entryTiming.isAfterAbsenceThreshold
+          ? `Llegó +${entryTiming.lateMinutes} min · superó umbral de ausencia (+${entryTiming.absenceAfterMinutes} min)`
+          : `Llegó +${entryTiming.lateMinutes} min respecto del horario previsto`}</div>`
+        : "";
+      const rowTimingClass = entryTiming.isAfterAbsenceThreshold ? "live-late-critical-row" : entryTiming.isLate ? "live-late-row" : "";
+      const rowClasses = [searchTerm ? "search-match-row" : "", rowTimingClass].filter(Boolean).join(" ");
 
       return `
-        <tr class="${searchTerm ? "search-match-row" : ""}">
+        <tr class="${rowClasses}">
           <td><strong>${escapeHtml(operator?.full_name || "—")}</strong><br><span class="muted small">${escapeHtml(operator?.phone || "")}</span></td>
           <td><strong>${escapeHtml(site?.name || "—")}</strong><br>${typeBadge ? `${typeBadge}<br>` : ""}<span class="muted small">${escapeHtml(site?.address || "")}</span></td>
           <td>${row.isSelfReportedExtra ? `<span class="extra-schedule-label">Sin horario previo</span>` : `${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`}</td>
-          <td>${statusDetailCell(entryStatus, entryEvent || dayOffEvent, "Sin entrada")}</td>
+          <td>${statusDetailCell(entryStatus, entryEvent || dayOffEvent, "Sin entrada")}${lateEntryNote}</td>
           <td>${statusDetailCell(exitStatus, exitEvent || dayOffEvent, "Sin salida")}</td>
           <td><span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.client_time || lastEvent.created_at)}` : "—"}</span></td>
           <td class="row-actions">
@@ -2700,6 +2798,10 @@
       lines.push(gpsSummary(row.exitEvent));
     } else if (kind === "alerts") {
       if (row.entryEvent) lines.push(`Entrada: ${formatDateTime(row.entryEvent.client_time || row.entryEvent.created_at)}`);
+      const timing = row.entryTiming || getEntryTimingInfo(row.shift, row.entryEvent);
+      if (row.entryEvent && timing.isLate) lines.push(timing.isAfterAbsenceThreshold
+        ? `Demora: +${timing.lateMinutes} min · superó umbral de ausencia (+${timing.absenceAfterMinutes} min)`
+        : `Demora: +${timing.lateMinutes} min`);
       if (row.exitEvent) lines.push(`Salida: ${formatDateTime(row.exitEvent.client_time || row.exitEvent.created_at)}`);
       if (row.manualEvent?.notes) lines.push(row.manualEvent.notes);
     } else {

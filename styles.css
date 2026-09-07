@@ -94,6 +94,7 @@ h3 { margin-bottom: 12px; font-size: 1.06rem; }
 .status-present { background: #dcfce7; color: var(--success); border-color: #bbf7d0; }
 .status-auto { background: #ffedd5; color: #c2410c; border-color: #fed7aa; }
 .status-late, .status-pending { background: #fef3c7; color: var(--warning); border-color: #fde68a; }
+.status-late-critical { background: #ffedd5; color: #9a3412; border-color: #fdba74; box-shadow: inset 0 0 0 1px rgba(234, 88, 12, .08); }
 /* Semántica visual: rojo queda reservado para ausencia/incumplimiento crítico.
    Fuera de radio usa violeta para indicar fichaje existente pero geográficamente atípico. */
 .status-absent { background: #fee2e2; color: #b91c1c; border-color: #fecaca; }
@@ -1171,6 +1172,18 @@ body.modal-open { overflow: hidden; }
 .context-search-clear { flex: 0 0 auto; padding-inline: 10px; }
 .context-search-result { min-width: 105px; text-align: right; font-weight: 800; white-space: nowrap; }
 .search-match-row > td { background: #fffdf1; }
+.live-late-row > td:first-child { box-shadow: inset 4px 0 0 #d97706; }
+.live-late-critical-row > td { background: #fff7ed; }
+.live-late-critical-row > td:first-child { box-shadow: inset 4px 0 0 #ea580c; }
+.late-entry-note {
+  margin-top: 6px;
+  max-width: 250px;
+  color: #92400e;
+  font-size: .74rem;
+  font-weight: 800;
+  line-height: 1.3;
+}
+.late-entry-note.critical { color: #9a3412; }
 .search-match-card { box-shadow: inset 3px 0 0 #f59e0b; }
 .search-target-flash { animation: searchTargetFlash 1.1s ease; }
 @keyframes searchTargetFlash {
