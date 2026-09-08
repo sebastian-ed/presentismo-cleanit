@@ -1,12 +1,12 @@
-const CACHE_NAME = "cleanit-presentismo-shell-20260907-late-entry-alerts1";
+const CACHE_NAME = "cleanit-presentismo-shell-20260908-late-after-absence2";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=20260907-late-entry-alerts1",
-  "./js/config.js?v=20260907-late-entry-alerts1",
-  "./js/storage.js?v=20260907-late-entry-alerts1",
-  "./js/app.js?v=20260907-late-entry-alerts1",
-  "./manifest.webmanifest?v=20260907-late-entry-alerts1",
+  "./styles.css?v=20260908-late-after-absence2",
+  "./js/config.js?v=20260908-late-after-absence2",
+  "./js/storage.js?v=20260908-late-after-absence2",
+  "./js/app.js?v=20260908-late-after-absence2",
+  "./manifest.webmanifest?v=20260908-late-after-absence2",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2",

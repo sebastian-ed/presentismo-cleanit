@@ -551,6 +551,28 @@
     return latestEventForShift(shift.id, "day_off");
   }
 
+  function getAutomaticAbsenceEvent(shift) {
+    if (!shift?.id) return null;
+    return shiftEvents(shift.id).find(event => event.event_type === "absent" && event.recorded_via === "system_auto") || null;
+  }
+
+  function findOtherServiceEntryDuringShift(shift) {
+    if (!shift?.operator_id || !shift?.shift_date || !shift?.scheduled_start || !shift?.scheduled_end) return null;
+    const range = scheduledRangeForShift(shift.shift_date, shift.scheduled_start, shift.scheduled_end);
+    return state.events
+      .filter(event => event.operator_id === shift.operator_id
+        && event.shift_date === shift.shift_date
+        && event.shift_id !== shift.id
+        && event.event_type === "present")
+      .filter(event => {
+        const moment = new Date(event.client_time || event.created_at);
+        return Number.isFinite(moment.getTime())
+          && moment.getTime() >= range.start.getTime()
+          && moment.getTime() <= range.end.getTime();
+      })
+      .sort((a, b) => new Date(a.client_time || a.created_at) - new Date(b.client_time || b.created_at))[0] || null;
+  }
+
   function recordedViaLabel(event) {
     if (!event) return "";
     if (event.recorded_via === "supervisor_manual") return "Carga manual supervisor/admin · sin GPS";
@@ -1115,8 +1137,9 @@
       const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
       const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
       const dayOffEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "day_off");
+      const automaticAbsenceEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "absent" && e.recorded_via === "system_auto");
       const assignedSite = byId(state.sites, assignment.site_id);
-      cards.push(renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite, assignment, dayOffEvent));
+      cards.push(renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite, assignment, dayOffEvent, automaticAbsenceEvent));
     });
 
     extraGroups.forEach((eventsForShift, shiftId) => {
@@ -1145,7 +1168,7 @@
     scheduleOperatorExitProtectionRefresh(container);
   }
 
-  function renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite = null, assignment = null, dayOffEvent = null) {
+  function renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite = null, assignment = null, dayOffEvent = null, automaticAbsenceEvent = null) {
     if (dayOffEvent && !entryEvent && !exitEvent) {
       const dateLabel = formatISODate(todayISO(), { weekday: "long", day: "numeric", month: "long" });
       return `
@@ -1190,10 +1213,16 @@
       ? `<div class="inline-warning auto-checkout-notice"><strong>Este turno fue cerrado automáticamente.</strong><br>El operario no registró la salida. Para no dejar el turno abierto, el sistema imputó la salida al horario programado y dejó registrada la hora real en que ejecutó el cierre.</div>`
       : "";
 
+    const canCheckInAfterAutomaticAbsence = Boolean(automaticAbsenceEvent && !checkedIn && !checkedOut);
+    const automaticAbsenceNotice = canCheckInAfterAutomaticAbsence
+      ? `<div class="inline-warning late-after-absence-notice"><strong>Ausencia automática registrada.</strong><br>Igualmente podés registrar la entrada con GPS. Si fichás ahora, el supervisor verá <strong>Entrada tarde · fuera de horario</strong> con la hora real de llegada. La ausencia automática queda en Registros como antecedente de auditoría.</div>`
+      : "";
+
     let statusLabel, statusClass;
     if (autoClosed) { statusLabel = "Cerrado automáticamente"; statusClass = "status-auto"; }
     else if (checkedOut) { statusLabel = "Servicio completado"; statusClass = "status-present"; }
     else if (checkedIn) { statusLabel = "En servicio"; statusClass = "status-ok"; }
+    else if (canCheckInAfterAutomaticAbsence) { statusLabel = "Ausencia automática · podés fichar"; statusClass = "status-absent"; }
     else { statusLabel = "Sin marcar"; statusClass = "status-pending"; }
 
     const dateLabel = formatISODate(todayISO(), { weekday: "long", day: "numeric", month: "long" });
@@ -1224,13 +1253,14 @@
         <div class="checkin-box">
           <div class="checkpoint-title-row">
             <strong>Entrada al servicio</strong>
-            <span class="status-pill ${checkedIn ? "status-present" : "status-pending"}">${checkedIn ? "Registrada" : "Pendiente"}</span>
+            <span class="status-pill ${checkedIn ? "status-present" : canCheckInAfterAutomaticAbsence ? "status-absent" : "status-pending"}">${checkedIn ? "Registrada" : canCheckInAfterAutomaticAbsence ? "Ausente automático · fichaje habilitado" : "Pendiente"}</span>
           </div>
+          ${automaticAbsenceNotice}
           <label class="checkbox-row">
             <input type="checkbox" id="confirm-in-${escapeHtml(shiftId)}" ${entryDisabled} />
             <span>
               <strong>Confirmo que estoy en el servicio</strong><br />
-              <span class="muted small">El GPS detecta automáticamente en qué servicio estás al registrar entrada.</span>
+              <span class="muted small">El GPS valida tu ubicación respecto de este servicio. Si tenés más de un servicio hoy, registrá la entrada desde la tarjeta correspondiente.</span>
             </span>
           </label>
           <label>
@@ -2215,7 +2245,9 @@
       const status = getShiftStatus(shift);
       const lastEvent = latestEventForShift(shift.id);
       const entryTiming = getEntryTimingInfo(shift, entryEvent);
-      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent, entryTiming, isSelfReportedExtra: false };
+      const automaticAbsenceEvent = getAutomaticAbsenceEvent(shift);
+      const otherServiceEntry = !entryEvent && entryStatus.key === "absent" ? findOtherServiceEntryDuringShift(shift) : null;
+      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent, entryTiming, automaticAbsenceEvent, otherServiceEntry, isSelfReportedExtra: false };
     });
     return [...regularRows, ...getSelfReportedExtraDashboardRows()].sort((a, b) => `${a.shift.scheduled_start || "99:99"}|${byId(state.sites, a.shift.site_id)?.name || ""}`.localeCompare(`${b.shift.scheduled_start || "99:99"}|${byId(state.sites, b.shift.site_id)?.name || ""}`));
   }
@@ -2692,7 +2724,7 @@
           : `<button class="dayoff-btn small-btn" data-mark-dayoff="${escapeHtml(shift.id)}" type="button">Marcar franco</button>`)
         : "";
       const manualEntryButton = !entryEvent && !dayOffEvent && !row.isSelfReportedExtra
-        ? `<button class="secondary-btn small-btn" data-manual-attendance="present" data-manual-shift="${escapeHtml(shift.id)}" type="button">Entrada manual</button>` : "";
+        ? `<button class="secondary-btn small-btn" data-manual-attendance="present" data-manual-shift="${escapeHtml(shift.id)}" type="button">${row.automaticAbsenceEvent ? "Entrada tardía manual" : "Entrada manual"}</button>` : "";
       const manualExitButton = entryEvent && !exitEvent
         ? `<button class="secondary-btn small-btn" data-manual-attendance="checkout" data-manual-shift="${escapeHtml(shift.id)}" type="button">Salida manual</button>` : "";
       const entryTiming = row.entryTiming || getEntryTimingInfo(shift, entryEvent);
@@ -2700,6 +2732,10 @@
         ? `<div class="late-entry-note ${entryTiming.isAfterAbsenceThreshold ? "critical" : ""}">${entryTiming.isAfterAbsenceThreshold
           ? `Llegó +${entryTiming.lateMinutes} min · superó umbral de ausencia (+${entryTiming.absenceAfterMinutes} min)`
           : `Llegó +${entryTiming.lateMinutes} min respecto del horario previsto`}</div>`
+        : "";
+      const otherServiceEntrySite = row.otherServiceEntry ? byId(state.sites, row.otherServiceEntry.site_id) : null;
+      const otherServiceEntryNote = row.otherServiceEntry
+        ? `<div class="late-entry-note critical">Sin entrada en este servicio. El operario registró entrada en <strong>${escapeHtml(otherServiceEntrySite?.name || "otro servicio")}</strong> a las ${escapeHtml(formatClock(row.otherServiceEntry.client_time || row.otherServiceEntry.created_at))}.</div>`
         : "";
       const rowTimingClass = entryTiming.isAfterAbsenceThreshold ? "live-late-critical-row" : entryTiming.isLate ? "live-late-row" : "";
       const rowClasses = [searchTerm ? "search-match-row" : "", rowTimingClass].filter(Boolean).join(" ");
@@ -2709,7 +2745,7 @@
           <td><strong>${escapeHtml(operator?.full_name || "—")}</strong><br><span class="muted small">${escapeHtml(operator?.phone || "")}</span></td>
           <td><strong>${escapeHtml(site?.name || "—")}</strong><br>${typeBadge ? `${typeBadge}<br>` : ""}<span class="muted small">${escapeHtml(site?.address || "")}</span></td>
           <td>${row.isSelfReportedExtra ? `<span class="extra-schedule-label">Sin horario previo</span>` : `${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`}</td>
-          <td>${statusDetailCell(entryStatus, entryEvent || dayOffEvent, "Sin entrada")}${lateEntryNote}</td>
+          <td>${statusDetailCell(entryStatus, entryEvent || dayOffEvent, "Sin entrada")}${lateEntryNote}${otherServiceEntryNote}</td>
           <td>${statusDetailCell(exitStatus, exitEvent || dayOffEvent, "Sin salida")}</td>
           <td><span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.client_time || lastEvent.created_at)}` : "—"}</span></td>
           <td class="row-actions">
