@@ -1702,3 +1702,49 @@ body.modal-open { overflow: hidden; }
   color: #115e59;
   border-color: #5eead4;
 }
+
+/* Solicitud de hora extra pendiente · 2026-09-09 */
+.status-overtime-pending {
+  background: #fff7ed;
+  color: #9a3412;
+  border-color: #fdba74;
+}
+.overtime-pending-notice {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  color: #9a3412;
+  font-weight: 700;
+  font-size: .86rem;
+  line-height: 1.45;
+}
+.overtime-request-btn {
+  width: 100%;
+  margin: 0 0 12px;
+  padding: 11px 14px;
+  border: 1px solid #fdba74;
+  border-radius: 10px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-weight: 900;
+  cursor: pointer;
+}
+.overtime-request-btn:hover { background: #ffedd5; }
+.overtime-live-note.pending {
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  color: #9a3412;
+}
+.live-overtime-pending-row { background: #fffbeb; }
+.live-overtime-pending-row > td:first-child { box-shadow: inset 4px 0 0 #f59e0b; }
+.overtime-modal-warning.pending {
+  background: #fff7ed;
+  border-color: #fdba74;
+  color: #9a3412;
+}
+.overtime-modal-actions .ghost-btn { min-width: 170px; }
+@media (max-width: 640px) {
+  .overtime-modal-actions .ghost-btn { width: 100%; }
+}

@@ -8,10 +8,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Presentismo GPS" />
   <title>Clean It · Presentismo GPS</title>
-  <link rel="manifest" href="manifest.webmanifest?v=20260908-overtime-approval1" />
+  <link rel="manifest" href="manifest.webmanifest?v=20260909-overtime-request1" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20260908-overtime-approval1" />
+  <link rel="stylesheet" href="styles.css?v=20260909-overtime-request1" />
 </head>
 <body>
   <div class="app-shell">
@@ -774,6 +774,25 @@
     </section>
   </div>
 
+  <div id="operatorOvertimeRequestModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="operatorOvertimeRequestModalTitle">
+    <section class="modal-panel manual-attendance-modal-panel overtime-authorization-modal-panel">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Solicitud de hora extra</p>
+          <h3 id="operatorOvertimeRequestModalTitle">Solicitar hora extra</h3>
+          <p id="operatorOvertimeRequestModalSubtitle" class="muted small no-margin"></p>
+        </div>
+        <button class="ghost-btn small-btn modal-close" type="button" data-close-modal="operatorOvertimeRequestModal" aria-label="Cerrar">Cerrar</button>
+      </div>
+      <form id="operatorOvertimeRequestForm" class="form-stack manual-attendance-form">
+        <label><span>Necesito continuar hasta</span><input id="operatorOvertimeRequestedUntil" type="datetime-local" required /></label>
+        <label><span>Motivo</span><textarea id="operatorOvertimeRequestReason" required placeholder="Ej. Faltó un compañero y me solicitaron cubrir hasta finalizar el servicio."></textarea></label>
+        <div class="overtime-modal-warning pending"><strong>Importante:</strong> enviar esta solicitud <strong>no aprueba la hora extra</strong>. Queda pendiente para que la revise un supervisor o administrador. Mientras esté pendiente, el sistema evita el cierre automático hasta 45 minutos después del horario solicitado para que puedas fichar tu salida real.</div>
+        <button class="primary-btn" type="submit">Enviar solicitud</button>
+      </form>
+    </section>
+  </div>
+
   <div id="overtimeAuthorizationModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="overtimeAuthorizationModalTitle">
     <section class="modal-panel manual-attendance-modal-panel overtime-authorization-modal-panel">
       <div class="modal-head">
@@ -787,9 +806,10 @@
       <form id="overtimeAuthorizationForm" class="form-stack manual-attendance-form">
         <label><span>Autorizado hasta</span><input id="overtimeAuthorizedUntil" type="datetime-local" required /></label>
         <label><span>Motivo / observación</span><textarea id="overtimeAuthorizationReason" required placeholder="Ej. Extensión solicitada por el cliente / tarea extraordinaria aprobada por supervisor."></textarea></label>
-        <div class="overtime-modal-warning"><strong>Solo supervisor o administrador.</strong> Esta aprobación posterga el cierre automático. El operario verá que la hora extra fue autorizada y podrá fichar la salida real con GPS. Si no registra salida, el sistema cerrará el turno 45 minutos después del límite autorizado.</div>
+        <div id="overtimeAuthorizationModalWarning" class="overtime-modal-warning"><strong>Solo supervisor o administrador.</strong> Esta aprobación posterga el cierre automático. El operario verá que la hora extra fue autorizada y podrá fichar la salida real con GPS. Si no registra salida, el sistema cerrará el turno 45 minutos después del límite autorizado.</div>
         <div class="overtime-modal-actions">
           <button class="danger-btn hidden" id="revokeOvertimeAuthorizationBtn" type="button">Quitar autorización</button>
+          <button class="ghost-btn hidden" id="rejectOvertimeRequestBtn" type="button">Rechazar solicitud</button>
           <button class="primary-btn" id="saveOvertimeAuthorizationBtn" type="submit">Guardar autorización</button>
         </div>
       </form>
@@ -841,8 +861,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="js/config.js?v=20260908-overtime-approval1"></script>
-  <script src="js/storage.js?v=20260908-overtime-approval1"></script>
-  <script src="js/app.js?v=20260908-overtime-approval1"></script>
+  <script src="js/config.js?v=20260909-overtime-request1"></script>
+  <script src="js/storage.js?v=20260909-overtime-request1"></script>
+  <script src="js/app.js?v=20260909-overtime-request1"></script>
 </body>
 </html>
