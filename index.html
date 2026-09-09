@@ -8,10 +8,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Presentismo GPS" />
   <title>Clean It · Presentismo GPS</title>
-  <link rel="manifest" href="manifest.webmanifest?v=20260908-late-after-absence2" />
+  <link rel="manifest" href="manifest.webmanifest?v=20260908-overtime-approval1" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20260908-late-after-absence2" />
+  <link rel="stylesheet" href="styles.css?v=20260908-overtime-approval1" />
 </head>
 <body>
   <div class="app-shell">
@@ -774,6 +774,28 @@
     </section>
   </div>
 
+  <div id="overtimeAuthorizationModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="overtimeAuthorizationModalTitle">
+    <section class="modal-panel manual-attendance-modal-panel overtime-authorization-modal-panel">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Control de horas extra</p>
+          <h3 id="overtimeAuthorizationModalTitle">Autorizar horas extra</h3>
+          <p id="overtimeAuthorizationModalSubtitle" class="muted small no-margin"></p>
+        </div>
+        <button class="ghost-btn small-btn modal-close" type="button" data-close-modal="overtimeAuthorizationModal" aria-label="Cerrar">Cerrar</button>
+      </div>
+      <form id="overtimeAuthorizationForm" class="form-stack manual-attendance-form">
+        <label><span>Autorizado hasta</span><input id="overtimeAuthorizedUntil" type="datetime-local" required /></label>
+        <label><span>Motivo / observación</span><textarea id="overtimeAuthorizationReason" required placeholder="Ej. Extensión solicitada por el cliente / tarea extraordinaria aprobada por supervisor."></textarea></label>
+        <div class="overtime-modal-warning"><strong>Solo supervisor o administrador.</strong> Esta aprobación posterga el cierre automático. El operario verá que la hora extra fue autorizada y podrá fichar la salida real con GPS. Si no registra salida, el sistema cerrará el turno 45 minutos después del límite autorizado.</div>
+        <div class="overtime-modal-actions">
+          <button class="danger-btn hidden" id="revokeOvertimeAuthorizationBtn" type="button">Quitar autorización</button>
+          <button class="primary-btn" id="saveOvertimeAuthorizationBtn" type="submit">Guardar autorización</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
   <div id="locationModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="locationModalTitle">
     <section class="modal-panel modal-panel-map">
       <div class="modal-head">
@@ -819,8 +841,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="js/config.js?v=20260908-late-after-absence2"></script>
-  <script src="js/storage.js?v=20260908-late-after-absence2"></script>
-  <script src="js/app.js?v=20260908-late-after-absence2"></script>
+  <script src="js/config.js?v=20260908-overtime-approval1"></script>
+  <script src="js/storage.js?v=20260908-overtime-approval1"></script>
+  <script src="js/app.js?v=20260908-overtime-approval1"></script>
 </body>
 </html>

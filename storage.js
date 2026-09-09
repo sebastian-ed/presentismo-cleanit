@@ -554,6 +554,44 @@
       return data || [];
     }
 
+    async listOvertimeAuthorizations(dateFrom = null, dateTo = null) {
+      try {
+        let query = this.client
+          .from("overtime_authorizations")
+          .select("*")
+          .order("authorized_until", { ascending: false });
+        if (dateFrom) query = query.gte("shift_date", dateFrom);
+        if (dateTo) query = query.lte("shift_date", dateTo);
+        const { data, error } = await query;
+        if (error) throw error;
+        return data || [];
+      } catch (error) {
+        const code = String(error?.code || "");
+        const message = String(error?.message || "").toLowerCase();
+        if (code === "42P01" || message.includes("overtime_authorizations")) {
+          console.warn("Todavía no está instalada la migración de horas extra autorizadas.");
+          return [];
+        }
+        throw error;
+      }
+    }
+
+    async setOvertimeAuthorization(shiftId, authorizedUntilIso, notes = "") {
+      const { data, error } = await this.client.rpc("set_overtime_authorization", {
+        p_shift_id: shiftId,
+        p_authorized_until: authorizedUntilIso,
+        p_notes: notes || null
+      });
+      if (error) throw error;
+      return data;
+    }
+
+    async revokeOvertimeAuthorization(shiftId) {
+      const { data, error } = await this.client.rpc("revoke_overtime_authorization", { p_shift_id: shiftId });
+      if (error) throw error;
+      return data;
+    }
+
     async runAutomaticCheckouts() {
       try {
         const { data, error } = await this.client.rpc("auto_close_overdue_shifts");

@@ -22,6 +22,7 @@
     assignments: [],
     shifts: [],
     events: [],
+    overtimeAuthorizations: [],
     dashboardRows: [],
     liveStatusFilter: "all",
     recordsEvents: [],
@@ -51,6 +52,7 @@
     bulkSelectedSiteIds: new Set(),
     bulkSelectedRecordIds: new Set(),
     manualAttendanceContext: null,
+    overtimeAuthorizationContext: null,
     assignmentAuditFileName: "",
     assignmentAuditParsed: null,
     assignmentAuditAnalysis: null,
@@ -509,6 +511,42 @@
     return field === "scheduled_end" ? range.end : range.start;
   }
 
+  function overtimeAuthorizationForShift(shiftId) {
+    return state.overtimeAuthorizations.find(item => item.shift_id === shiftId && !item.revoked_at) || null;
+  }
+
+  function formatTimeInBusinessZone(value) {
+    if (!value) return "—";
+    const date = value instanceof Date ? value : new Date(value);
+    if (!Number.isFinite(date.getTime())) return "—";
+    return date.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: APP_TIME_ZONE });
+  }
+
+  function formatDateTimeLocalInput(value) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (!Number.isFinite(date.getTime())) return "";
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: APP_TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.filter(part => part.type !== "literal").map(part => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}`;
+  }
+
+  function parseBusinessDateTimeLocal(value) {
+    const [datePart, timePart] = String(value || "").split("T");
+    if (!datePart || !timePart) return new Date(NaN);
+    return zonedDateTimeToDate(datePart, timePart, APP_TIME_ZONE);
+  }
+
+  function overtimeMinutesForShift(shift, exitEvent) {
+    if (!shift?.scheduled_end || !exitEvent) return 0;
+    const scheduledEnd = getScheduledDateTime(shift, "scheduled_end");
+    const actualExit = new Date(exitEvent.client_time || exitEvent.created_at);
+    if (!Number.isFinite(scheduledEnd.getTime()) || !Number.isFinite(actualExit.getTime())) return 0;
+    return Math.max(0, Math.round((actualExit.getTime() - scheduledEnd.getTime()) / 60000));
+  }
+
   function diffMinutes(dateA, dateB) {
     return Math.round((dateA.getTime() - dateB.getTime()) / 60000);
   }
@@ -551,6 +589,28 @@
     return latestEventForShift(shift.id, "day_off");
   }
 
+  function getAutomaticAbsenceEvent(shift) {
+    if (!shift?.id) return null;
+    return shiftEvents(shift.id).find(event => event.event_type === "absent" && event.recorded_via === "system_auto") || null;
+  }
+
+  function findOtherServiceEntryDuringShift(shift) {
+    if (!shift?.operator_id || !shift?.shift_date || !shift?.scheduled_start || !shift?.scheduled_end) return null;
+    const range = scheduledRangeForShift(shift.shift_date, shift.scheduled_start, shift.scheduled_end);
+    return state.events
+      .filter(event => event.operator_id === shift.operator_id
+        && event.shift_date === shift.shift_date
+        && event.shift_id !== shift.id
+        && event.event_type === "present")
+      .filter(event => {
+        const moment = new Date(event.client_time || event.created_at);
+        return Number.isFinite(moment.getTime())
+          && moment.getTime() >= range.start.getTime()
+          && moment.getTime() <= range.end.getTime();
+      })
+      .sort((a, b) => new Date(a.client_time || a.created_at) - new Date(b.client_time || b.created_at))[0] || null;
+  }
+
   function recordedViaLabel(event) {
     if (!event) return "";
     if (event.recorded_via === "supervisor_manual") return "Carga manual supervisor/admin · sin GPS";
@@ -561,6 +621,40 @@
     return "Registrado por el operario";
   }
 
+  function getEntryTimingInfo(shift, entryEvent) {
+    const empty = {
+      isLate: false,
+      isAfterAbsenceThreshold: false,
+      lateMinutes: null,
+      graceMinutes: Number(shift?.grace_minutes ?? 10),
+      absenceAfterMinutes: Number(shift?.absence_after_minutes ?? 30),
+      entryMoment: null,
+      start: null
+    };
+    if (!shift || !entryEvent || !shift.scheduled_start) return empty;
+
+    const start = getScheduledDateTime(shift, "scheduled_start");
+    const entryMoment = new Date(entryEvent.client_time || entryEvent.created_at);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(entryMoment.getTime())) return { ...empty, start, entryMoment };
+
+    const graceMinutes = Number(shift.grace_minutes ?? 10);
+    const absenceAfterMinutes = Number(shift.absence_after_minutes ?? 30);
+    const rawMinutes = Math.max(0, Math.round((entryMoment.getTime() - start.getTime()) / 60000));
+    const isLateByTime = entryMoment.getTime() > start.getTime() + graceMinutes * 60000;
+    const isLate = isLateByTime || entryEvent.observed_status === "late";
+    const isAfterAbsenceThreshold = entryMoment.getTime() >= start.getTime() + absenceAfterMinutes * 60000;
+
+    return {
+      isLate,
+      isAfterAbsenceThreshold: isLate && isAfterAbsenceThreshold,
+      lateMinutes: isLate ? rawMinutes : 0,
+      graceMinutes,
+      absenceAfterMinutes,
+      entryMoment,
+      start
+    };
+  }
+
   function getEntryStatus(shift, entryEvent = getEntryEvent(shift), manualEvent = getManualEvent(shift), at = new Date()) {
     const start = getScheduledDateTime(shift, "scheduled_start");
     const grace = Number(shift.grace_minutes ?? 10);
@@ -568,9 +662,33 @@
 
     if (entryEvent) {
       const manual = entryEvent.recorded_via === "supervisor_manual";
-      if (entryEvent.is_inside_site === false) return { key: "outside", label: manual ? "Entrada manual · fuera de radio" : "Entrada fuera de radio", className: "status-outside" };
-      if (entryEvent.observed_status === "late") return { key: "late", label: manual ? "Entrada manual · tarde" : "Entrada tarde", className: "status-late" };
-      return { key: "present", label: manual ? "Entrada manual" : "Entrada registrada", className: "status-present" };
+      const timing = getEntryTimingInfo(shift, entryEvent);
+      if (entryEvent.is_inside_site === false) {
+        const timingSuffix = timing.isAfterAbsenceThreshold ? " · fuera de horario" : timing.isLate ? " · tarde" : "";
+        return {
+          key: "outside",
+          label: `${manual ? "Entrada manual · fuera de radio" : "Entrada fuera de radio"}${timingSuffix}`,
+          className: "status-outside",
+          ...timing
+        };
+      }
+      if (timing.isAfterAbsenceThreshold) {
+        return {
+          key: "late",
+          label: manual ? "Entrada manual · tarde · fuera de horario" : "Entrada tarde · fuera de horario",
+          className: "status-late-critical",
+          ...timing
+        };
+      }
+      if (timing.isLate) {
+        return {
+          key: "late",
+          label: manual ? "Entrada manual · tarde" : "Entrada tarde",
+          className: "status-late",
+          ...timing
+        };
+      }
+      return { key: "present", label: manual ? "Entrada manual" : "Entrada registrada", className: "status-present", ...timing };
     }
 
     if (manualEvent?.event_type === "day_off") return { key: "day_off", label: "Franco", className: "status-dayoff" };
@@ -579,7 +697,7 @@
     const elapsed = diffMinutes(at, start);
     if (elapsed < 0) return { key: "scheduled", label: "Pendiente", className: "status-ok" };
     if (elapsed <= grace) return { key: "on_window", label: "En ventana horaria", className: "status-ok" };
-    if (elapsed > absentAfter) {
+    if (elapsed >= absentAfter) {
       return {
         key: "absent",
         label: manualEvent?.event_type === "late" ? "Ausente tras demora" : "Ausente",
@@ -599,11 +717,14 @@
     if (getEntryEvent(shift)) return false;
     if (latestEventForShift(shift.id, "day_off")) return false;
     if (latestEventForShift(shift.id, "absent")) return false;
-    return at.getTime() > getAutomaticAbsenceTime(shift).getTime();
+    return at.getTime() >= getAutomaticAbsenceTime(shift).getTime();
   }
 
   function getExitStatus(shift, entryEvent = getEntryEvent(shift), exitEvent = getExitEvent(shift), at = new Date()) {
-    const end = getScheduledDateTime(shift, "scheduled_end");
+    const scheduledEnd = getScheduledDateTime(shift, "scheduled_end");
+    const overtimeAuthorization = overtimeAuthorizationForShift(shift.id);
+    const overtimeEnd = overtimeAuthorization?.authorized_until ? new Date(overtimeAuthorization.authorized_until) : null;
+    const end = overtimeEnd && Number.isFinite(overtimeEnd.getTime()) && overtimeEnd > scheduledEnd ? overtimeEnd : scheduledEnd;
     const grace = Number(shift.grace_minutes ?? 10);
 
     if (exitEvent) {
@@ -621,8 +742,14 @@
     if (minutesAfterEnd < 0) {
       // Mientras el operario sigue trabajando, la columna Salida también conserva
       // visualmente una anomalía de ingreso para evitar que un azul "normal" la oculte.
-      if (entryEvent.is_inside_site === false) return { key: "in_service_outside", label: "En servicio · entrada fuera de radio", className: "status-outside" };
-      if (entryEvent.observed_status === "late") return { key: "in_service_late", label: "En servicio · entrada tarde", className: "status-late" };
+      const entryTiming = getEntryTimingInfo(shift, entryEvent);
+      if (entryEvent.is_inside_site === false) {
+        const timingSuffix = entryTiming.isAfterAbsenceThreshold ? " · fuera de horario" : entryTiming.isLate ? " · tarde" : "";
+        return { key: "in_service_outside", label: `En servicio · entrada fuera de radio${timingSuffix}`, className: "status-outside" };
+      }
+      if (entryTiming.isAfterAbsenceThreshold) return { key: "in_service_late", label: "En servicio · ingreso fuera de horario", className: "status-late-critical" };
+      if (entryTiming.isLate) return { key: "in_service_late", label: "En servicio · entrada tarde", className: "status-late" };
+      if (overtimeAuthorization && at > scheduledEnd) return { key: "in_service_overtime", label: "En servicio · hora extra autorizada", className: "status-overtime" };
       return { key: "in_service", label: "En servicio", className: "status-ok" };
     }
     if (minutesAfterEnd <= grace) return { key: "exit_due", label: "Debe registrar salida", className: "status-late" };
@@ -637,9 +764,14 @@
     const exitStatus = getExitStatus(shift, entryEvent, exitEvent, at);
 
     if (["completed", "auto_checkout", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(exitStatus.key)) return exitStatus;
-    if (entryEvent && ["in_service", "in_service_outside", "in_service_late"].includes(exitStatus.key)) {
-      if (entryStatus.key === "outside") return { key: "in_service_outside", label: "En servicio · entrada fuera de radio", className: "status-outside" };
-      if (entryStatus.key === "late") return { key: "in_service_late", label: "En servicio · entrada tarde", className: "status-late" };
+    if (entryEvent && ["in_service", "in_service_outside", "in_service_late", "in_service_overtime"].includes(exitStatus.key)) {
+      if (entryStatus.key === "outside") return { key: "in_service_outside", label: exitStatus.label || "En servicio · entrada fuera de radio", className: "status-outside" };
+      if (entryStatus.key === "late") return {
+        key: "in_service_late",
+        label: entryStatus.isAfterAbsenceThreshold ? "En servicio · ingreso fuera de horario" : "En servicio · entrada tarde",
+        className: entryStatus.className || "status-late"
+      };
+      if (exitStatus.key === "in_service_overtime") return exitStatus;
       return { key: "in_service", label: "En servicio", className: "status-present" };
     }
     return entryStatus;
@@ -713,18 +845,20 @@
   }
 
   async function refreshBaseData(date = $("#dashboardDate")?.value || todayISO()) {
-    const [profiles, sites, assignments, shifts, events] = await Promise.all([
+    const [profiles, sites, assignments, shifts, events, overtimeAuthorizations] = await Promise.all([
       store.listProfiles(),
       store.listSites(),
       store.listAssignments(),
       store.listShifts(date),
-      store.listEvents()
+      store.listEvents(),
+      store.listOvertimeAuthorizations?.(date, date) || Promise.resolve([])
     ]);
     state.profiles = profiles;
     state.sites = sites;
     state.assignments = assignments;
     state.shifts = shifts;
     state.events = events;
+    state.overtimeAuthorizations = overtimeAuthorizations || [];
   }
 
   async function renderOperatorConnectivity() {
@@ -1003,10 +1137,16 @@
       operatorExitProtectionTimer = null;
     }
     const today = todayISO();
-    const [sites, events, assignments] = await Promise.all([store.listSites(), store.listEvents(), store.listAssignments()]);
+    const [sites, events, assignments, overtimeAuthorizations] = await Promise.all([
+      store.listSites(),
+      store.listEvents(),
+      store.listAssignments(),
+      store.listOvertimeAuthorizations?.(addDaysISO(today, -1), today) || Promise.resolve([])
+    ]);
     state.sites = sites;
     state.events = events;
     state.assignments = assignments;
+    state.overtimeAuthorizations = overtimeAuthorizations || [];
 
     $("#operatorTitle").textContent = `Hola, ${state.currentProfile.full_name}`;
 
@@ -1048,8 +1188,9 @@
       const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
       const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
       const dayOffEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "day_off");
+      const automaticAbsenceEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "absent" && e.recorded_via === "system_auto");
       const assignedSite = byId(state.sites, assignment.site_id);
-      cards.push(renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite, assignment, dayOffEvent));
+      cards.push(renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite, assignment, dayOffEvent, automaticAbsenceEvent));
     });
 
     extraGroups.forEach((eventsForShift, shiftId) => {
@@ -1078,7 +1219,7 @@
     scheduleOperatorExitProtectionRefresh(container);
   }
 
-  function renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite = null, assignment = null, dayOffEvent = null) {
+  function renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite = null, assignment = null, dayOffEvent = null, automaticAbsenceEvent = null) {
     if (dayOffEvent && !entryEvent && !exitEvent) {
       const dateLabel = formatISODate(todayISO(), { weekday: "long", day: "numeric", month: "long" });
       return `
@@ -1102,6 +1243,22 @@
     const checkedOut = Boolean(exitEvent);
     const detectedSite = entryEvent ? byId(state.sites, entryEvent.site_id) : null;
     const displaySite = detectedSite || assignedSite;
+    const overtimeAuthorization = overtimeAuthorizationForShift(shiftId);
+    const shiftDate = entryEvent?.shift_date || shiftDateFromId(shiftId, todayISO());
+    const scheduleShift = assignment?.scheduled_end ? {
+      shift_date: shiftDate,
+      scheduled_start: assignment.scheduled_start,
+      scheduled_end: assignment.scheduled_end
+    } : null;
+    const scheduledEnd = scheduleShift ? getScheduledDateTime(scheduleShift, "scheduled_end") : null;
+    const overtimeMinutes = checkedOut && scheduleShift ? overtimeMinutesForShift(scheduleShift, exitEvent) : 0;
+    const overtimeNotice = checkedIn && !checkedOut && scheduleShift
+      ? overtimeAuthorization
+        ? `<div class="overtime-approved-notice"><strong>Horas extra autorizadas.</strong><br>Tu supervisor autorizó continuar hasta las <strong>${escapeHtml(formatTimeInBusinessZone(overtimeAuthorization.authorized_until))}</strong>${overtimeAuthorization.approved_by_name ? ` · aprobado por ${escapeHtml(overtimeAuthorization.approved_by_name)}` : ""}. Podés registrar la salida normalmente cuando termines. El cierre automático queda postergado hasta 45 minutos después del horario autorizado.</div>`
+        : `<div class="inline-warning overtime-warning"><strong>¿Vas a trabajar después de las ${escapeHtml(formatTimeInBusinessZone(scheduledEnd))}?</strong><br>Las horas extra deben estar <strong>aprobadas previamente por tu supervisor</strong>. No te autorices por tu cuenta: si no hay una aprobación cargada, el cierre automático seguirá funcionando con la regla habitual.</div>`
+      : checkedOut && overtimeMinutes > 0
+        ? `<div class="overtime-approved-notice overtime-finished-notice"><strong>Salida registrada con ${escapeHtml(String(overtimeMinutes))} min posteriores al horario programado.</strong>${overtimeAuthorization ? ` La extensión estaba autorizada hasta las ${escapeHtml(formatTimeInBusinessZone(overtimeAuthorization.authorized_until))}.` : ""}</div>`
+        : "";
 
     const entryDisabled = checkedIn ? "disabled" : "";
     const exitProtection = checkedIn && !checkedOut ? exitProtectionState(entryEvent) : { active: false, remainingMs: 0, unlockAt: null };
@@ -1120,13 +1277,19 @@
       ? `${formatDateTime(exitEvent.client_time || exitEvent.created_at)} · ${["supervisor_manual", "system_auto"].includes(exitEvent.recorded_via) ? recordedViaLabel(exitEvent) : gpsSummary(exitEvent)}${autoClosed && exitEvent.created_at ? ` · procesado ${formatDateTime(exitEvent.created_at)}` : ""}`
       : "Sin salida registrada";
     const autoCheckoutNotice = autoClosed
-      ? `<div class="inline-warning auto-checkout-notice"><strong>Este turno fue cerrado automáticamente.</strong><br>El operario no registró la salida. Para no dejar el turno abierto, el sistema imputó la salida al horario programado y dejó registrada la hora real en que ejecutó el cierre.</div>`
+      ? `<div class="inline-warning auto-checkout-notice"><strong>Este turno fue cerrado automáticamente.</strong><br>El operario no registró la salida. Para no dejar el turno abierto, el sistema imputó la salida ${overtimeAuthorization ? `al último horario de horas extra autorizado (${escapeHtml(formatTimeInBusinessZone(overtimeAuthorization.authorized_until))})` : "al horario programado"} y dejó registrada la hora real en que ejecutó el cierre.</div>`
+      : "";
+
+    const canCheckInAfterAutomaticAbsence = Boolean(automaticAbsenceEvent && !checkedIn && !checkedOut);
+    const automaticAbsenceNotice = canCheckInAfterAutomaticAbsence
+      ? `<div class="inline-warning late-after-absence-notice"><strong>Ausencia automática registrada.</strong><br>Igualmente podés registrar la entrada con GPS. Si fichás ahora, el supervisor verá <strong>Entrada tarde · fuera de horario</strong> con la hora real de llegada. La ausencia automática queda en Registros como antecedente de auditoría.</div>`
       : "";
 
     let statusLabel, statusClass;
     if (autoClosed) { statusLabel = "Cerrado automáticamente"; statusClass = "status-auto"; }
     else if (checkedOut) { statusLabel = "Servicio completado"; statusClass = "status-present"; }
     else if (checkedIn) { statusLabel = "En servicio"; statusClass = "status-ok"; }
+    else if (canCheckInAfterAutomaticAbsence) { statusLabel = "Ausencia automática · podés fichar"; statusClass = "status-absent"; }
     else { statusLabel = "Sin marcar"; statusClass = "status-pending"; }
 
     const dateLabel = formatISODate(todayISO(), { weekday: "long", day: "numeric", month: "long" });
@@ -1157,13 +1320,14 @@
         <div class="checkin-box">
           <div class="checkpoint-title-row">
             <strong>Entrada al servicio</strong>
-            <span class="status-pill ${checkedIn ? "status-present" : "status-pending"}">${checkedIn ? "Registrada" : "Pendiente"}</span>
+            <span class="status-pill ${checkedIn ? "status-present" : canCheckInAfterAutomaticAbsence ? "status-absent" : "status-pending"}">${checkedIn ? "Registrada" : canCheckInAfterAutomaticAbsence ? "Ausente automático · fichaje habilitado" : "Pendiente"}</span>
           </div>
+          ${automaticAbsenceNotice}
           <label class="checkbox-row">
             <input type="checkbox" id="confirm-in-${escapeHtml(shiftId)}" ${entryDisabled} />
             <span>
               <strong>Confirmo que estoy en el servicio</strong><br />
-              <span class="muted small">El GPS detecta automáticamente en qué servicio estás al registrar entrada.</span>
+              <span class="muted small">El GPS valida tu ubicación respecto de este servicio. Si tenés más de un servicio hoy, registrá la entrada desde la tarjeta correspondiente.</span>
             </span>
           </label>
           <label>
@@ -1179,6 +1343,7 @@
             <span class="status-pill ${autoClosed ? "status-auto" : checkedOut ? "status-present" : exitProtected ? "status-pending" : "status-pending"}">${autoClosed ? "Cierre automático" : checkedOut ? "Registrada" : exitProtected ? "Bloqueada temporalmente" : "Pendiente"}</span>
           </div>
           ${autoCheckoutNotice}
+          ${overtimeNotice}
           ${exitProtectionNotice}
           <label class="checkbox-row">
             <input type="checkbox" id="confirm-out-${escapeHtml(shiftId)}" ${exitDisabled} />
@@ -1375,6 +1540,18 @@
 
       const distance = haversineMeters(latitude, longitude, Number(assignedSite.lat), Number(assignedSite.lng));
       const isInside = distance <= Number(assignedSite.gps_radius_m || 120);
+      const entryShift = {
+        shift_date: shiftDate,
+        scheduled_start: assignment.scheduled_start,
+        scheduled_end: assignment.scheduled_end,
+        grace_minutes: assignment.grace_minutes ?? 10,
+        absence_after_minutes: assignment.absence_after_minutes ?? 30
+      };
+      const entryTiming = getEntryTimingInfo(entryShift, { client_time: gpsMoment.toISOString(), observed_status: "present" });
+      const timingNote = entryTiming.isAfterAbsenceThreshold
+        ? `Ingreso fuera de horario: +${entryTiming.lateMinutes} min sobre el horario previsto; umbral de ausencia +${entryTiming.absenceAfterMinutes} min.`
+        : entryTiming.isLate ? `Ingreso tarde: +${entryTiming.lateMinutes} min sobre el horario previsto.` : "";
+      const entryNotes = [isInside ? notes : `Fuera de radio. ${notes}`.trim(), timingNote].filter(Boolean).join(" · ");
 
       const savedEvent = await store.createEvent({
         shift_id: shiftId,
@@ -1383,11 +1560,11 @@
         operator_id: state.currentProfile.id,
         site_id: assignedSite.id,
         event_type: "present",
-        observed_status: "present",
+        observed_status: entryTiming.isLate ? "late" : "present",
         work_type: assignment.assignment_type === "coverage" ? "coverage" : assignment.assignment_type === "reinforcement" ? "reinforcement" : "regular",
         entry_source: "assignment",
         validation_status: "confirmed",
-        notes: isInside ? notes : `Fuera de radio. ${notes}`.trim(),
+        notes: entryNotes,
         lat: latitude,
         lng: longitude,
         gps_accuracy_m: accuracy,
@@ -1443,6 +1620,23 @@
       const site = byId(state.sites, entryEvent.site_id);
       const distance = site ? haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng)) : null;
       const isInside = site ? distance <= Number(site.gps_radius_m || 120) : null;
+      const assignment = entryEvent.assignment_id ? byId(state.assignments, entryEvent.assignment_id) : null;
+      const overtimeAuthorization = overtimeAuthorizationForShift(shiftId);
+      let overtimeNote = "";
+      if (assignment?.scheduled_end) {
+        const shiftForOvertime = {
+          shift_date: shiftDate,
+          scheduled_start: assignment.scheduled_start,
+          scheduled_end: assignment.scheduled_end
+        };
+        const overtimeMinutes = overtimeMinutesForShift(shiftForOvertime, { client_time: gpsMoment.toISOString() });
+        if (overtimeMinutes > 0) {
+          overtimeNote = overtimeAuthorization
+            ? `Salida con ${overtimeMinutes} min posteriores al horario programado. Horas extra autorizadas hasta ${formatTimeInBusinessZone(overtimeAuthorization.authorized_until)}${overtimeAuthorization.approved_by_name ? ` por ${overtimeAuthorization.approved_by_name}` : ""}.`
+            : `Salida con ${overtimeMinutes} min posteriores al horario programado. No hay autorización de horas extra cargada en el sistema.`;
+        }
+      }
+      const checkoutNotes = [notes, overtimeNote].filter(Boolean).join(" · ");
 
       const savedEvent = await store.createEvent({
         shift_id: shiftId,
@@ -1455,7 +1649,7 @@
         work_type: entryEvent.work_type || "regular",
         entry_source: entryEvent.entry_source || (entryEvent.assignment_id ? "assignment" : "operator_extra"),
         validation_status: entryEvent.validation_status || (entryEvent.assignment_id ? "confirmed" : "pending"),
-        notes,
+        notes: checkoutNotes,
         lat: latitude,
         lng: longitude,
         gps_accuracy_m: accuracy,
@@ -2032,17 +2226,16 @@
 
   function hasOperationalAlert(row) {
     return ["late", "absent", "outside"].includes(row.entryStatus.key)
+      || row.entryTiming?.isLate === true
       || ["auto_checkout", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(row.exitStatus.key)
+      || row.overtimeInProgressUnapproved === true
+      || row.overtimeUnapproved === true
       || (row.isSelfReportedExtra && ["pending", "rejected"].includes(row.extraValidationStatus));
   }
 
   function operationalAlertItems(row) {
     const items = [];
-    const entryItems = {
-      late: { label: "Entrada tarde / demorada", className: "status-late" },
-      absent: { label: "Ausencia", className: "status-absent" },
-      outside: { label: "Entrada fuera de radio", className: "status-outside" }
-    };
+    const entryTiming = row.entryTiming || getEntryTimingInfo(row.shift, row.entryEvent);
     const exitItems = {
       auto_checkout: { label: "Cierre automático por falta de salida", className: "status-auto" },
       early_exit: { label: "Salida anticipada", className: "status-late" },
@@ -2050,8 +2243,23 @@
       missing_exit: { label: "Salida no registrada", className: "status-absent" },
       exit_due: { label: "Salida pendiente", className: "status-late" }
     };
-    if (entryItems[row.entryStatus.key]) items.push(entryItems[row.entryStatus.key]);
+
+    if (row.entryEvent && entryTiming.isLate) {
+      items.push({
+        label: entryTiming.isAfterAbsenceThreshold
+          ? `Ingreso tarde fuera de horario · +${entryTiming.lateMinutes} min`
+          : `Entrada tarde · +${entryTiming.lateMinutes} min`,
+        className: entryTiming.isAfterAbsenceThreshold ? "status-late-critical" : "status-late"
+      });
+    } else if (row.entryStatus.key === "late") {
+      items.push({ label: "Entrada tarde / demorada", className: "status-late" });
+    }
+    if (row.entryStatus.key === "absent") items.push({ label: "Ausencia", className: "status-absent" });
+    if (row.entryStatus.key === "outside") items.push({ label: "Entrada fuera de radio", className: "status-outside" });
+
     if (exitItems[row.exitStatus.key]) items.push(exitItems[row.exitStatus.key]);
+    if (row.overtimeInProgressUnapproved) items.push({ label: "Turno excedido · horas extra sin autorización cargada", className: "status-overtime-unapproved" });
+    if (row.overtimeUnapproved) items.push({ label: `Horas extra sin autorización · +${row.overtimeMinutes} min`, className: "status-overtime-unapproved" });
     if (row.isSelfReportedExtra && row.extraValidationStatus === "pending") items.push({ label: "Trabajo extraordinario pendiente de validar", className: "status-extra" });
     if (row.isSelfReportedExtra && row.extraValidationStatus === "rejected") items.push({ label: "Trabajo extraordinario rechazado", className: "status-rejected" });
     return items;
@@ -2125,7 +2333,15 @@
       const exitStatus = getExitStatus(shift, entryEvent, exitEvent);
       const status = getShiftStatus(shift);
       const lastEvent = latestEventForShift(shift.id);
-      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent, isSelfReportedExtra: false };
+      const entryTiming = getEntryTimingInfo(shift, entryEvent);
+      const automaticAbsenceEvent = getAutomaticAbsenceEvent(shift);
+      const otherServiceEntry = !entryEvent && entryStatus.key === "absent" ? findOtherServiceEntryDuringShift(shift) : null;
+      const overtimeAuthorization = overtimeAuthorizationForShift(shift.id);
+      const overtimeMinutes = overtimeMinutesForShift(shift, exitEvent);
+      const scheduledEnd = shift.scheduled_end ? getScheduledDateTime(shift, "scheduled_end") : null;
+      const overtimeInProgressUnapproved = Boolean(entryEvent && !exitEvent && !overtimeAuthorization && shift.shift_date === todayISO() && scheduledEnd && Date.now() > scheduledEnd.getTime());
+      const overtimeUnapproved = Boolean(exitEvent && overtimeMinutes > 0 && !overtimeAuthorization);
+      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent, entryTiming, automaticAbsenceEvent, otherServiceEntry, isSelfReportedExtra: false, overtimeAuthorization, overtimeMinutes, overtimeInProgressUnapproved, overtimeUnapproved };
     });
     return [...regularRows, ...getSelfReportedExtraDashboardRows()].sort((a, b) => `${a.shift.scheduled_start || "99:99"}|${byId(state.sites, a.shift.site_id)?.name || ""}`.localeCompare(`${b.shift.scheduled_start || "99:99"}|${byId(state.sites, b.shift.site_id)?.name || ""}`));
   }
@@ -2135,13 +2351,14 @@
     const definitions = [
       { key: "all", label: "Todos", tone: "neutral", matches: () => true },
       { key: "alerts", label: "Con alerta", tone: "alert", matches: row => hasOperationalAlert(row) },
-      { key: "on_time", label: "Ingreso correcto", tone: "present", matches: row => row.entryStatus.key === "present" },
-      { key: "late", label: "Llegada tarde", tone: "late", matches: row => row.entryStatus.key === "late" || row.entryEvent?.observed_status === "late" },
+      { key: "on_time", label: "Ingreso correcto", tone: "present", matches: row => row.entryStatus.key === "present" && !row.entryTiming?.isLate },
+      { key: "late", label: "Llegada tarde", tone: "late", matches: row => row.entryStatus.key === "late" || row.entryTiming?.isLate === true || row.entryEvent?.observed_status === "late" },
       { key: "outside", label: "Fuera de radio", tone: "outside", matches: row => row.entryStatus.key === "outside" },
       { key: "absent", label: "Ausentes", tone: "absent", matches: row => row.entryStatus.key === "absent" },
       { key: "day_off", label: "Francos", tone: "dayoff", matches: row => row.entryStatus.key === "day_off" },
       { key: "pending", label: "Pendientes", tone: "pending", matches: row => ["scheduled", "on_window"].includes(row.entryStatus.key) },
       { key: "extra", label: "Coberturas / refuerzos", tone: "extra", matches: row => row.isSelfReportedExtra || ["coverage", "reinforcement"].includes(String(row.shift.assignment_type || "")) },
+      { key: "overtime", label: "Horas extra", tone: "overtime", matches: row => Boolean(row.overtimeAuthorization || row.overtimeInProgressUnapproved || row.overtimeUnapproved || row.overtimeMinutes > 0) },
       { key: "auto_checkout", label: "Cierres automáticos", tone: "exit", matches: row => row.exitStatus.key === "auto_checkout" },
       { key: "exit_alert", label: "Alertas de salida", tone: "exit", matches: row => exitAlertKeys.includes(row.exitStatus.key) }
     ];
@@ -2541,6 +2758,74 @@
     }
   }
 
+  function openOvertimeAuthorizationModal(shiftId) {
+    if (!isManagementProfile()) return toast("No tenés permisos para autorizar horas extra.");
+    const row = dashboardRowByShiftId(shiftId);
+    if (!row?.shift || row.isSelfReportedExtra) return toast("No se encontró un turno programado válido.");
+    if (!row.entryEvent) return toast("Primero debe existir una entrada registrada.");
+    if (row.exitEvent) return toast("El turno ya tiene una salida registrada.");
+    const operator = byId(state.profiles, row.shift.operator_id);
+    const site = byId(state.sites, row.shift.site_id);
+    const scheduledEnd = getScheduledDateTime(row.shift, "scheduled_end");
+    const existing = overtimeAuthorizationForShift(shiftId);
+    let suggested = existing?.authorized_until ? new Date(existing.authorized_until) : new Date(scheduledEnd.getTime() + 60 * 60000);
+    const minimum = new Date(Math.max(scheduledEnd.getTime() + 60000, Date.now() + 60000));
+    if (!Number.isFinite(suggested.getTime()) || suggested <= minimum) suggested = new Date(minimum.getTime() + 59 * 60000);
+
+    state.overtimeAuthorizationContext = { shiftId };
+    $("#overtimeAuthorizationModalTitle").textContent = existing ? "Editar autorización de horas extra" : "Autorizar horas extra";
+    $("#overtimeAuthorizationModalSubtitle").textContent = `${operator?.full_name || "Operario"} · ${site?.name || "Servicio"} · salida prevista ${formatTime(row.shift.scheduled_end)}`;
+    $("#overtimeAuthorizedUntil").value = formatDateTimeLocalInput(suggested);
+    $("#overtimeAuthorizedUntil").min = formatDateTimeLocalInput(minimum);
+    $("#overtimeAuthorizationReason").value = existing?.notes || "";
+    const revokeButton = $("#revokeOvertimeAuthorizationBtn");
+    if (revokeButton) revokeButton.classList.toggle("hidden", !existing);
+    openModal("overtimeAuthorizationModal");
+    window.setTimeout(() => $("#overtimeAuthorizedUntil")?.focus(), 100);
+  }
+
+  async function saveOvertimeAuthorization(event) {
+    event.preventDefault();
+    const shiftId = state.overtimeAuthorizationContext?.shiftId;
+    if (!shiftId) return toast("No se encontró el turno a autorizar.");
+    const row = dashboardRowByShiftId(shiftId);
+    if (!row?.shift || !row.entryEvent || row.exitEvent) return toast("El turno ya no está disponible para extender.");
+    const raw = $("#overtimeAuthorizedUntil")?.value;
+    const reason = $("#overtimeAuthorizationReason")?.value.trim() || "";
+    if (!raw) return toast("Indicá hasta qué hora está autorizada la extensión.");
+    if (!reason) return toast("Indicá el motivo de la autorización de horas extra.");
+    const authorizedUntil = parseBusinessDateTimeLocal(raw);
+    if (!Number.isFinite(authorizedUntil.getTime())) return toast("La fecha y hora autorizadas no son válidas.");
+    const scheduledEnd = getScheduledDateTime(row.shift, "scheduled_end");
+    if (authorizedUntil <= scheduledEnd) return toast("La hora autorizada debe ser posterior al horario programado de salida.");
+    if (authorizedUntil <= new Date()) return toast("La hora autorizada debe estar en el futuro.");
+
+    try {
+      await store.setOvertimeAuthorization(shiftId, authorizedUntil.toISOString(), reason);
+      closeModal("overtimeAuthorizationModal");
+      state.overtimeAuthorizationContext = null;
+      toast(`Horas extra autorizadas hasta las ${formatTimeInBusinessZone(authorizedUntil)}.`, "success");
+      await renderSupervisorView();
+    } catch (error) {
+      toast(error.message || "No se pudo autorizar la hora extra.");
+    }
+  }
+
+  async function revokeOvertimeAuthorization() {
+    const shiftId = state.overtimeAuthorizationContext?.shiftId;
+    if (!shiftId) return toast("No se encontró la autorización.");
+    if (!window.confirm("¿Quitar la autorización de horas extra? Si el turno sigue abierto, volverá a aplicar el cierre automático habitual.")) return;
+    try {
+      await store.revokeOvertimeAuthorization(shiftId);
+      closeModal("overtimeAuthorizationModal");
+      state.overtimeAuthorizationContext = null;
+      toast("Autorización de horas extra quitada.", "success");
+      await renderSupervisorView();
+    } catch (error) {
+      toast(error.message || "No se pudo quitar la autorización.");
+    }
+  }
+
   function renderDashboard() {
     const rows = getDashboardRows();
     state.dashboardRows = rows;
@@ -2602,24 +2887,50 @@
           : `<button class="dayoff-btn small-btn" data-mark-dayoff="${escapeHtml(shift.id)}" type="button">Marcar franco</button>`)
         : "";
       const manualEntryButton = !entryEvent && !dayOffEvent && !row.isSelfReportedExtra
-        ? `<button class="secondary-btn small-btn" data-manual-attendance="present" data-manual-shift="${escapeHtml(shift.id)}" type="button">Entrada manual</button>` : "";
+        ? `<button class="secondary-btn small-btn" data-manual-attendance="present" data-manual-shift="${escapeHtml(shift.id)}" type="button">${row.automaticAbsenceEvent ? "Entrada tardía manual" : "Entrada manual"}</button>` : "";
       const manualExitButton = entryEvent && !exitEvent
         ? `<button class="secondary-btn small-btn" data-manual-attendance="checkout" data-manual-shift="${escapeHtml(shift.id)}" type="button">Salida manual</button>` : "";
+      const overtimeAuthorization = row.overtimeAuthorization || overtimeAuthorizationForShift(shift.id);
+      const overtimeButton = !row.isSelfReportedExtra && entryEvent && !exitEvent && shift.scheduled_end
+        ? `<button class="overtime-btn small-btn" data-overtime-authorization="${escapeHtml(shift.id)}" type="button">${overtimeAuthorization ? "Editar hora extra" : "Autorizar hora extra"}</button>` : "";
+      const overtimeDetail = overtimeAuthorization
+        ? `<div class="overtime-live-note approved"><strong>Hora extra autorizada</strong> hasta ${escapeHtml(formatTimeInBusinessZone(overtimeAuthorization.authorized_until))}${overtimeAuthorization.approved_by_name ? ` · ${escapeHtml(overtimeAuthorization.approved_by_name)}` : ""}</div>`
+        : row.overtimeInProgressUnapproved
+          ? `<div class="overtime-live-note unapproved"><strong>Horario excedido sin autorización</strong></div>`
+          : row.overtimeUnapproved
+            ? `<div class="overtime-live-note unapproved"><strong>+${escapeHtml(String(row.overtimeMinutes))} min sin autorización cargada</strong></div>`
+            : row.overtimeMinutes > 0
+              ? `<div class="overtime-live-note approved"><strong>+${escapeHtml(String(row.overtimeMinutes))} min</strong> posteriores al horario</div>`
+              : "";
+      const entryTiming = row.entryTiming || getEntryTimingInfo(shift, entryEvent);
+      const lateEntryNote = entryEvent && entryTiming.isLate
+        ? `<div class="late-entry-note ${entryTiming.isAfterAbsenceThreshold ? "critical" : ""}">${entryTiming.isAfterAbsenceThreshold
+          ? `Llegó +${entryTiming.lateMinutes} min · superó umbral de ausencia (+${entryTiming.absenceAfterMinutes} min)`
+          : `Llegó +${entryTiming.lateMinutes} min respecto del horario previsto`}</div>`
+        : "";
+      const otherServiceEntrySite = row.otherServiceEntry ? byId(state.sites, row.otherServiceEntry.site_id) : null;
+      const otherServiceEntryNote = row.otherServiceEntry
+        ? `<div class="late-entry-note critical">Sin entrada en este servicio. El operario registró entrada en <strong>${escapeHtml(otherServiceEntrySite?.name || "otro servicio")}</strong> a las ${escapeHtml(formatClock(row.otherServiceEntry.client_time || row.otherServiceEntry.created_at))}.</div>`
+        : "";
+      const rowTimingClass = entryTiming.isAfterAbsenceThreshold ? "live-late-critical-row" : entryTiming.isLate ? "live-late-row" : "";
+      const overtimeRowClass = row.overtimeInProgressUnapproved || row.overtimeUnapproved ? "live-overtime-unapproved-row" : overtimeAuthorization ? "live-overtime-approved-row" : "";
+      const rowClasses = [searchTerm ? "search-match-row" : "", rowTimingClass, overtimeRowClass].filter(Boolean).join(" ");
 
       return `
-        <tr class="${searchTerm ? "search-match-row" : ""}">
+        <tr class="${rowClasses}">
           <td><strong>${escapeHtml(operator?.full_name || "—")}</strong><br><span class="muted small">${escapeHtml(operator?.phone || "")}</span></td>
           <td><strong>${escapeHtml(site?.name || "—")}</strong><br>${typeBadge ? `${typeBadge}<br>` : ""}<span class="muted small">${escapeHtml(site?.address || "")}</span></td>
           <td>${row.isSelfReportedExtra ? `<span class="extra-schedule-label">Sin horario previo</span>` : `${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`}</td>
-          <td>${statusDetailCell(entryStatus, entryEvent || dayOffEvent, "Sin entrada")}</td>
+          <td>${statusDetailCell(entryStatus, entryEvent || dayOffEvent, "Sin entrada")}${lateEntryNote}${otherServiceEntryNote}</td>
           <td>${statusDetailCell(exitStatus, exitEvent || dayOffEvent, "Sin salida")}</td>
-          <td><span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.client_time || lastEvent.created_at)}` : "—"}</span></td>
+          <td><span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.client_time || lastEvent.created_at)}` : "—"}</span>${overtimeDetail}</td>
           <td class="row-actions">
             ${mapButtons}
             ${observationButton}
             ${dayOffButton}
             ${manualEntryButton}
             ${manualExitButton}
+            ${overtimeButton}
             ${validationActions}
             <a class="wa-btn ${normalizePhone(site?.whatsapp_phone) ? "" : "disabled-link"}" href="${url}" target="_blank" rel="noopener">WhatsApp consorcio</a>
           </td>
@@ -2665,6 +2976,7 @@
     if (!modal) return;
     modal.classList.add("hidden");
     if (id === "manualAttendanceModal") state.manualAttendanceContext = null;
+    if (id === "overtimeAuthorizationModal") state.overtimeAuthorizationContext = null;
     if (id === "locationModal" && attendanceMapInstance) {
       attendanceMapInstance.remove();
       attendanceMapInstance = null;
@@ -2700,6 +3012,10 @@
       lines.push(gpsSummary(row.exitEvent));
     } else if (kind === "alerts") {
       if (row.entryEvent) lines.push(`Entrada: ${formatDateTime(row.entryEvent.client_time || row.entryEvent.created_at)}`);
+      const timing = row.entryTiming || getEntryTimingInfo(row.shift, row.entryEvent);
+      if (row.entryEvent && timing.isLate) lines.push(timing.isAfterAbsenceThreshold
+        ? `Demora: +${timing.lateMinutes} min · superó umbral de ausencia (+${timing.absenceAfterMinutes} min)`
+        : `Demora: +${timing.lateMinutes} min`);
       if (row.exitEvent) lines.push(`Salida: ${formatDateTime(row.exitEvent.client_time || row.exitEvent.created_at)}`);
       if (row.manualEvent?.notes) lines.push(row.manualEvent.notes);
     } else {
@@ -5311,8 +5627,18 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  function syncAnalyticsImageFormatControls(source = null) {
+    const toolbar = $("#analyticsImageFormat");
+    const selection = $("#analyticsSelectionImageFormat");
+    const normalized = source === "jpg" ? "jpg" : "png";
+    if (toolbar && toolbar.value !== normalized) toolbar.value = normalized;
+    if (selection && selection.value !== normalized) selection.value = normalized;
+    return normalized;
+  }
+
   function analyticsImageFormat() {
-    return $("#analyticsImageFormat")?.value === "jpg" ? "jpg" : "png";
+    const preferred = $("#analyticsSelectionImageFormat")?.value || $("#analyticsImageFormat")?.value || "png";
+    return syncAnalyticsImageFormatControls(preferred);
   }
 
   function analyticsExportContext() {
@@ -5577,6 +5903,125 @@
   function analyticsWorkbookBlob(wb = buildAnalyticsWorkbook()) {
     const data = window.XLSX.write(wb, { bookType: "xlsx", type: "array" });
     return new Blob([data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  }
+
+  function analyticsSelectionCheckboxes() {
+    return Array.from(document.querySelectorAll('[data-analytics-selection]'));
+  }
+
+  function getSelectedAnalyticsExports() {
+    return analyticsSelectionCheckboxes().filter(input => input.checked).map(input => ({
+      type: input.dataset.analyticsSelection || "image",
+      key: input.value
+    }));
+  }
+
+  function updateAnalyticsSelectionSummary() {
+    const summaryEl = $("#analyticsSelectionSummary");
+    if (!summaryEl) return;
+    const selected = getSelectedAnalyticsExports();
+    const imageCount = selected.filter(item => item.type === "image").length;
+    const tableCount = selected.filter(item => item.type === "table").length;
+    if (!selected.length) {
+      summaryEl.textContent = "No hay elementos seleccionados.";
+      return;
+    }
+    const parts = [];
+    if (imageCount) parts.push(`${imageCount} imagen${imageCount === 1 ? "" : "es"}`);
+    if (tableCount) parts.push(`${tableCount} tabla${tableCount === 1 ? "" : "s"}`);
+    summaryEl.textContent = `${selected.length} seleccionado${selected.length === 1 ? "" : "s"}: ${parts.join(" y ")}.`;
+  }
+
+  function setAnalyticsSelection(mode) {
+    const boxes = analyticsSelectionCheckboxes();
+    boxes.forEach(input => {
+      if (mode === "clear") input.checked = false;
+      else if (mode === "images") input.checked = input.dataset.analyticsSelection === "image";
+      else if (mode === "tables") input.checked = input.dataset.analyticsSelection === "table";
+      else if (mode === "charts") input.checked = input.dataset.analyticsSelection === "image" && !String(input.value || "").startsWith("ranking-");
+      else if (mode === "rankings") input.checked = input.dataset.analyticsSelection === "image" && String(input.value || "").startsWith("ranking-");
+      else if (mode === "all") input.checked = true;
+    });
+    updateAnalyticsSelectionSummary();
+  }
+
+  function buildAnalyticsSingleTableWorkbook(key) {
+    if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+    const wb = window.XLSX.utils.book_new();
+    if (key === "summary") {
+      const rows = analyticsExportSummaryRows();
+      const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Operario": "Sin datos" }]);
+      applyWorksheetUsability(ws, [30, 20, 22, 20, 24, 20, 20, 20, 22, 22, 20, 18, 24, 22, 22, 22, 22, 22, 22, 16, 16]);
+      window.XLSX.utils.book_append_sheet(wb, ws, "Resumen operarios");
+      return { wb, filename: "resumen-operarios" };
+    }
+    const definition = ANALYTICS_TABLE_DEFINITIONS[key];
+    if (!definition) throw new Error("Tabla no reconocida.");
+    const rows = analyticsRankingSheetRows(key);
+    const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Operario": "Sin datos" }]);
+    applyWorksheetUsability(ws, [12, 34, 24, 22, 22, 22, 22, 22, 18, 18]);
+    window.XLSX.utils.book_append_sheet(wb, ws, definition.title.slice(0, 31));
+    return { wb, filename: definition.filename };
+  }
+
+  async function exportSelectedAnalytics() {
+    const button = $("#downloadSelectedAnalyticsBtn");
+    await withExportButton(button, "Preparando...", async () => {
+      await ensureAnalyticsData();
+      if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+      const selected = getSelectedAnalyticsExports();
+      if (!selected.length) throw new Error("Seleccioná al menos un gráfico, ranking o tabla.");
+      const format = analyticsImageFormat();
+      const context = analyticsExportContext();
+
+      if (selected.length === 1) {
+        const item = selected[0];
+        if (item.type === "image") {
+          const definition = ANALYTICS_EXPORT_DEFINITIONS[item.key];
+          if (!definition) throw new Error("No se encontró la imagen seleccionada.");
+          const blob = await buildAnalyticsImageBlob(item.key, format);
+          downloadBlob(blob, `${definition.filename}-${context.label}.${format}`);
+          toast(`${definition.title} descargado en ${format.toUpperCase()}.`, "success");
+          return;
+        }
+        if (item.key === "workbook") {
+          const wb = buildAnalyticsWorkbook();
+          window.XLSX.writeFile(wb, `analisis-presentismo-cleanit-${context.label}.xlsx`);
+          toast("Excel completo descargado.", "success");
+          return;
+        }
+        const { wb, filename } = buildAnalyticsSingleTableWorkbook(item.key);
+        window.XLSX.writeFile(wb, `${filename}-${context.label}.xlsx`);
+        toast("Tabla Excel descargada.", "success");
+        return;
+      }
+
+      if (!window.JSZip) throw new Error("No se pudo cargar el módulo para generar el ZIP. Verificá tu conexión y volvé a intentar.");
+      const zip = new window.JSZip();
+      const imagesFolder = zip.folder("imagenes");
+      const tablesFolder = zip.folder("tablas");
+      const imageItems = selected.filter(item => item.type === "image");
+      const tableItems = selected.filter(item => item.type === "table");
+
+      for (const item of imageItems) {
+        const definition = ANALYTICS_EXPORT_DEFINITIONS[item.key];
+        if (!definition) continue;
+        imagesFolder.file(`${definition.filename}.${format}`, await buildAnalyticsImageBlob(item.key, format));
+      }
+      for (const item of tableItems) {
+        if (item.key === "workbook") {
+          tablesFolder.file(`analisis-completo-${context.label}.xlsx`, analyticsWorkbookBlob(buildAnalyticsWorkbook()));
+          continue;
+        }
+        const { wb, filename } = buildAnalyticsSingleTableWorkbook(item.key);
+        tablesFolder.file(`${filename}-${context.label}.xlsx`, analyticsWorkbookBlob(wb));
+      }
+      const selectionLines = selected.map(item => `- ${item.type === "image" ? "Imagen" : "Tabla"}: ${item.key}`).join("\n");
+      zip.file("LEEME.txt", `Clean It · Presentismo GPS\nPeríodo: ${context.periodText}\nServicio: ${context.serviceLabel}\nOrden rankings: ${context.orderText}\nFormato imágenes: ${format.toUpperCase()}\n\nSelección incluida:\n${selectionLines}\n`);
+      const bundle = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+      downloadBlob(bundle, `analisis-seleccion-${context.label}.zip`);
+      toast("Selección exportada correctamente.", "success");
+    });
   }
 
   async function exportAnalyticsImage(key, button = null) {
@@ -5966,6 +6411,17 @@
     $("#applyAnalyticsBtn")?.addEventListener("click", () => loadAnalyticsData().catch(error => toast(error.message || "No se pudo generar el análisis.")));
     $("#analyticsService")?.addEventListener("change", renderAnalyticsFromState);
     $("#analyticsOrder")?.addEventListener("change", renderAnalyticsFromState);
+    $("#analyticsImageFormat")?.addEventListener("change", event => syncAnalyticsImageFormatControls(event.target.value));
+    $("#analyticsSelectionImageFormat")?.addEventListener("change", event => syncAnalyticsImageFormatControls(event.target.value));
+    analyticsSelectionCheckboxes().forEach(input => input.addEventListener("change", updateAnalyticsSelectionSummary));
+    $("#analyticsSelectAllChartsBtn")?.addEventListener("click", () => setAnalyticsSelection("charts"));
+    $("#analyticsSelectAllRankingsBtn")?.addEventListener("click", () => setAnalyticsSelection("rankings"));
+    $("#analyticsSelectAllTablesBtn")?.addEventListener("click", () => setAnalyticsSelection("tables"));
+    $("#analyticsSelectEverythingBtn")?.addEventListener("click", () => setAnalyticsSelection("all"));
+    $("#analyticsClearSelectionBtn")?.addEventListener("click", () => setAnalyticsSelection("clear"));
+    $("#downloadSelectedAnalyticsBtn")?.addEventListener("click", () => exportSelectedAnalytics().catch(error => toast(error.message || "No se pudo descargar la selección.")));
+    updateAnalyticsSelectionSummary();
+    syncAnalyticsImageFormatControls($("#analyticsSelectionImageFormat")?.value || $("#analyticsImageFormat")?.value || "png");
     $("#exportAnalyticsCsvBtn")?.addEventListener("click", () => exportAnalyticsCsv().catch(error => toast(error.message || "No se pudo exportar el análisis a CSV.")));
     $("#exportAnalyticsExcelBtn")?.addEventListener("click", () => exportAnalyticsExcel().catch(error => toast(error.message || "No se pudo exportar el análisis a Excel.")));
     $("#downloadAnalyticsBundleBtn")?.addEventListener("click", () => exportAnalyticsBundle().catch(error => toast(error.message || "No se pudo generar el paquete completo.")));
@@ -6001,6 +6457,8 @@
       if (markDayOffButton) return markShiftAsDayOff(markDayOffButton.dataset.markDayoff);
       const clearDayOffButton = event.target.closest("[data-clear-dayoff]");
       if (clearDayOffButton) return clearShiftDayOff(clearDayOffButton.dataset.clearDayoff);
+      const overtimeButton = event.target.closest("[data-overtime-authorization]");
+      if (overtimeButton) return openOvertimeAuthorizationModal(overtimeButton.dataset.overtimeAuthorization);
       const manualButton = event.target.closest("[data-manual-attendance]");
       if (manualButton) return openManualAttendanceModal(manualButton.dataset.manualShift, manualButton.dataset.manualAttendance);
     });
@@ -6015,12 +6473,15 @@
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
       if (!$("#manualAttendanceModal").classList.contains("hidden")) closeModal("manualAttendanceModal");
+      else if (!$("#overtimeAuthorizationModal").classList.contains("hidden")) closeModal("overtimeAuthorizationModal");
       else if (!$("#observationModal").classList.contains("hidden")) closeModal("observationModal");
       else if (!$("#serviceLocationModal").classList.contains("hidden")) closeModal("serviceLocationModal");
       else if (!$("#locationModal").classList.contains("hidden")) closeModal("locationModal");
       else if (!$("#quickDetailModal").classList.contains("hidden")) closeModal("quickDetailModal");
     });
     $("#manualAttendanceForm")?.addEventListener("submit", saveManualAttendance);
+    $("#overtimeAuthorizationForm")?.addEventListener("submit", saveOvertimeAuthorization);
+    $("#revokeOvertimeAuthorizationBtn")?.addEventListener("click", revokeOvertimeAuthorization);
     $("#siteForm").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {

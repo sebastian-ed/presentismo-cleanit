@@ -22,6 +22,7 @@
     assignments: [],
     shifts: [],
     events: [],
+    overtimeAuthorizations: [],
     dashboardRows: [],
     liveStatusFilter: "all",
     recordsEvents: [],
@@ -51,6 +52,7 @@
     bulkSelectedSiteIds: new Set(),
     bulkSelectedRecordIds: new Set(),
     manualAttendanceContext: null,
+    overtimeAuthorizationContext: null,
     assignmentAuditFileName: "",
     assignmentAuditParsed: null,
     assignmentAuditAnalysis: null,
@@ -509,6 +511,42 @@
     return field === "scheduled_end" ? range.end : range.start;
   }
 
+  function overtimeAuthorizationForShift(shiftId) {
+    return state.overtimeAuthorizations.find(item => item.shift_id === shiftId && !item.revoked_at) || null;
+  }
+
+  function formatTimeInBusinessZone(value) {
+    if (!value) return "—";
+    const date = value instanceof Date ? value : new Date(value);
+    if (!Number.isFinite(date.getTime())) return "—";
+    return date.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: APP_TIME_ZONE });
+  }
+
+  function formatDateTimeLocalInput(value) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (!Number.isFinite(date.getTime())) return "";
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: APP_TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.filter(part => part.type !== "literal").map(part => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}`;
+  }
+
+  function parseBusinessDateTimeLocal(value) {
+    const [datePart, timePart] = String(value || "").split("T");
+    if (!datePart || !timePart) return new Date(NaN);
+    return zonedDateTimeToDate(datePart, timePart, APP_TIME_ZONE);
+  }
+
+  function overtimeMinutesForShift(shift, exitEvent) {
+    if (!shift?.scheduled_end || !exitEvent) return 0;
+    const scheduledEnd = getScheduledDateTime(shift, "scheduled_end");
+    const actualExit = new Date(exitEvent.client_time || exitEvent.created_at);
+    if (!Number.isFinite(scheduledEnd.getTime()) || !Number.isFinite(actualExit.getTime())) return 0;
+    return Math.max(0, Math.round((actualExit.getTime() - scheduledEnd.getTime()) / 60000));
+  }
+
   function diffMinutes(dateA, dateB) {
     return Math.round((dateA.getTime() - dateB.getTime()) / 60000);
   }
@@ -683,7 +721,10 @@
   }
 
   function getExitStatus(shift, entryEvent = getEntryEvent(shift), exitEvent = getExitEvent(shift), at = new Date()) {
-    const end = getScheduledDateTime(shift, "scheduled_end");
+    const scheduledEnd = getScheduledDateTime(shift, "scheduled_end");
+    const overtimeAuthorization = overtimeAuthorizationForShift(shift.id);
+    const overtimeEnd = overtimeAuthorization?.authorized_until ? new Date(overtimeAuthorization.authorized_until) : null;
+    const end = overtimeEnd && Number.isFinite(overtimeEnd.getTime()) && overtimeEnd > scheduledEnd ? overtimeEnd : scheduledEnd;
     const grace = Number(shift.grace_minutes ?? 10);
 
     if (exitEvent) {
@@ -708,6 +749,7 @@
       }
       if (entryTiming.isAfterAbsenceThreshold) return { key: "in_service_late", label: "En servicio · ingreso fuera de horario", className: "status-late-critical" };
       if (entryTiming.isLate) return { key: "in_service_late", label: "En servicio · entrada tarde", className: "status-late" };
+      if (overtimeAuthorization && at > scheduledEnd) return { key: "in_service_overtime", label: "En servicio · hora extra autorizada", className: "status-overtime" };
       return { key: "in_service", label: "En servicio", className: "status-ok" };
     }
     if (minutesAfterEnd <= grace) return { key: "exit_due", label: "Debe registrar salida", className: "status-late" };
@@ -722,13 +764,14 @@
     const exitStatus = getExitStatus(shift, entryEvent, exitEvent, at);
 
     if (["completed", "auto_checkout", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(exitStatus.key)) return exitStatus;
-    if (entryEvent && ["in_service", "in_service_outside", "in_service_late"].includes(exitStatus.key)) {
+    if (entryEvent && ["in_service", "in_service_outside", "in_service_late", "in_service_overtime"].includes(exitStatus.key)) {
       if (entryStatus.key === "outside") return { key: "in_service_outside", label: exitStatus.label || "En servicio · entrada fuera de radio", className: "status-outside" };
       if (entryStatus.key === "late") return {
         key: "in_service_late",
         label: entryStatus.isAfterAbsenceThreshold ? "En servicio · ingreso fuera de horario" : "En servicio · entrada tarde",
         className: entryStatus.className || "status-late"
       };
+      if (exitStatus.key === "in_service_overtime") return exitStatus;
       return { key: "in_service", label: "En servicio", className: "status-present" };
     }
     return entryStatus;
@@ -802,18 +845,20 @@
   }
 
   async function refreshBaseData(date = $("#dashboardDate")?.value || todayISO()) {
-    const [profiles, sites, assignments, shifts, events] = await Promise.all([
+    const [profiles, sites, assignments, shifts, events, overtimeAuthorizations] = await Promise.all([
       store.listProfiles(),
       store.listSites(),
       store.listAssignments(),
       store.listShifts(date),
-      store.listEvents()
+      store.listEvents(),
+      store.listOvertimeAuthorizations?.(date, date) || Promise.resolve([])
     ]);
     state.profiles = profiles;
     state.sites = sites;
     state.assignments = assignments;
     state.shifts = shifts;
     state.events = events;
+    state.overtimeAuthorizations = overtimeAuthorizations || [];
   }
 
   async function renderOperatorConnectivity() {
@@ -1092,10 +1137,16 @@
       operatorExitProtectionTimer = null;
     }
     const today = todayISO();
-    const [sites, events, assignments] = await Promise.all([store.listSites(), store.listEvents(), store.listAssignments()]);
+    const [sites, events, assignments, overtimeAuthorizations] = await Promise.all([
+      store.listSites(),
+      store.listEvents(),
+      store.listAssignments(),
+      store.listOvertimeAuthorizations?.(addDaysISO(today, -1), today) || Promise.resolve([])
+    ]);
     state.sites = sites;
     state.events = events;
     state.assignments = assignments;
+    state.overtimeAuthorizations = overtimeAuthorizations || [];
 
     $("#operatorTitle").textContent = `Hola, ${state.currentProfile.full_name}`;
 
@@ -1192,6 +1243,22 @@
     const checkedOut = Boolean(exitEvent);
     const detectedSite = entryEvent ? byId(state.sites, entryEvent.site_id) : null;
     const displaySite = detectedSite || assignedSite;
+    const overtimeAuthorization = overtimeAuthorizationForShift(shiftId);
+    const shiftDate = entryEvent?.shift_date || shiftDateFromId(shiftId, todayISO());
+    const scheduleShift = assignment?.scheduled_end ? {
+      shift_date: shiftDate,
+      scheduled_start: assignment.scheduled_start,
+      scheduled_end: assignment.scheduled_end
+    } : null;
+    const scheduledEnd = scheduleShift ? getScheduledDateTime(scheduleShift, "scheduled_end") : null;
+    const overtimeMinutes = checkedOut && scheduleShift ? overtimeMinutesForShift(scheduleShift, exitEvent) : 0;
+    const overtimeNotice = checkedIn && !checkedOut && scheduleShift
+      ? overtimeAuthorization
+        ? `<div class="overtime-approved-notice"><strong>Horas extra autorizadas.</strong><br>Tu supervisor autorizó continuar hasta las <strong>${escapeHtml(formatTimeInBusinessZone(overtimeAuthorization.authorized_until))}</strong>${overtimeAuthorization.approved_by_name ? ` · aprobado por ${escapeHtml(overtimeAuthorization.approved_by_name)}` : ""}. Podés registrar la salida normalmente cuando termines. El cierre automático queda postergado hasta 45 minutos después del horario autorizado.</div>`
+        : `<div class="inline-warning overtime-warning"><strong>¿Vas a trabajar después de las ${escapeHtml(formatTimeInBusinessZone(scheduledEnd))}?</strong><br>Las horas extra deben estar <strong>aprobadas previamente por tu supervisor</strong>. No te autorices por tu cuenta: si no hay una aprobación cargada, el cierre automático seguirá funcionando con la regla habitual.</div>`
+      : checkedOut && overtimeMinutes > 0
+        ? `<div class="overtime-approved-notice overtime-finished-notice"><strong>Salida registrada con ${escapeHtml(String(overtimeMinutes))} min posteriores al horario programado.</strong>${overtimeAuthorization ? ` La extensión estaba autorizada hasta las ${escapeHtml(formatTimeInBusinessZone(overtimeAuthorization.authorized_until))}.` : ""}</div>`
+        : "";
 
     const entryDisabled = checkedIn ? "disabled" : "";
     const exitProtection = checkedIn && !checkedOut ? exitProtectionState(entryEvent) : { active: false, remainingMs: 0, unlockAt: null };
@@ -1210,7 +1277,7 @@
       ? `${formatDateTime(exitEvent.client_time || exitEvent.created_at)} · ${["supervisor_manual", "system_auto"].includes(exitEvent.recorded_via) ? recordedViaLabel(exitEvent) : gpsSummary(exitEvent)}${autoClosed && exitEvent.created_at ? ` · procesado ${formatDateTime(exitEvent.created_at)}` : ""}`
       : "Sin salida registrada";
     const autoCheckoutNotice = autoClosed
-      ? `<div class="inline-warning auto-checkout-notice"><strong>Este turno fue cerrado automáticamente.</strong><br>El operario no registró la salida. Para no dejar el turno abierto, el sistema imputó la salida al horario programado y dejó registrada la hora real en que ejecutó el cierre.</div>`
+      ? `<div class="inline-warning auto-checkout-notice"><strong>Este turno fue cerrado automáticamente.</strong><br>El operario no registró la salida. Para no dejar el turno abierto, el sistema imputó la salida ${overtimeAuthorization ? `al último horario de horas extra autorizado (${escapeHtml(formatTimeInBusinessZone(overtimeAuthorization.authorized_until))})` : "al horario programado"} y dejó registrada la hora real en que ejecutó el cierre.</div>`
       : "";
 
     const canCheckInAfterAutomaticAbsence = Boolean(automaticAbsenceEvent && !checkedIn && !checkedOut);
@@ -1276,6 +1343,7 @@
             <span class="status-pill ${autoClosed ? "status-auto" : checkedOut ? "status-present" : exitProtected ? "status-pending" : "status-pending"}">${autoClosed ? "Cierre automático" : checkedOut ? "Registrada" : exitProtected ? "Bloqueada temporalmente" : "Pendiente"}</span>
           </div>
           ${autoCheckoutNotice}
+          ${overtimeNotice}
           ${exitProtectionNotice}
           <label class="checkbox-row">
             <input type="checkbox" id="confirm-out-${escapeHtml(shiftId)}" ${exitDisabled} />
@@ -1552,6 +1620,23 @@
       const site = byId(state.sites, entryEvent.site_id);
       const distance = site ? haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng)) : null;
       const isInside = site ? distance <= Number(site.gps_radius_m || 120) : null;
+      const assignment = entryEvent.assignment_id ? byId(state.assignments, entryEvent.assignment_id) : null;
+      const overtimeAuthorization = overtimeAuthorizationForShift(shiftId);
+      let overtimeNote = "";
+      if (assignment?.scheduled_end) {
+        const shiftForOvertime = {
+          shift_date: shiftDate,
+          scheduled_start: assignment.scheduled_start,
+          scheduled_end: assignment.scheduled_end
+        };
+        const overtimeMinutes = overtimeMinutesForShift(shiftForOvertime, { client_time: gpsMoment.toISOString() });
+        if (overtimeMinutes > 0) {
+          overtimeNote = overtimeAuthorization
+            ? `Salida con ${overtimeMinutes} min posteriores al horario programado. Horas extra autorizadas hasta ${formatTimeInBusinessZone(overtimeAuthorization.authorized_until)}${overtimeAuthorization.approved_by_name ? ` por ${overtimeAuthorization.approved_by_name}` : ""}.`
+            : `Salida con ${overtimeMinutes} min posteriores al horario programado. No hay autorización de horas extra cargada en el sistema.`;
+        }
+      }
+      const checkoutNotes = [notes, overtimeNote].filter(Boolean).join(" · ");
 
       const savedEvent = await store.createEvent({
         shift_id: shiftId,
@@ -1564,7 +1649,7 @@
         work_type: entryEvent.work_type || "regular",
         entry_source: entryEvent.entry_source || (entryEvent.assignment_id ? "assignment" : "operator_extra"),
         validation_status: entryEvent.validation_status || (entryEvent.assignment_id ? "confirmed" : "pending"),
-        notes,
+        notes: checkoutNotes,
         lat: latitude,
         lng: longitude,
         gps_accuracy_m: accuracy,
@@ -2143,6 +2228,8 @@
     return ["late", "absent", "outside"].includes(row.entryStatus.key)
       || row.entryTiming?.isLate === true
       || ["auto_checkout", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(row.exitStatus.key)
+      || row.overtimeInProgressUnapproved === true
+      || row.overtimeUnapproved === true
       || (row.isSelfReportedExtra && ["pending", "rejected"].includes(row.extraValidationStatus));
   }
 
@@ -2171,6 +2258,8 @@
     if (row.entryStatus.key === "outside") items.push({ label: "Entrada fuera de radio", className: "status-outside" });
 
     if (exitItems[row.exitStatus.key]) items.push(exitItems[row.exitStatus.key]);
+    if (row.overtimeInProgressUnapproved) items.push({ label: "Turno excedido · horas extra sin autorización cargada", className: "status-overtime-unapproved" });
+    if (row.overtimeUnapproved) items.push({ label: `Horas extra sin autorización · +${row.overtimeMinutes} min`, className: "status-overtime-unapproved" });
     if (row.isSelfReportedExtra && row.extraValidationStatus === "pending") items.push({ label: "Trabajo extraordinario pendiente de validar", className: "status-extra" });
     if (row.isSelfReportedExtra && row.extraValidationStatus === "rejected") items.push({ label: "Trabajo extraordinario rechazado", className: "status-rejected" });
     return items;
@@ -2247,7 +2336,12 @@
       const entryTiming = getEntryTimingInfo(shift, entryEvent);
       const automaticAbsenceEvent = getAutomaticAbsenceEvent(shift);
       const otherServiceEntry = !entryEvent && entryStatus.key === "absent" ? findOtherServiceEntryDuringShift(shift) : null;
-      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent, entryTiming, automaticAbsenceEvent, otherServiceEntry, isSelfReportedExtra: false };
+      const overtimeAuthorization = overtimeAuthorizationForShift(shift.id);
+      const overtimeMinutes = overtimeMinutesForShift(shift, exitEvent);
+      const scheduledEnd = shift.scheduled_end ? getScheduledDateTime(shift, "scheduled_end") : null;
+      const overtimeInProgressUnapproved = Boolean(entryEvent && !exitEvent && !overtimeAuthorization && shift.shift_date === todayISO() && scheduledEnd && Date.now() > scheduledEnd.getTime());
+      const overtimeUnapproved = Boolean(exitEvent && overtimeMinutes > 0 && !overtimeAuthorization);
+      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent, entryTiming, automaticAbsenceEvent, otherServiceEntry, isSelfReportedExtra: false, overtimeAuthorization, overtimeMinutes, overtimeInProgressUnapproved, overtimeUnapproved };
     });
     return [...regularRows, ...getSelfReportedExtraDashboardRows()].sort((a, b) => `${a.shift.scheduled_start || "99:99"}|${byId(state.sites, a.shift.site_id)?.name || ""}`.localeCompare(`${b.shift.scheduled_start || "99:99"}|${byId(state.sites, b.shift.site_id)?.name || ""}`));
   }
@@ -2264,6 +2358,7 @@
       { key: "day_off", label: "Francos", tone: "dayoff", matches: row => row.entryStatus.key === "day_off" },
       { key: "pending", label: "Pendientes", tone: "pending", matches: row => ["scheduled", "on_window"].includes(row.entryStatus.key) },
       { key: "extra", label: "Coberturas / refuerzos", tone: "extra", matches: row => row.isSelfReportedExtra || ["coverage", "reinforcement"].includes(String(row.shift.assignment_type || "")) },
+      { key: "overtime", label: "Horas extra", tone: "overtime", matches: row => Boolean(row.overtimeAuthorization || row.overtimeInProgressUnapproved || row.overtimeUnapproved || row.overtimeMinutes > 0) },
       { key: "auto_checkout", label: "Cierres automáticos", tone: "exit", matches: row => row.exitStatus.key === "auto_checkout" },
       { key: "exit_alert", label: "Alertas de salida", tone: "exit", matches: row => exitAlertKeys.includes(row.exitStatus.key) }
     ];
@@ -2663,6 +2758,74 @@
     }
   }
 
+  function openOvertimeAuthorizationModal(shiftId) {
+    if (!isManagementProfile()) return toast("No tenés permisos para autorizar horas extra.");
+    const row = dashboardRowByShiftId(shiftId);
+    if (!row?.shift || row.isSelfReportedExtra) return toast("No se encontró un turno programado válido.");
+    if (!row.entryEvent) return toast("Primero debe existir una entrada registrada.");
+    if (row.exitEvent) return toast("El turno ya tiene una salida registrada.");
+    const operator = byId(state.profiles, row.shift.operator_id);
+    const site = byId(state.sites, row.shift.site_id);
+    const scheduledEnd = getScheduledDateTime(row.shift, "scheduled_end");
+    const existing = overtimeAuthorizationForShift(shiftId);
+    let suggested = existing?.authorized_until ? new Date(existing.authorized_until) : new Date(scheduledEnd.getTime() + 60 * 60000);
+    const minimum = new Date(Math.max(scheduledEnd.getTime() + 60000, Date.now() + 60000));
+    if (!Number.isFinite(suggested.getTime()) || suggested <= minimum) suggested = new Date(minimum.getTime() + 59 * 60000);
+
+    state.overtimeAuthorizationContext = { shiftId };
+    $("#overtimeAuthorizationModalTitle").textContent = existing ? "Editar autorización de horas extra" : "Autorizar horas extra";
+    $("#overtimeAuthorizationModalSubtitle").textContent = `${operator?.full_name || "Operario"} · ${site?.name || "Servicio"} · salida prevista ${formatTime(row.shift.scheduled_end)}`;
+    $("#overtimeAuthorizedUntil").value = formatDateTimeLocalInput(suggested);
+    $("#overtimeAuthorizedUntil").min = formatDateTimeLocalInput(minimum);
+    $("#overtimeAuthorizationReason").value = existing?.notes || "";
+    const revokeButton = $("#revokeOvertimeAuthorizationBtn");
+    if (revokeButton) revokeButton.classList.toggle("hidden", !existing);
+    openModal("overtimeAuthorizationModal");
+    window.setTimeout(() => $("#overtimeAuthorizedUntil")?.focus(), 100);
+  }
+
+  async function saveOvertimeAuthorization(event) {
+    event.preventDefault();
+    const shiftId = state.overtimeAuthorizationContext?.shiftId;
+    if (!shiftId) return toast("No se encontró el turno a autorizar.");
+    const row = dashboardRowByShiftId(shiftId);
+    if (!row?.shift || !row.entryEvent || row.exitEvent) return toast("El turno ya no está disponible para extender.");
+    const raw = $("#overtimeAuthorizedUntil")?.value;
+    const reason = $("#overtimeAuthorizationReason")?.value.trim() || "";
+    if (!raw) return toast("Indicá hasta qué hora está autorizada la extensión.");
+    if (!reason) return toast("Indicá el motivo de la autorización de horas extra.");
+    const authorizedUntil = parseBusinessDateTimeLocal(raw);
+    if (!Number.isFinite(authorizedUntil.getTime())) return toast("La fecha y hora autorizadas no son válidas.");
+    const scheduledEnd = getScheduledDateTime(row.shift, "scheduled_end");
+    if (authorizedUntil <= scheduledEnd) return toast("La hora autorizada debe ser posterior al horario programado de salida.");
+    if (authorizedUntil <= new Date()) return toast("La hora autorizada debe estar en el futuro.");
+
+    try {
+      await store.setOvertimeAuthorization(shiftId, authorizedUntil.toISOString(), reason);
+      closeModal("overtimeAuthorizationModal");
+      state.overtimeAuthorizationContext = null;
+      toast(`Horas extra autorizadas hasta las ${formatTimeInBusinessZone(authorizedUntil)}.`, "success");
+      await renderSupervisorView();
+    } catch (error) {
+      toast(error.message || "No se pudo autorizar la hora extra.");
+    }
+  }
+
+  async function revokeOvertimeAuthorization() {
+    const shiftId = state.overtimeAuthorizationContext?.shiftId;
+    if (!shiftId) return toast("No se encontró la autorización.");
+    if (!window.confirm("¿Quitar la autorización de horas extra? Si el turno sigue abierto, volverá a aplicar el cierre automático habitual.")) return;
+    try {
+      await store.revokeOvertimeAuthorization(shiftId);
+      closeModal("overtimeAuthorizationModal");
+      state.overtimeAuthorizationContext = null;
+      toast("Autorización de horas extra quitada.", "success");
+      await renderSupervisorView();
+    } catch (error) {
+      toast(error.message || "No se pudo quitar la autorización.");
+    }
+  }
+
   function renderDashboard() {
     const rows = getDashboardRows();
     state.dashboardRows = rows;
@@ -2727,6 +2890,18 @@
         ? `<button class="secondary-btn small-btn" data-manual-attendance="present" data-manual-shift="${escapeHtml(shift.id)}" type="button">${row.automaticAbsenceEvent ? "Entrada tardía manual" : "Entrada manual"}</button>` : "";
       const manualExitButton = entryEvent && !exitEvent
         ? `<button class="secondary-btn small-btn" data-manual-attendance="checkout" data-manual-shift="${escapeHtml(shift.id)}" type="button">Salida manual</button>` : "";
+      const overtimeAuthorization = row.overtimeAuthorization || overtimeAuthorizationForShift(shift.id);
+      const overtimeButton = !row.isSelfReportedExtra && entryEvent && !exitEvent && shift.scheduled_end
+        ? `<button class="overtime-btn small-btn" data-overtime-authorization="${escapeHtml(shift.id)}" type="button">${overtimeAuthorization ? "Editar hora extra" : "Autorizar hora extra"}</button>` : "";
+      const overtimeDetail = overtimeAuthorization
+        ? `<div class="overtime-live-note approved"><strong>Hora extra autorizada</strong> hasta ${escapeHtml(formatTimeInBusinessZone(overtimeAuthorization.authorized_until))}${overtimeAuthorization.approved_by_name ? ` · ${escapeHtml(overtimeAuthorization.approved_by_name)}` : ""}</div>`
+        : row.overtimeInProgressUnapproved
+          ? `<div class="overtime-live-note unapproved"><strong>Horario excedido sin autorización</strong></div>`
+          : row.overtimeUnapproved
+            ? `<div class="overtime-live-note unapproved"><strong>+${escapeHtml(String(row.overtimeMinutes))} min sin autorización cargada</strong></div>`
+            : row.overtimeMinutes > 0
+              ? `<div class="overtime-live-note approved"><strong>+${escapeHtml(String(row.overtimeMinutes))} min</strong> posteriores al horario</div>`
+              : "";
       const entryTiming = row.entryTiming || getEntryTimingInfo(shift, entryEvent);
       const lateEntryNote = entryEvent && entryTiming.isLate
         ? `<div class="late-entry-note ${entryTiming.isAfterAbsenceThreshold ? "critical" : ""}">${entryTiming.isAfterAbsenceThreshold
@@ -2738,7 +2913,8 @@
         ? `<div class="late-entry-note critical">Sin entrada en este servicio. El operario registró entrada en <strong>${escapeHtml(otherServiceEntrySite?.name || "otro servicio")}</strong> a las ${escapeHtml(formatClock(row.otherServiceEntry.client_time || row.otherServiceEntry.created_at))}.</div>`
         : "";
       const rowTimingClass = entryTiming.isAfterAbsenceThreshold ? "live-late-critical-row" : entryTiming.isLate ? "live-late-row" : "";
-      const rowClasses = [searchTerm ? "search-match-row" : "", rowTimingClass].filter(Boolean).join(" ");
+      const overtimeRowClass = row.overtimeInProgressUnapproved || row.overtimeUnapproved ? "live-overtime-unapproved-row" : overtimeAuthorization ? "live-overtime-approved-row" : "";
+      const rowClasses = [searchTerm ? "search-match-row" : "", rowTimingClass, overtimeRowClass].filter(Boolean).join(" ");
 
       return `
         <tr class="${rowClasses}">
@@ -2747,13 +2923,14 @@
           <td>${row.isSelfReportedExtra ? `<span class="extra-schedule-label">Sin horario previo</span>` : `${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`}</td>
           <td>${statusDetailCell(entryStatus, entryEvent || dayOffEvent, "Sin entrada")}${lateEntryNote}${otherServiceEntryNote}</td>
           <td>${statusDetailCell(exitStatus, exitEvent || dayOffEvent, "Sin salida")}</td>
-          <td><span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.client_time || lastEvent.created_at)}` : "—"}</span></td>
+          <td><span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.client_time || lastEvent.created_at)}` : "—"}</span>${overtimeDetail}</td>
           <td class="row-actions">
             ${mapButtons}
             ${observationButton}
             ${dayOffButton}
             ${manualEntryButton}
             ${manualExitButton}
+            ${overtimeButton}
             ${validationActions}
             <a class="wa-btn ${normalizePhone(site?.whatsapp_phone) ? "" : "disabled-link"}" href="${url}" target="_blank" rel="noopener">WhatsApp consorcio</a>
           </td>
@@ -2799,6 +2976,7 @@
     if (!modal) return;
     modal.classList.add("hidden");
     if (id === "manualAttendanceModal") state.manualAttendanceContext = null;
+    if (id === "overtimeAuthorizationModal") state.overtimeAuthorizationContext = null;
     if (id === "locationModal" && attendanceMapInstance) {
       attendanceMapInstance.remove();
       attendanceMapInstance = null;
@@ -6279,6 +6457,8 @@
       if (markDayOffButton) return markShiftAsDayOff(markDayOffButton.dataset.markDayoff);
       const clearDayOffButton = event.target.closest("[data-clear-dayoff]");
       if (clearDayOffButton) return clearShiftDayOff(clearDayOffButton.dataset.clearDayoff);
+      const overtimeButton = event.target.closest("[data-overtime-authorization]");
+      if (overtimeButton) return openOvertimeAuthorizationModal(overtimeButton.dataset.overtimeAuthorization);
       const manualButton = event.target.closest("[data-manual-attendance]");
       if (manualButton) return openManualAttendanceModal(manualButton.dataset.manualShift, manualButton.dataset.manualAttendance);
     });
@@ -6293,12 +6473,15 @@
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
       if (!$("#manualAttendanceModal").classList.contains("hidden")) closeModal("manualAttendanceModal");
+      else if (!$("#overtimeAuthorizationModal").classList.contains("hidden")) closeModal("overtimeAuthorizationModal");
       else if (!$("#observationModal").classList.contains("hidden")) closeModal("observationModal");
       else if (!$("#serviceLocationModal").classList.contains("hidden")) closeModal("serviceLocationModal");
       else if (!$("#locationModal").classList.contains("hidden")) closeModal("locationModal");
       else if (!$("#quickDetailModal").classList.contains("hidden")) closeModal("quickDetailModal");
     });
     $("#manualAttendanceForm")?.addEventListener("submit", saveManualAttendance);
+    $("#overtimeAuthorizationForm")?.addEventListener("submit", saveOvertimeAuthorization);
+    $("#revokeOvertimeAuthorizationBtn")?.addEventListener("click", revokeOvertimeAuthorization);
     $("#siteForm").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
