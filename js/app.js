@@ -1190,6 +1190,23 @@
       .filter(a => (a.assignment_type || "fixed") !== "fixed" || !suppressors.some(extra => extra.id !== a.id && assignmentsOverlap(extra, a)))
       .sort((a, b) => String(a.scheduled_start).localeCompare(String(b.scheduled_start)));
 
+    // Un turno nocturno pertenece a la fecha en la que comenzó. Después de medianoche
+    // el operario debe seguir viendo ese mismo turno (shift_id con fecha de ayer) para
+    // poder registrar la salida. Antes solo se renderizaban asignaciones de "hoy", por
+    // lo que un 22:00-06:00 desaparecía a las 00:00 aunque la entrada estuviera abierta.
+    const yesterday = addDaysISO(today, -1);
+    const overnightCarryovers = state.assignments
+      .filter(a => a.operator_id === state.currentProfile.id
+        && assignmentAppliesOnDate(a, yesterday)
+        && String(a.scheduled_end || "") <= String(a.scheduled_start || ""))
+      .filter(a => {
+        const shiftId = `${a.id}__${yesterday}`;
+        const hasEntry = state.events.some(e => e.shift_id === shiftId && e.event_type === "present");
+        const hasExit = state.events.some(e => e.shift_id === shiftId && e.event_type === "checkout");
+        return hasEntry && !hasExit;
+      })
+      .sort((a, b) => String(a.scheduled_start).localeCompare(String(b.scheduled_start)));
+
     const extraEvents = state.events.filter(e => {
       if (e.operator_id !== state.currentProfile.id || e.assignment_id != null || e.entry_source !== "operator_extra") return false;
       if (!["coverage", "reinforcement"].includes(String(e.work_type || ""))) return false;
@@ -1208,7 +1225,7 @@
     const container = $("#operatorShiftContainer");
     const cards = [];
 
-    if (!todaysAssignments.length && !extraGroups.size) {
+    if (!todaysAssignments.length && !overnightCarryovers.length && !extraGroups.size) {
       cards.push(`
         <article class="operator-card operator-empty-card">
           <p class="eyebrow">Sin asignación fija para hoy</p>
@@ -1216,6 +1233,14 @@
           <p class="muted no-margin">Si te enviaron a cubrir una ausencia o a reforzar otro servicio, usá la opción extraordinaria de abajo para que el fichaje quede asociado al lugar correcto.</p>
         </article>`);
     }
+
+    overnightCarryovers.forEach(assignment => {
+      const shiftId = `${assignment.id}__${yesterday}`;
+      const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
+      const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
+      const assignedSite = byId(state.sites, assignment.site_id);
+      cards.push(renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite, assignment));
+    });
 
     todaysAssignments.forEach(assignment => {
       const shiftId = `${assignment.id}__${today}`;
@@ -1239,6 +1264,11 @@
     cards.push(renderExtraDutyStartCard(hasOpenExtra));
     container.innerHTML = cards.join("");
 
+    overnightCarryovers.forEach(assignment => {
+      const shiftId = `${assignment.id}__${yesterday}`;
+      container.querySelector(`[data-gps-checkout="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckout(shiftId));
+      container.querySelector(`[data-request-overtime="${shiftId}"]`)?.addEventListener("click", () => openOperatorOvertimeRequestModal(shiftId, assignment));
+    });
     todaysAssignments.forEach(assignment => {
       const shiftId = `${assignment.id}__${today}`;
       container.querySelector(`[data-gps-checkin="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckin(shiftId, assignment));
@@ -1337,7 +1367,14 @@
     else if (canCheckInAfterAutomaticAbsence) { statusLabel = "Ausencia automática · podés fichar"; statusClass = "status-absent"; }
     else { statusLabel = "Sin marcar"; statusClass = "status-pending"; }
 
-    const dateLabel = formatISODate(todayISO(), { weekday: "long", day: "numeric", month: "long" });
+    const dateLabel = formatISODate(shiftDate, { weekday: "long", day: "numeric", month: "long" });
+    const isOvernightCarryover = shiftDate !== todayISO()
+      && assignment?.scheduled_start
+      && assignment?.scheduled_end
+      && String(assignment.scheduled_end) <= String(assignment.scheduled_start)
+      && checkedIn
+      && !checkedOut;
+    const dayContextLabel = isOvernightCarryover ? "Turno nocturno iniciado ayer" : "Hoy";
     const assignmentType = assignment?.assignment_type || "fixed";
     const isExtraAssignment = assignmentType !== "fixed";
     const coveredOperator = assignment?.covered_operator_id ? byId(state.profiles, assignment.covered_operator_id) : null;
@@ -1349,7 +1386,7 @@
       <article class="operator-card main-checkin">
         <div class="card-title-row">
           <div>
-            <p class="eyebrow">Hoy · ${escapeHtml(dateLabel)}</p>
+            <p class="eyebrow">${escapeHtml(dayContextLabel)} · ${escapeHtml(dateLabel)}</p>
             ${assignmentMeta}
             <h3 class="service-title">${displaySite ? escapeHtml(displaySite.name) : "Sin servicio asignado para hoy"}</h3>
             <p class="muted">${displaySite ? escapeHtml(displaySite.address || "") : "Contactá al supervisor si creés que hay un error."}</p>
