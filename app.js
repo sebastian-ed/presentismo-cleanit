@@ -74,6 +74,7 @@
   const $$ = (selector) => Array.from(document.querySelectorAll(selector));
   const APP_TIME_ZONE = CONFIG.TIMEZONE || CONFIG.TIME_ZONE || "America/Argentina/Buenos_Aires";
   const EXIT_PROTECTION_MINUTES = Math.max(1, Number(CONFIG.EXIT_PROTECTION_MINUTES || 10));
+  const AUTO_CHECKOUT_DELAY_MINUTES = Math.max(1, Number(CONFIG.AUTO_CHECKOUT_DELAY_MINUTES || 45));
 
   function datePartsInTimeZone(date = new Date(), timeZone = APP_TIME_ZONE) {
     const parts = new Intl.DateTimeFormat("en-CA", {
@@ -766,6 +767,21 @@
       if (isPendingOvertimeRequest(overtimeRequest) && at > scheduledEnd) return { key: "in_service_overtime_pending", label: "En servicio · hora extra pendiente", className: "status-overtime-pending" };
       return { key: "in_service", label: "En servicio", className: "status-ok" };
     }
+
+    // Pasarse algunos minutos del horario de salida NO convierte el turno en horas extra.
+    // Si no existe una solicitud/autorización de hora extra, se muestra como salida demorada
+    // y solo pasa a ser una incidencia de salida cuando alcanza el límite del cierre automático.
+    if (!overtimeAuthorization && !pendingRequestEnd) {
+      const delayMinutes = Math.max(0, diffMinutes(at, scheduledEnd));
+      const entryMoment = entryEvent ? new Date(entryEvent.client_time || entryEvent.created_at) : scheduledEnd;
+      const autoCloseReference = entryMoment && Number.isFinite(entryMoment.getTime()) && entryMoment > scheduledEnd ? entryMoment : scheduledEnd;
+      const autoCloseDeadline = new Date(autoCloseReference.getTime() + AUTO_CHECKOUT_DELAY_MINUTES * 60000);
+      if (at < autoCloseDeadline) {
+        return { key: "exit_delayed", label: `Salida demorada · +${delayMinutes} min`, className: "status-late", delayMinutes };
+      }
+      return { key: "missing_exit", label: `Salida no registrada · +${delayMinutes} min`, className: "status-absent", delayMinutes };
+    }
+
     if (minutesAfterEnd <= grace) return { key: "exit_due", label: "Debe registrar salida", className: "status-late" };
     return { key: "missing_exit", label: "Salida no registrada", className: "status-absent" };
   }
@@ -777,7 +793,7 @@
     const entryStatus = getEntryStatus(shift, entryEvent, manualEvent, at);
     const exitStatus = getExitStatus(shift, entryEvent, exitEvent, at);
 
-    if (["completed", "auto_checkout", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(exitStatus.key)) return exitStatus;
+    if (["completed", "auto_checkout", "early_exit", "exit_outside", "missing_exit", "exit_due", "exit_delayed"].includes(exitStatus.key)) return exitStatus;
     if (entryEvent && ["in_service", "in_service_outside", "in_service_late", "in_service_overtime", "in_service_overtime_pending"].includes(exitStatus.key)) {
       if (entryStatus.key === "outside") return { key: "in_service_outside", label: exitStatus.label || "En servicio · entrada fuera de radio", className: "status-outside" };
       if (entryStatus.key === "late") return {
@@ -1279,10 +1295,14 @@
         : overtimeRequestPending
           ? `<div class="overtime-pending-notice"><strong>Hora extra solicitada · pendiente de aprobación.</strong><br>Solicitaste continuar hasta las <strong>${escapeHtml(formatTimeInBusinessZone(overtimeRequest.requested_until))}</strong>. Podés seguir trabajando y fichar tu salida real. <strong>Esto no significa que la hora extra esté aprobada:</strong> el supervisor o administrador debe revisarla. Mientras esté pendiente, el cierre automático se posterga hasta 45 minutos después del horario solicitado.</div>`
           : overtimeRequest?.status === "rejected"
-            ? `<div class="inline-warning overtime-warning"><strong>La solicitud de hora extra fue rechazada.</strong><br>Si necesitás continuar trabajando, avisá al supervisor y volvé a solicitarla. Mientras no exista una nueva solicitud pendiente o una autorización, vuelve a aplicar el cierre automático habitual.</div>`
-            : `<div class="inline-warning overtime-warning"><strong>¿Vas a trabajar después de las ${escapeHtml(formatTimeInBusinessZone(scheduledEnd))}?</strong><br>Podés <strong>solicitar la hora extra antes del cierre automático</strong>. Quedará pendiente para que la apruebe o rechace un supervisor/administrador. La solicitud por sí sola no implica aprobación.</div>`
+            ? `<div class="inline-warning overtime-warning"><strong>La solicitud de hora extra fue rechazada.</strong><br>Si realmente necesitás extender la jornada por una cobertura o una necesidad especial, avisá al supervisor y volvé a solicitarla. Una demora normal de algunos minutos al terminar no requiere pedir hora extra.</div>`
+            : `<div class="overtime-guidance-notice"><strong>Hora extra solo para extensiones excepcionales.</strong><br>Solicitala si te pidieron quedarte por una ausencia, una cobertura o una necesidad especial del cliente. <strong>Si simplemente terminás unos minutos después de tu horario, registrá la salida normalmente: no hace falta solicitar hora extra.</strong></div>`
       : checkedOut && overtimeMinutes > 0
-        ? `<div class="${overtimeAuthorization ? "overtime-approved-notice" : overtimeRequestPending ? "overtime-pending-notice" : "inline-warning overtime-warning"} overtime-finished-notice"><strong>Salida registrada con ${escapeHtml(String(overtimeMinutes))} min posteriores al horario programado.</strong>${overtimeAuthorization ? ` La extensión fue autorizada hasta las ${escapeHtml(formatTimeInBusinessZone(overtimeAuthorization.authorized_until))}.` : overtimeRequestPending ? ` La solicitud sigue pendiente de aprobación del supervisor.` : ` No hay una autorización de horas extra aprobada.`}</div>`
+        ? overtimeAuthorization
+          ? `<div class="overtime-approved-notice overtime-finished-notice"><strong>Salida registrada con ${escapeHtml(String(overtimeMinutes))} min posteriores al horario programado.</strong> La extensión fue autorizada hasta las ${escapeHtml(formatTimeInBusinessZone(overtimeAuthorization.authorized_until))}.</div>`
+          : overtimeRequestPending
+            ? `<div class="overtime-pending-notice overtime-finished-notice"><strong>Salida registrada con ${escapeHtml(String(overtimeMinutes))} min posteriores al horario programado.</strong> La solicitud de hora extra sigue pendiente de aprobación del supervisor.</div>`
+            : `<div class="exit-delay-notice overtime-finished-notice"><strong>Salida registrada ${escapeHtml(String(overtimeMinutes))} min después del horario programado.</strong><br>Se registra la diferencia horaria, pero no se considera una solicitud de horas extra.</div>`
         : "";
 
     const entryDisabled = checkedIn ? "disabled" : "";
@@ -1662,7 +1682,7 @@
             ? `Salida con ${overtimeMinutes} min posteriores al horario programado. Horas extra autorizadas hasta ${formatTimeInBusinessZone(overtimeAuthorization.authorized_until)}${overtimeAuthorization.approved_by_name ? ` por ${overtimeAuthorization.approved_by_name}` : ""}.`
             : isPendingOvertimeRequest(overtimeRequest)
               ? `Salida con ${overtimeMinutes} min posteriores al horario programado. Solicitud de hora extra pendiente de aprobación hasta ${formatTimeInBusinessZone(overtimeRequest.requested_until)}.`
-              : `Salida con ${overtimeMinutes} min posteriores al horario programado. No hay autorización de horas extra cargada en el sistema.`;
+              : `Salida registrada ${overtimeMinutes} min después del horario programado.`;
         }
       }
       const checkoutNotes = [notes, overtimeNote].filter(Boolean).join(" · ");
@@ -2258,8 +2278,6 @@
       || row.entryTiming?.isLate === true
       || ["auto_checkout", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(row.exitStatus.key)
       || row.overtimeRequestPending === true
-      || row.overtimeInProgressUnapproved === true
-      || row.overtimeUnapproved === true
       || (row.isSelfReportedExtra && ["pending", "rejected"].includes(row.extraValidationStatus));
   }
 
@@ -2289,8 +2307,6 @@
 
     if (exitItems[row.exitStatus.key]) items.push(exitItems[row.exitStatus.key]);
     if (row.overtimeRequestPending) items.push({ label: `Hora extra pendiente de aprobación${row.overtimeRequest?.requested_until ? ` · hasta ${formatTimeInBusinessZone(row.overtimeRequest.requested_until)}` : ""}`, className: "status-overtime-pending" });
-    if (row.overtimeInProgressUnapproved) items.push({ label: "Turno excedido · horas extra sin autorización cargada", className: "status-overtime-unapproved" });
-    if (row.overtimeUnapproved) items.push({ label: `Horas extra sin autorización · +${row.overtimeMinutes} min`, className: "status-overtime-unapproved" });
     if (row.isSelfReportedExtra && row.extraValidationStatus === "pending") items.push({ label: "Trabajo extraordinario pendiente de validar", className: "status-extra" });
     if (row.isSelfReportedExtra && row.extraValidationStatus === "rejected") items.push({ label: "Trabajo extraordinario rechazado", className: "status-rejected" });
     return items;
@@ -2371,10 +2387,7 @@
       const overtimeRequest = overtimeRequestForShift(shift.id);
       const overtimeRequestPending = isPendingOvertimeRequest(overtimeRequest);
       const overtimeMinutes = overtimeMinutesForShift(shift, exitEvent);
-      const scheduledEnd = shift.scheduled_end ? getScheduledDateTime(shift, "scheduled_end") : null;
-      const overtimeInProgressUnapproved = Boolean(entryEvent && !exitEvent && !overtimeAuthorization && !overtimeRequestPending && shift.shift_date === todayISO() && scheduledEnd && Date.now() > scheduledEnd.getTime());
-      const overtimeUnapproved = Boolean(exitEvent && overtimeMinutes > 0 && !overtimeAuthorization && !overtimeRequestPending);
-      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent, entryTiming, automaticAbsenceEvent, otherServiceEntry, isSelfReportedExtra: false, overtimeAuthorization, overtimeRequest, overtimeRequestPending, overtimeMinutes, overtimeInProgressUnapproved, overtimeUnapproved };
+      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent, entryTiming, automaticAbsenceEvent, otherServiceEntry, isSelfReportedExtra: false, overtimeAuthorization, overtimeRequest, overtimeRequestPending, overtimeMinutes };
     });
     return [...regularRows, ...getSelfReportedExtraDashboardRows()].sort((a, b) => `${a.shift.scheduled_start || "99:99"}|${byId(state.sites, a.shift.site_id)?.name || ""}`.localeCompare(`${b.shift.scheduled_start || "99:99"}|${byId(state.sites, b.shift.site_id)?.name || ""}`));
   }
@@ -2391,7 +2404,7 @@
       { key: "day_off", label: "Francos", tone: "dayoff", matches: row => row.entryStatus.key === "day_off" },
       { key: "pending", label: "Pendientes", tone: "pending", matches: row => ["scheduled", "on_window"].includes(row.entryStatus.key) },
       { key: "extra", label: "Coberturas / refuerzos", tone: "extra", matches: row => row.isSelfReportedExtra || ["coverage", "reinforcement"].includes(String(row.shift.assignment_type || "")) },
-      { key: "overtime", label: "Horas extra", tone: "overtime", matches: row => Boolean(row.overtimeAuthorization || row.overtimeRequest || row.overtimeInProgressUnapproved || row.overtimeUnapproved || row.overtimeMinutes > 0) },
+      { key: "overtime", label: "Horas extra", tone: "overtime", matches: row => Boolean(row.overtimeAuthorization || row.overtimeRequest) },
       { key: "auto_checkout", label: "Cierres automáticos", tone: "exit", matches: row => row.exitStatus.key === "auto_checkout" },
       { key: "exit_alert", label: "Alertas de salida", tone: "exit", matches: row => exitAlertKeys.includes(row.exitStatus.key) }
     ];
@@ -3016,13 +3029,9 @@
           ? `<div class="overtime-live-note pending"><strong>Pendiente de aprobación</strong> · solicitó hasta ${escapeHtml(formatTimeInBusinessZone(overtimeRequest.requested_until))}${overtimeRequest.reason ? `<br>${escapeHtml(overtimeRequest.reason)}` : ""}</div>`
           : overtimeRequest?.status === "rejected"
             ? `<div class="overtime-live-note unapproved"><strong>Solicitud de hora extra rechazada</strong></div>`
-            : row.overtimeInProgressUnapproved
-              ? `<div class="overtime-live-note unapproved"><strong>Horario excedido sin autorización</strong></div>`
-              : row.overtimeUnapproved
-                ? `<div class="overtime-live-note unapproved"><strong>+${escapeHtml(String(row.overtimeMinutes))} min sin autorización cargada</strong></div>`
-                : row.overtimeMinutes > 0
-                  ? `<div class="overtime-live-note approved"><strong>+${escapeHtml(String(row.overtimeMinutes))} min</strong> posteriores al horario</div>`
-                  : "";
+            : row.overtimeMinutes > 0
+              ? `<div class="exit-delay-live-note completed"><strong>Salida +${escapeHtml(String(row.overtimeMinutes))} min</strong><br>respecto del horario programado</div>`
+              : "";
       const entryTiming = row.entryTiming || getEntryTimingInfo(shift, entryEvent);
       const lateEntryNote = entryEvent && entryTiming.isLate
         ? `<div class="late-entry-note ${entryTiming.isAfterAbsenceThreshold ? "critical" : ""}">${entryTiming.isAfterAbsenceThreshold
@@ -3034,7 +3043,7 @@
         ? `<div class="late-entry-note critical">Sin entrada en este servicio. El operario registró entrada en <strong>${escapeHtml(otherServiceEntrySite?.name || "otro servicio")}</strong> a las ${escapeHtml(formatClock(row.otherServiceEntry.client_time || row.otherServiceEntry.created_at))}.</div>`
         : "";
       const rowTimingClass = entryTiming.isAfterAbsenceThreshold ? "live-late-critical-row" : entryTiming.isLate ? "live-late-row" : "";
-      const overtimeRowClass = overtimeRequestPending ? "live-overtime-pending-row" : row.overtimeInProgressUnapproved || row.overtimeUnapproved || overtimeRequest?.status === "rejected" ? "live-overtime-unapproved-row" : overtimeAuthorization ? "live-overtime-approved-row" : "";
+      const overtimeRowClass = overtimeRequestPending ? "live-overtime-pending-row" : overtimeRequest?.status === "rejected" ? "live-overtime-unapproved-row" : overtimeAuthorization ? "live-overtime-approved-row" : "";
       const rowClasses = [searchTerm ? "search-match-row" : "", rowTimingClass, overtimeRowClass].filter(Boolean).join(" ");
 
       return `

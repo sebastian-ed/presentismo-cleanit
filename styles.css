@@ -1748,3 +1748,30 @@ body.modal-open { overflow: hidden; }
 @media (max-width: 640px) {
   .overtime-modal-actions .ghost-btn { width: 100%; }
 }
+
+/* 2026-09-09: una demora normal de salida no se clasifica como hora extra. */
+.overtime-guidance-notice,
+.exit-delay-notice {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  color: #334155;
+  line-height: 1.45;
+}
+.exit-delay-live-note {
+  margin-top: 6px;
+  padding: 7px 9px;
+  border-radius: 10px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  color: #9a3412;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.exit-delay-live-note.completed {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+  color: #475569;
+}
