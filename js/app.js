@@ -1516,10 +1516,13 @@
     try {
       const site = byId(state.sites, mode.site_id);
       if (!site) throw new Error("No se encontró el servicio configurado para tu jornada flexible.");
-      const coords = await getCurrentPosition();
-      const distance = haversineMeters(coords.lat, coords.lng, Number(site.lat), Number(site.lng));
+      toast("Solicitando GPS de alta precisión...");
+      const position = await getPosition();
+      const { latitude, longitude, accuracy } = position.coords;
+      const gpsMoment = new Date(position.timestamp || Date.now());
+      const distance = haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng));
       const isInside = distance <= Number(site.gps_radius_m || 120);
-      const shiftDate = todayISO();
+      const shiftDate = dateISOInTimeZone(gpsMoment);
       const shiftId = `flex__${state.currentProfile.id}__${shiftDate}__${Date.now()}`;
       const notes = $("#notes-flex-in")?.value.trim() || "";
       await store.createEvent({
@@ -1534,12 +1537,12 @@
         entry_source: "assignment",
         validation_status: "confirmed",
         notes: `Jornada flexible · entrada real.${notes ? ` ${notes}` : ""}${isInside ? "" : " · Entrada fuera de radio."}`,
-        lat: coords.lat,
-        lng: coords.lng,
-        gps_accuracy_m: coords.accuracy,
+        lat: latitude,
+        lng: longitude,
+        gps_accuracy_m: accuracy,
         distance_m: Math.round(distance),
         is_inside_site: isInside,
-        client_time: new Date().toISOString(),
+        client_time: gpsMoment.toISOString(),
         recorded_via: "operator",
         recorded_by: state.currentProfile.id
       });
