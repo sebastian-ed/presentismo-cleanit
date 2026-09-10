@@ -57,6 +57,7 @@
     bulkSelectedSiteIds: new Set(),
     bulkSelectedRecordIds: new Set(),
     manualAttendanceContext: null,
+    absenceReasonContext: null,
     overtimeAuthorizationContext: null,
     overtimeRequestContext: null,
     assignmentAuditFileName: "",
@@ -611,6 +612,46 @@
     return shiftEvents(shift.id).find(event => event.event_type === "absent" && event.recorded_via === "system_auto") || null;
   }
 
+  const QUICK_ABSENCE_REASON_LABELS = {
+    medical: "Médico / certificado",
+    leave: "Licencia",
+    personal: "Motivo personal",
+    family: "Motivo familiar",
+    transport: "Problema de traslado",
+    other: "Otro motivo"
+  };
+
+  function quickAbsenceReasonLabel(code) {
+    return QUICK_ABSENCE_REASON_LABELS[String(code || "").trim()] || "";
+  }
+
+  function parseQuickAbsenceReason(event) {
+    const notes = String(event?.notes || "");
+    const match = notes.match(/Motivo de ausencia:\s*([^|\n]+)/i);
+    const storedLabel = match ? String(match[1] || "").trim() : "";
+    const code = Object.entries(QUICK_ABSENCE_REASON_LABELS).find(([, label]) => label.toLowerCase() === storedLabel.toLowerCase())?.[0] || "";
+    const detailMatch = notes.match(/\|\s*Detalle:\s*([^|\n]+)/i);
+    const detail = detailMatch ? String(detailMatch[1] || "").trim() : "";
+    return { code, label: quickAbsenceReasonLabel(code) || storedLabel, detail };
+  }
+
+  function stripQuickAbsenceMetadata(notes) {
+    return String(notes || "")
+      .replace(/\s*Motivo de ausencia:[\s\S]*$/i, "")
+      .trim();
+  }
+
+  function buildQuickAbsenceNotes(existingNotes, reasonCode, detail, actor) {
+    const base = stripQuickAbsenceMetadata(existingNotes);
+    const reasonLabel = quickAbsenceReasonLabel(reasonCode) || "Otro motivo";
+    const quick = `Motivo de ausencia: ${reasonLabel}${detail ? ` | Detalle: ${detail}` : ""} | Registrado por ${actor || "supervisor/admin"}.`;
+    return [base, quick].filter(Boolean).join("\n");
+  }
+
+  function getAbsenceEvent(shift) {
+    return latestEventForShift(shift?.id, "absent");
+  }
+
   function findOtherServiceEntryDuringShift(shift) {
     if (!shift?.operator_id || !shift?.shift_date || !shift?.scheduled_start || !shift?.scheduled_end) return null;
     const range = scheduledRangeForShift(shift.shift_date, shift.scheduled_start, shift.scheduled_end);
@@ -711,7 +752,15 @@
     const leave = leaveForShift(shift);
     if (leave) return { key: "leave", label: leaveTypeLabel(leave.leave_type), className: "status-leave", leaveRecord: leave };
     if (manualEvent?.event_type === "day_off") return { key: "day_off", label: "Franco", className: "status-dayoff" };
-    if (manualEvent?.event_type === "absent") return { key: "absent", label: "Ausente registrado", className: "status-absent" };
+    if (manualEvent?.event_type === "absent") {
+      const absenceReason = parseQuickAbsenceReason(manualEvent);
+      return {
+        key: "absent",
+        label: absenceReason.label ? `Ausente · ${absenceReason.label}` : "Ausente registrado",
+        className: "status-absent",
+        absenceReason
+      };
+    }
 
     const elapsed = diffMinutes(at, start);
     if (elapsed < 0) return { key: "scheduled", label: "Pendiente", className: "status-ok" };
@@ -947,6 +996,9 @@
     const entryNote = String(row.entryEvent?.notes || "").trim();
     const exitNote = String(row.exitEvent?.notes || "").trim();
     const dayOffNote = String(getDayOffEvent(row.shift)?.notes || "").trim();
+    const absenceEvent = getAbsenceEvent(row.shift);
+    const absenceNote = String(absenceEvent?.notes || "").trim();
+    const absenceReason = parseQuickAbsenceReason(absenceEvent);
     const assignmentNote = String(row.shift?.notes || "").trim();
     $("#observationModalTitle").textContent = operator?.full_name || "Observaciones del operario";
     $("#observationModalSubtitle").textContent = `${site?.name || "Servicio"} · ${row.shift.shift_date || $("#dashboardDate")?.value || todayISO()}`;
@@ -958,6 +1010,7 @@
       <div class="observation-note-card"><span>Observación al registrar entrada</span><p>${entryNote ? escapeHtml(entryNote) : "Sin observación."}</p></div>
       <div class="observation-note-card"><span>Observación al registrar salida</span><p>${exitNote ? escapeHtml(exitNote) : "Sin observación."}</p></div>
       ${dayOffNote ? `<div class="observation-note-card secondary"><span>Nota de franco</span><p>${escapeHtml(dayOffNote)}</p></div>` : ""}
+      ${absenceNote ? `<div class="observation-note-card secondary"><span>${absenceReason.label ? `Motivo de ausencia · ${escapeHtml(absenceReason.label)}` : "Registro de ausencia"}</span><p>${escapeHtml(absenceNote)}</p></div>` : ""}
       ${assignmentNote && assignmentNote !== entryNote ? `<div class="observation-note-card secondary"><span>Nota de la cobertura / asignación</span><p>${escapeHtml(assignmentNote)}</p></div>` : ""}
     `;
     openModal("observationModal");
@@ -2835,6 +2888,77 @@
     }
   }
 
+  function openQuickAbsenceModal(shiftId) {
+    if (!isManagementProfile()) return toast("No tenés permisos para registrar motivos de ausencia.");
+    const row = dashboardRowByShiftId(shiftId);
+    if (!row?.shift) return toast("No se encontró el turno.");
+    if (row.entryEvent || row.exitEvent) return toast("Este turno ya tiene una marcación. No corresponde registrarlo como ausencia.");
+    if (getDayOffEvent(row.shift)) return toast("Este turno está marcado como franco.");
+    if (row.leaveRecord || leaveForShift(row.shift)) return toast("Este turno ya tiene una novedad programada.");
+
+    const operator = byId(state.profiles, row.shift.operator_id);
+    const site = byId(state.sites, row.shift.site_id);
+    const absenceEvent = getAbsenceEvent(row.shift);
+    const parsed = parseQuickAbsenceReason(absenceEvent);
+    state.absenceReasonContext = { shiftId: row.shift.id, eventId: absenceEvent?.id || null };
+
+    $("#quickAbsenceModalSubtitle").textContent = `${operator?.full_name || "Operario"} · ${site?.name || "Servicio"} · ${row.shift.shift_date}`;
+    $("#quickAbsenceReason").value = parsed.code || "medical";
+    $("#quickAbsenceDetail").value = parsed.detail || "";
+    $("#quickAbsenceModalTitle").textContent = parsed.code ? "Editar motivo de ausencia" : "Registrar ausencia";
+    $("#saveQuickAbsenceBtn").textContent = parsed.code ? "Actualizar motivo" : "Guardar ausencia";
+    openModal("quickAbsenceModal");
+  }
+
+  async function saveQuickAbsence(event) {
+    event.preventDefault();
+    const context = state.absenceReasonContext;
+    if (!context?.shiftId) return toast("No se encontró el turno a actualizar.");
+    const row = dashboardRowByShiftId(context.shiftId);
+    if (!row?.shift) return toast("No se encontró el turno.");
+    if (row.entryEvent || row.exitEvent) return toast("Este turno ya tiene una marcación. No corresponde registrarlo como ausencia.");
+
+    const reasonCode = $("#quickAbsenceReason")?.value || "other";
+    const detail = $("#quickAbsenceDetail")?.value.trim() || "";
+    if (reasonCode === "other" && !detail) return toast("Para 'Otro motivo', indicá una observación breve.");
+
+    const actor = state.currentProfile?.full_name || "supervisor/admin";
+    const existing = getAbsenceEvent(row.shift);
+    const notes = buildQuickAbsenceNotes(existing?.notes || "", reasonCode, detail, actor);
+
+    try {
+      if (existing?.id) {
+        await store.updateAttendanceEvent(existing.id, {
+          notes,
+          recorded_by: state.currentProfile?.id || null
+        });
+      } else {
+        await store.createEvent({
+          shift_id: row.shift.id,
+          assignment_id: row.shift.assignment_id || null,
+          shift_date: row.shift.shift_date,
+          operator_id: row.shift.operator_id,
+          site_id: row.shift.site_id,
+          event_type: "absent",
+          observed_status: "absent",
+          work_type: ["coverage", "reinforcement"].includes(row.shift.assignment_type) ? row.shift.assignment_type : "regular",
+          entry_source: "assignment",
+          validation_status: "confirmed",
+          notes,
+          client_time: new Date().toISOString(),
+          recorded_via: "supervisor_manual",
+          recorded_by: state.currentProfile?.id || null
+        });
+      }
+      closeModal("quickAbsenceModal");
+      state.absenceReasonContext = null;
+      toast(`Ausencia registrada: ${quickAbsenceReasonLabel(reasonCode) || "Otro motivo"}.`, "success");
+      await renderSupervisorView();
+    } catch (error) {
+      toast(error.message || "No se pudo registrar el motivo de ausencia.");
+    }
+  }
+
   function openManualAttendanceModal(shiftId, type) {
     if (!isManagementProfile()) return toast("No tenés permisos para cargar marcaciones manuales.");
     const row = dashboardRowByShiftId(shiftId);
@@ -3117,7 +3241,7 @@
         assignmentTypeLabel(row.shift.assignment_type || row.extraWorkType || "fixed"),
         row.leaveRecord ? leaveTypeLabel(row.leaveRecord.leave_type) : "",
         row.leaveRecord?.notes, row.leaveRecord?.reference,
-        row.entryEvent?.notes, row.exitEvent?.notes
+        row.entryEvent?.notes, row.exitEvent?.notes, row.manualEvent?.notes
       );
     }) : statusFilteredRows;
     updateSectionSearchCount("live", visibleRows.length, statusFilteredRows.length);
@@ -3138,8 +3262,10 @@
         hasCoordinates(exitEvent) ? `<button class="location-btn" data-map-event="${escapeHtml(exitEvent.id)}" type="button">Mapa salida</button>` : ""
       ].filter(Boolean).join("");
       const dayOffEvent = getDayOffEvent(shift);
+      const absenceEvent = getAbsenceEvent(shift);
+      const absenceReason = parseQuickAbsenceReason(absenceEvent);
       const leaveRecord = row.leaveRecord || leaveForShift(shift);
-      const hasNotes = Boolean(String(entryEvent?.notes || "").trim() || String(exitEvent?.notes || "").trim() || String(dayOffEvent?.notes || "").trim() || String(leaveRecord?.notes || "").trim() || String(leaveRecord?.reference || "").trim() || ((assignmentType !== "fixed") && String(shift?.notes || "").trim()));
+      const hasNotes = Boolean(String(entryEvent?.notes || "").trim() || String(exitEvent?.notes || "").trim() || String(dayOffEvent?.notes || "").trim() || String(absenceEvent?.notes || "").trim() || String(leaveRecord?.notes || "").trim() || String(leaveRecord?.reference || "").trim() || ((assignmentType !== "fixed") && String(shift?.notes || "").trim()));
       const observationButton = leaveRecord
         ? `<button class="secondary-btn small-btn" data-open-leave="${escapeHtml(leaveRecord.id)}" type="button">Ver novedad</button>`
         : hasNotes ? `<button class="secondary-btn small-btn observation-btn" data-observation-shift="${escapeHtml(shift.id)}" type="button">Ver observación</button>` : "";
@@ -3148,6 +3274,10 @@
         ? (dayOffEvent
           ? `<button class="ghost-btn small-btn" data-clear-dayoff="${escapeHtml(shift.id)}" type="button">Quitar franco</button>`
           : `<button class="dayoff-btn small-btn" data-mark-dayoff="${escapeHtml(shift.id)}" type="button">Marcar franco</button>`)
+        : "";
+      const canRegisterAbsence = !row.isSelfReportedExtra && assignmentType === "fixed" && !entryEvent && !exitEvent && !dayOffEvent && !leaveRecord;
+      const absenceButton = canRegisterAbsence
+        ? `<button class="absence-reason-btn small-btn" data-quick-absence="${escapeHtml(shift.id)}" type="button">${absenceReason.label ? "Editar motivo ausencia" : absenceEvent ? "Registrar motivo" : "Registrar ausencia"}</button>`
         : "";
       const manualEntryButton = !entryEvent && !dayOffEvent && !leaveRecord && !row.isSelfReportedExtra
         ? `<button class="secondary-btn small-btn" data-manual-attendance="present" data-manual-shift="${escapeHtml(shift.id)}" type="button">${row.automaticAbsenceEvent ? "Entrada tardía manual" : "Entrada manual"}</button>` : "";
@@ -3183,7 +3313,7 @@
       const rowClasses = [searchTerm ? "search-match-row" : "", rowTimingClass, overtimeRowClass, leaveRowClass].filter(Boolean).join(" ");
       const entryCell = leaveRecord
         ? `<span class="status-pill status-leave">${escapeHtml(leaveTypeLabel(leaveRecord.leave_type))}</span><br><span class="muted small">${escapeHtml(leavePeriodLabel(leaveRecord))}</span>${leaveRecord.reference ? `<br><span class="muted small">Ref: ${escapeHtml(leaveRecord.reference)}</span>` : ""}`
-        : `${statusDetailCell(entryStatus, entryEvent || dayOffEvent, "Sin entrada")}${lateEntryNote}${otherServiceEntryNote}`;
+        : `${statusDetailCell(entryStatus, entryEvent || dayOffEvent || absenceEvent, "Sin entrada")}${lateEntryNote}${otherServiceEntryNote}`;
       const exitCell = leaveRecord
         ? `<span class="status-pill status-leave">No corresponde</span>`
         : statusDetailCell(exitStatus, exitEvent || dayOffEvent, "Sin salida");
@@ -3203,6 +3333,7 @@
             ${mapButtons}
             ${observationButton}
             ${dayOffButton}
+            ${absenceButton}
             ${manualEntryButton}
             ${manualExitButton}
             ${overtimeButton}
@@ -3257,6 +3388,7 @@
     if (!modal) return;
     modal.classList.add("hidden");
     if (id === "manualAttendanceModal") state.manualAttendanceContext = null;
+    if (id === "quickAbsenceModal") state.absenceReasonContext = null;
     if (id === "overtimeAuthorizationModal") state.overtimeAuthorizationContext = null;
     if (id === "locationModal" && attendanceMapInstance) {
       attendanceMapInstance.remove();
@@ -6989,6 +7121,8 @@
       if (markDayOffButton) return markShiftAsDayOff(markDayOffButton.dataset.markDayoff);
       const clearDayOffButton = event.target.closest("[data-clear-dayoff]");
       if (clearDayOffButton) return clearShiftDayOff(clearDayOffButton.dataset.clearDayoff);
+      const quickAbsenceButton = event.target.closest("[data-quick-absence]");
+      if (quickAbsenceButton) return openQuickAbsenceModal(quickAbsenceButton.dataset.quickAbsence);
       const overtimeButton = event.target.closest("[data-overtime-authorization]");
       if (overtimeButton) return openOvertimeAuthorizationModal(overtimeButton.dataset.overtimeAuthorization);
       const manualButton = event.target.closest("[data-manual-attendance]");
@@ -7005,6 +7139,7 @@
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
       if (!$("#manualAttendanceModal").classList.contains("hidden")) closeModal("manualAttendanceModal");
+      else if (!$("#quickAbsenceModal").classList.contains("hidden")) closeModal("quickAbsenceModal");
       else if (!$("#operatorOvertimeRequestModal").classList.contains("hidden")) closeModal("operatorOvertimeRequestModal");
       else if (!$("#overtimeAuthorizationModal").classList.contains("hidden")) closeModal("overtimeAuthorizationModal");
       else if (!$("#observationModal").classList.contains("hidden")) closeModal("observationModal");
@@ -7013,6 +7148,7 @@
       else if (!$("#quickDetailModal").classList.contains("hidden")) closeModal("quickDetailModal");
     });
     $("#manualAttendanceForm")?.addEventListener("submit", saveManualAttendance);
+    $("#quickAbsenceForm")?.addEventListener("submit", saveQuickAbsence);
     $("#operatorOvertimeRequestForm")?.addEventListener("submit", saveOperatorOvertimeRequest);
     $("#overtimeAuthorizationForm")?.addEventListener("submit", saveOvertimeAuthorization);
     $("#rejectOvertimeRequestBtn")?.addEventListener("click", rejectOvertimeRequest);

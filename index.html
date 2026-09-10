@@ -8,10 +8,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Presentismo GPS" />
   <title>Clean It · Presentismo GPS</title>
-  <link rel="manifest" href="manifest.webmanifest?v=20260910-leaves-special1" />
+  <link rel="manifest" href="manifest.webmanifest?v=20260910-quick-absence1" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20260910-leaves-special1" />
+  <link rel="stylesheet" href="styles.css?v=20260910-quick-absence1" />
 </head>
 <body>
   <div class="app-shell">
@@ -849,6 +849,34 @@
     </section>
   </div>
 
+  <div id="quickAbsenceModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="quickAbsenceModalTitle">
+    <section class="modal-panel manual-attendance-modal-panel quick-absence-modal-panel">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Presentismo · registro rápido</p>
+          <h3 id="quickAbsenceModalTitle">Registrar ausencia</h3>
+          <p id="quickAbsenceModalSubtitle" class="muted small no-margin"></p>
+        </div>
+        <button class="ghost-btn small-btn modal-close" type="button" data-close-modal="quickAbsenceModal" aria-label="Cerrar">Cerrar</button>
+      </div>
+      <form id="quickAbsenceForm" class="form-stack manual-attendance-form">
+        <label><span>Motivo</span>
+          <select id="quickAbsenceReason" required>
+            <option value="medical">Médico / certificado</option>
+            <option value="leave">Licencia</option>
+            <option value="personal">Motivo personal</option>
+            <option value="family">Motivo familiar</option>
+            <option value="transport">Problema de traslado</option>
+            <option value="other">Otro motivo</option>
+          </select>
+        </label>
+        <label><span>Observación <small class="muted">(opcional, salvo “Otro motivo”)</small></span><textarea id="quickAbsenceDetail" placeholder="Ej. Avisó que va al médico / licencia informada por RRHH / inconveniente familiar."></textarea></label>
+        <div class="manual-attendance-warning"><strong>Registro rápido:</strong> marca este turno como ausente y deja asentado el motivo. Si ya existía una ausencia automática, se conserva ese mismo registro y se agrega el motivo informado por supervisor/admin.</div>
+        <button class="primary-btn" id="saveQuickAbsenceBtn" type="submit">Guardar ausencia</button>
+      </form>
+    </section>
+  </div>
+
   <div id="operatorOvertimeRequestModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="operatorOvertimeRequestModalTitle">
     <section class="modal-panel manual-attendance-modal-panel overtime-authorization-modal-panel">
       <div class="modal-head">
@@ -936,8 +964,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="js/config.js?v=20260910-leaves-special1"></script>
-  <script src="js/storage.js?v=20260910-leaves-special1"></script>
-  <script src="js/app.js?v=20260910-leaves-special1"></script>
+  <script src="js/config.js?v=20260910-quick-absence1"></script>
+  <script src="js/storage.js?v=20260910-quick-absence1"></script>
+  <script src="js/app.js?v=20260910-quick-absence1"></script>
 </body>
 </html>

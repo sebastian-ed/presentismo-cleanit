@@ -1,12 +1,12 @@
-const CACHE_NAME = "cleanit-presentismo-shell-20260910-leaves-special1";
+const CACHE_NAME = "cleanit-presentismo-shell-20260910-quick-absence1";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=20260910-leaves-special1",
-  "./js/config.js?v=20260910-leaves-special1",
-  "./js/storage.js?v=20260910-leaves-special1",
-  "./js/app.js?v=20260910-leaves-special1",
-  "./manifest.webmanifest?v=20260910-leaves-special1",
+  "./styles.css?v=20260910-quick-absence1",
+  "./js/config.js?v=20260910-quick-absence1",
+  "./js/storage.js?v=20260910-quick-absence1",
+  "./js/app.js?v=20260910-quick-absence1",
+  "./manifest.webmanifest?v=20260910-quick-absence1",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2",

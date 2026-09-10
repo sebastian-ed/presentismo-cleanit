@@ -1909,3 +1909,14 @@ body.modal-open { overflow: hidden; }
     justify-content: flex-start;
   }
 }
+
+
+/* Registro rápido de motivo de ausencia */
+.absence-reason-btn {
+  border: 1px solid rgba(180, 83, 9, .28);
+  background: rgba(255, 247, 237, .96);
+  color: #9a3412;
+  font-weight: 700;
+}
+.absence-reason-btn:hover { background: rgba(255, 237, 213, .98); }
+.quick-absence-modal-panel { max-width: 560px; }

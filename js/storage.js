@@ -606,6 +606,20 @@
       return data || [];
     }
 
+    async updateAttendanceEvent(eventId, patch) {
+      if (!eventId) throw new Error("Falta identificar el registro de asistencia.");
+      const cleanPatch = this.clean(patch || {});
+      if (!Object.keys(cleanPatch).length) throw new Error("No hay cambios para aplicar.");
+      const { data, error } = await this.client
+        .from("attendance_events")
+        .update(cleanPatch)
+        .eq("id", eventId)
+        .select("*")
+        .single();
+      if (error) throw error;
+      return data;
+    }
+
     async listOvertimeAuthorizations(dateFrom = null, dateTo = null) {
       try {
         let query = this.client
