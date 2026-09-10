@@ -24,6 +24,10 @@
     events: [],
     overtimeAuthorizations: [],
     overtimeRequests: [],
+    leaveRecords: [],
+    leaveAudit: [],
+    leaveEditingId: null,
+    specialAssignmentEditingId: null,
     dashboardRows: [],
     liveStatusFilter: "all",
     recordsEvents: [],
@@ -38,7 +42,7 @@
     analyticsProfiles: [],
     analyticsPeriodResolved: null,
     activeTab: "live",
-    sectionSearch: { live: "", opsmap: "", analytics: "", fichaje: "", coverage: "", assignments: "", sites: "", users: "", records: "" },
+    sectionSearch: { live: "", opsmap: "", analytics: "", fichaje: "", coverage: "", assignments: "", leaves: "", sites: "", users: "", records: "" },
     operationalMapLoaded: false,
     operationalMapDate: null,
     operationalMapRows: [],
@@ -215,6 +219,7 @@
     fichaje: { label: "Fichaje", placeholder: "Buscar operario o servicio...", noun: "fichajes", target: "#fichajeTable" },
     coverage: { label: "Cobertura", placeholder: "Buscar servicio, zona u operario...", noun: "servicios", target: "#coverageGrid" },
     assignments: { label: "Asignaciones", placeholder: "Buscar operario, servicio o tipo de asignación...", noun: "asignaciones", target: "#assignmentsList" },
+    leaves: { label: "Novedades", placeholder: "Buscar operario, licencia, vacaciones o certificado...", noun: "novedades", target: "#leavesList" },
     sites: { label: "Servicios", placeholder: "Buscar servicio, dirección o zona...", noun: "servicios", target: "#sitesList" },
     users: { label: "Usuarios", placeholder: "Buscar nombre, usuario, teléfono o rol...", noun: "usuarios", target: "#usersList" },
     records: { label: "Registros", placeholder: "Buscar operario, servicio o estado...", noun: "marcaciones", target: "#recordsTable" }
@@ -280,6 +285,7 @@
     }
     if (tab === "coverage") return renderCoverage();
     if (tab === "assignments") return renderAssignments();
+    if (tab === "leaves") return renderLeaves();
     if (tab === "sites") return renderSites();
     if (tab === "users") return renderUsers();
     if (tab === "records") return renderRecords();
@@ -702,6 +708,8 @@
       return { key: "present", label: manual ? "Entrada manual" : "Entrada registrada", className: "status-present", ...timing };
     }
 
+    const leave = leaveForShift(shift);
+    if (leave) return { key: "leave", label: leaveTypeLabel(leave.leave_type), className: "status-leave", leaveRecord: leave };
     if (manualEvent?.event_type === "day_off") return { key: "day_off", label: "Franco", className: "status-dayoff" };
     if (manualEvent?.event_type === "absent") return { key: "absent", label: "Ausente registrado", className: "status-absent" };
 
@@ -726,6 +734,7 @@
 
   function shouldCreateAutomaticAbsence(shift, at = new Date()) {
     if (getEntryEvent(shift)) return false;
+    if (leaveForShift(shift)) return false;
     if (latestEventForShift(shift.id, "day_off")) return false;
     if (latestEventForShift(shift.id, "absent")) return false;
     return at.getTime() >= getAutomaticAbsenceTime(shift).getTime();
@@ -749,6 +758,8 @@
       return { key: "completed", label: manual ? "Salida manual" : "Salida registrada", className: "status-present" };
     }
 
+    const leave = leaveForShift(shift);
+    if (leave && !entryEvent) return { key: "leave", label: "No corresponde", className: "status-leave", leaveRecord: leave };
     if (getDayOffEvent(shift) && !entryEvent) return { key: "day_off", label: "Franco", className: "status-dayoff" };
     if (!entryEvent) return { key: "not_started", label: "Sin entrada", className: "status-pending" };
 
@@ -875,14 +886,15 @@
   }
 
   async function refreshBaseData(date = $("#dashboardDate")?.value || todayISO()) {
-    const [profiles, sites, assignments, shifts, events, overtimeAuthorizations, overtimeRequests] = await Promise.all([
+    const [profiles, sites, assignments, shifts, events, overtimeAuthorizations, overtimeRequests, leaveRecords] = await Promise.all([
       store.listProfiles(),
       store.listSites(),
       store.listAssignments(),
       store.listShifts(date),
       store.listEvents(),
       store.listOvertimeAuthorizations?.(date, date) || Promise.resolve([]),
-      store.listOvertimeRequests?.(date, date) || Promise.resolve([])
+      store.listOvertimeRequests?.(date, date) || Promise.resolve([]),
+      store.listLeaveEvents?.() || Promise.resolve([])
     ]);
     state.profiles = profiles;
     state.sites = sites;
@@ -891,6 +903,7 @@
     state.events = events;
     state.overtimeAuthorizations = overtimeAuthorizations || [];
     state.overtimeRequests = overtimeRequests || [];
+    state.leaveRecords = leaveRecords || [];
   }
 
   async function renderOperatorConnectivity() {
@@ -977,6 +990,7 @@
     const normalized = String(type || "fixed").toLowerCase();
     if (normalized === "coverage") return "Cobertura por ausencia";
     if (normalized === "reinforcement") return "Refuerzo";
+    if (normalized === "special") return "Asignación especial";
     return "Asignación fija";
   }
 
@@ -992,6 +1006,47 @@
     if (normalized === "pending") return "Pendiente de validar";
     if (normalized === "rejected") return "Rechazado";
     return "Validado";
+  }
+
+  function leaveTypeLabel(type) {
+    const normalized = String(type || "other_leave").toLowerCase();
+    if (normalized === "medical_certificate") return "Certificado médico";
+    if (normalized === "medical_leave") return "Licencia médica";
+    if (normalized === "vacation") return "Vacaciones";
+    return "Otra licencia";
+  }
+
+  function leaveTypeShortLabel(type) {
+    const normalized = String(type || "other_leave").toLowerCase();
+    if (normalized === "medical_certificate") return "Certificado";
+    if (normalized === "medical_leave") return "Lic. médica";
+    if (normalized === "vacation") return "Vacaciones";
+    return "Licencia";
+  }
+
+  function isActiveLeave(leave) {
+    return Boolean(leave) && String(leave.status || "active") === "active";
+  }
+
+  function leaveForOperatorDate(operatorId, dateString) {
+    if (!operatorId || !dateString) return null;
+    return (state.leaveRecords || []).find(leave =>
+      leave.operator_id === operatorId
+      && isActiveLeave(leave)
+      && leave.start_date <= dateString
+      && leave.end_date >= dateString
+    ) || null;
+  }
+
+  function leaveForShift(shift) {
+    if (!shift?.operator_id || !shift?.shift_date) return null;
+    return leaveForOperatorDate(shift.operator_id, shift.shift_date);
+  }
+
+  function leavePeriodLabel(leave) {
+    if (!leave?.start_date) return "";
+    if (leave.start_date === leave.end_date) return formatISODate(leave.start_date, { day: "2-digit", month: "2-digit", year: "numeric" });
+    return `${formatISODate(leave.start_date, { day: "2-digit", month: "2-digit" })} al ${formatISODate(leave.end_date, { day: "2-digit", month: "2-digit", year: "numeric" })}`;
   }
 
   function assignmentAppliesOnDate(assignment, dateString) {
@@ -1141,6 +1196,9 @@
       $("#dashboardDate").value = todayISO();
       $("#assignmentValidFrom").value = todayISO();
       if ($("#extraAssignmentDate")) $("#extraAssignmentDate").value = todayISO();
+      if ($("#specialAssignmentDate")) $("#specialAssignmentDate").value = todayISO();
+      if ($("#leaveStartDate")) $("#leaveStartDate").value = todayISO();
+      if ($("#leaveEndDate")) $("#leaveEndDate").value = todayISO();
       syncPeriodControls("live", false);
       await renderSupervisorView();
     }
@@ -1169,25 +1227,33 @@
       operatorExitProtectionTimer = null;
     }
     const today = todayISO();
-    const [sites, events, assignments, overtimeAuthorizations, overtimeRequests] = await Promise.all([
+    const [sites, events, assignments, overtimeAuthorizations, overtimeRequests, leaveRecords] = await Promise.all([
       store.listSites(),
       store.listEvents(),
       store.listAssignments(),
       store.listOvertimeAuthorizations?.(addDaysISO(today, -1), today) || Promise.resolve([]),
-      store.listOvertimeRequests?.(addDaysISO(today, -1), today) || Promise.resolve([])
+      store.listOvertimeRequests?.(addDaysISO(today, -1), today) || Promise.resolve([]),
+      store.listLeaveEvents?.() || Promise.resolve([])
     ]);
     state.sites = sites;
     state.events = events;
     state.assignments = assignments;
     state.overtimeAuthorizations = overtimeAuthorizations || [];
     state.overtimeRequests = overtimeRequests || [];
+    state.leaveRecords = leaveRecords || [];
 
     $("#operatorTitle").textContent = `Hola, ${state.currentProfile.full_name}`;
 
+    const leaveToday = leaveForOperatorDate(state.currentProfile.id, today);
     const activeToday = state.assignments.filter(a => a.operator_id === state.currentProfile.id && assignmentAppliesOnDate(a, today));
     const suppressors = activeToday.filter(a => (a.assignment_type || "fixed") !== "fixed" && a.suppress_regular_assignments === true);
-    const todaysAssignments = activeToday
-      .filter(a => (a.assignment_type || "fixed") !== "fixed" || !suppressors.some(extra => extra.id !== a.id && assignmentsOverlap(extra, a)))
+    const todaysAssignments = leaveToday ? [] : activeToday
+      .filter(a => {
+        if ((a.assignment_type || "fixed") !== "fixed") return true;
+        return !suppressors.some(extra => extra.id !== a.id && (
+          String(extra.assignment_type || "") === "special" || assignmentsOverlap(extra, a)
+        ));
+      })
       .sort((a, b) => String(a.scheduled_start).localeCompare(String(b.scheduled_start)));
 
     // Un turno nocturno pertenece a la fecha en la que comenzó. Después de medianoche
@@ -1225,7 +1291,9 @@
     const container = $("#operatorShiftContainer");
     const cards = [];
 
-    if (!todaysAssignments.length && !overnightCarryovers.length && !extraGroups.size) {
+    if (leaveToday) {
+      cards.push(renderOperatorLeaveCard(leaveToday));
+    } else if (!todaysAssignments.length && !overnightCarryovers.length && !extraGroups.size) {
       cards.push(`
         <article class="operator-card operator-empty-card">
           <p class="eyebrow">Sin asignación fija para hoy</p>
@@ -1261,7 +1329,7 @@
     });
 
     const hasOpenExtra = Array.from(extraGroups.values()).some(group => group.some(e => e.event_type === "present") && !group.some(e => e.event_type === "checkout"));
-    cards.push(renderExtraDutyStartCard(hasOpenExtra));
+    if (!leaveToday) cards.push(renderExtraDutyStartCard(hasOpenExtra));
     container.innerHTML = cards.join("");
 
     overnightCarryovers.forEach(assignment => {
@@ -1282,6 +1350,27 @@
     container.querySelector("[data-extra-checkin]")?.addEventListener("click", handleExtraDutyCheckin);
     await renderOperatorConnectivity();
     scheduleOperatorExitProtectionRefresh(container);
+  }
+
+  function renderOperatorLeaveCard(leave) {
+    const dateLabel = formatISODate(todayISO(), { weekday: "long", day: "numeric", month: "long" });
+    return `
+      <article class="operator-card operator-leave-card">
+        <div class="card-title-row">
+          <div>
+            <p class="eyebrow">Hoy · ${escapeHtml(dateLabel)}</p>
+            <h3>${escapeHtml(leaveTypeLabel(leave.leave_type))}</h3>
+            <p class="muted no-margin">Período: ${escapeHtml(leavePeriodLabel(leave))}</p>
+          </div>
+          <span class="status-pill status-leave">${escapeHtml(leaveTypeShortLabel(leave.leave_type))}</span>
+        </div>
+        <div class="leave-operator-message">
+          <strong>No tenés que registrar entrada ni salida durante esta novedad.</strong>
+          <span>La ausencia está registrada como justificada y no se genera una ausencia automática.</span>
+          ${leave.reference ? `<small>Referencia: ${escapeHtml(leave.reference)}</small>` : ""}
+          ${leave.notes ? `<small>${escapeHtml(leave.notes)}</small>` : ""}
+        </div>
+      </article>`;
   }
 
   function renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite = null, assignment = null, dayOffEvent = null, automaticAbsenceEvent = null) {
@@ -2282,6 +2371,8 @@
     renderSites();
     renderAssignmentSelectors();
     renderAssignments();
+    if (state.activeTab === "leaves" || !state.leaveAudit.length) await refreshLeaveAudit();
+    renderLeaves();
     if (state.assignmentAuditParsed) analyzeParsedAssignmentAudit();
     else renderAssignmentAudit();
     renderUsers();
@@ -2424,7 +2515,8 @@
       const overtimeRequest = overtimeRequestForShift(shift.id);
       const overtimeRequestPending = isPendingOvertimeRequest(overtimeRequest);
       const overtimeMinutes = overtimeMinutesForShift(shift, exitEvent);
-      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent, entryTiming, automaticAbsenceEvent, otherServiceEntry, isSelfReportedExtra: false, overtimeAuthorization, overtimeRequest, overtimeRequestPending, overtimeMinutes };
+      const leaveRecord = leaveForShift(shift);
+      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent, entryTiming, automaticAbsenceEvent, otherServiceEntry, isSelfReportedExtra: false, overtimeAuthorization, overtimeRequest, overtimeRequestPending, overtimeMinutes, leaveRecord };
     });
     return [...regularRows, ...getSelfReportedExtraDashboardRows()].sort((a, b) => `${a.shift.scheduled_start || "99:99"}|${byId(state.sites, a.shift.site_id)?.name || ""}`.localeCompare(`${b.shift.scheduled_start || "99:99"}|${byId(state.sites, b.shift.site_id)?.name || ""}`));
   }
@@ -2439,6 +2531,7 @@
       { key: "outside", label: "Fuera de radio", tone: "outside", matches: row => row.entryStatus.key === "outside" },
       { key: "absent", label: "Ausentes", tone: "absent", matches: row => row.entryStatus.key === "absent" },
       { key: "day_off", label: "Francos", tone: "dayoff", matches: row => row.entryStatus.key === "day_off" },
+      { key: "leave", label: "Licencias / vacaciones", tone: "leave", matches: row => row.entryStatus.key === "leave" || Boolean(row.leaveRecord) },
       { key: "pending", label: "Pendientes", tone: "pending", matches: row => ["scheduled", "on_window"].includes(row.entryStatus.key) },
       { key: "extra", label: "Coberturas / refuerzos", tone: "extra", matches: row => row.isSelfReportedExtra || ["coverage", "reinforcement"].includes(String(row.shift.assignment_type || "")) },
       { key: "overtime", label: "Horas extra", tone: "overtime", matches: row => Boolean(row.overtimeAuthorization || row.overtimeRequest) },
@@ -3022,6 +3115,8 @@
         site?.name, site?.address, site?.zone, site?.supervisor_name,
         row.entryStatus?.label, row.exitStatus?.label, row.status?.label,
         assignmentTypeLabel(row.shift.assignment_type || row.extraWorkType || "fixed"),
+        row.leaveRecord ? leaveTypeLabel(row.leaveRecord.leave_type) : "",
+        row.leaveRecord?.notes, row.leaveRecord?.reference,
         row.entryEvent?.notes, row.exitEvent?.notes
       );
     }) : statusFilteredRows;
@@ -3043,22 +3138,25 @@
         hasCoordinates(exitEvent) ? `<button class="location-btn" data-map-event="${escapeHtml(exitEvent.id)}" type="button">Mapa salida</button>` : ""
       ].filter(Boolean).join("");
       const dayOffEvent = getDayOffEvent(shift);
-      const hasNotes = Boolean(String(entryEvent?.notes || "").trim() || String(exitEvent?.notes || "").trim() || String(dayOffEvent?.notes || "").trim() || ((assignmentType !== "fixed") && String(shift?.notes || "").trim()));
-      const observationButton = hasNotes ? `<button class="secondary-btn small-btn observation-btn" data-observation-shift="${escapeHtml(shift.id)}" type="button">Ver observación</button>` : "";
-      const canUseDayOff = !row.isSelfReportedExtra && assignmentType === "fixed" && !entryEvent && !exitEvent;
+      const leaveRecord = row.leaveRecord || leaveForShift(shift);
+      const hasNotes = Boolean(String(entryEvent?.notes || "").trim() || String(exitEvent?.notes || "").trim() || String(dayOffEvent?.notes || "").trim() || String(leaveRecord?.notes || "").trim() || String(leaveRecord?.reference || "").trim() || ((assignmentType !== "fixed") && String(shift?.notes || "").trim()));
+      const observationButton = leaveRecord
+        ? `<button class="secondary-btn small-btn" data-open-leave="${escapeHtml(leaveRecord.id)}" type="button">Ver novedad</button>`
+        : hasNotes ? `<button class="secondary-btn small-btn observation-btn" data-observation-shift="${escapeHtml(shift.id)}" type="button">Ver observación</button>` : "";
+      const canUseDayOff = !row.isSelfReportedExtra && assignmentType === "fixed" && !entryEvent && !exitEvent && !leaveRecord;
       const dayOffButton = canUseDayOff
         ? (dayOffEvent
           ? `<button class="ghost-btn small-btn" data-clear-dayoff="${escapeHtml(shift.id)}" type="button">Quitar franco</button>`
           : `<button class="dayoff-btn small-btn" data-mark-dayoff="${escapeHtml(shift.id)}" type="button">Marcar franco</button>`)
         : "";
-      const manualEntryButton = !entryEvent && !dayOffEvent && !row.isSelfReportedExtra
+      const manualEntryButton = !entryEvent && !dayOffEvent && !leaveRecord && !row.isSelfReportedExtra
         ? `<button class="secondary-btn small-btn" data-manual-attendance="present" data-manual-shift="${escapeHtml(shift.id)}" type="button">${row.automaticAbsenceEvent ? "Entrada tardía manual" : "Entrada manual"}</button>` : "";
       const manualExitButton = entryEvent && !exitEvent
         ? `<button class="secondary-btn small-btn" data-manual-attendance="checkout" data-manual-shift="${escapeHtml(shift.id)}" type="button">Salida manual</button>` : "";
       const overtimeAuthorization = row.overtimeAuthorization || overtimeAuthorizationForShift(shift.id);
       const overtimeRequest = row.overtimeRequest || overtimeRequestForShift(shift.id);
       const overtimeRequestPending = isPendingOvertimeRequest(overtimeRequest);
-      const overtimeButton = !row.isSelfReportedExtra && entryEvent && shift.scheduled_end && (overtimeRequestPending || !exitEvent)
+      const overtimeButton = !row.isSelfReportedExtra && !leaveRecord && entryEvent && shift.scheduled_end && (overtimeRequestPending || !exitEvent)
         ? `<button class="overtime-btn small-btn" data-overtime-authorization="${escapeHtml(shift.id)}" type="button">${overtimeRequestPending ? "Revisar hora extra" : overtimeAuthorization ? "Editar hora extra" : "Autorizar hora extra"}</button>` : "";
       const overtimeDetail = overtimeAuthorization
         ? `<div class="overtime-live-note approved"><strong>Hora extra autorizada</strong> hasta ${escapeHtml(formatTimeInBusinessZone(overtimeAuthorization.authorized_until))}${overtimeAuthorization.approved_by_name ? ` · ${escapeHtml(overtimeAuthorization.approved_by_name)}` : ""}</div>`
@@ -3081,16 +3179,26 @@
         : "";
       const rowTimingClass = entryTiming.isAfterAbsenceThreshold ? "live-late-critical-row" : entryTiming.isLate ? "live-late-row" : "";
       const overtimeRowClass = overtimeRequestPending ? "live-overtime-pending-row" : overtimeRequest?.status === "rejected" ? "live-overtime-unapproved-row" : overtimeAuthorization ? "live-overtime-approved-row" : "";
-      const rowClasses = [searchTerm ? "search-match-row" : "", rowTimingClass, overtimeRowClass].filter(Boolean).join(" ");
+      const leaveRowClass = leaveRecord ? "live-leave-row" : "";
+      const rowClasses = [searchTerm ? "search-match-row" : "", rowTimingClass, overtimeRowClass, leaveRowClass].filter(Boolean).join(" ");
+      const entryCell = leaveRecord
+        ? `<span class="status-pill status-leave">${escapeHtml(leaveTypeLabel(leaveRecord.leave_type))}</span><br><span class="muted small">${escapeHtml(leavePeriodLabel(leaveRecord))}</span>${leaveRecord.reference ? `<br><span class="muted small">Ref: ${escapeHtml(leaveRecord.reference)}</span>` : ""}`
+        : `${statusDetailCell(entryStatus, entryEvent || dayOffEvent, "Sin entrada")}${lateEntryNote}${otherServiceEntryNote}`;
+      const exitCell = leaveRecord
+        ? `<span class="status-pill status-leave">No corresponde</span>`
+        : statusDetailCell(exitStatus, exitEvent || dayOffEvent, "Sin salida");
+      const operationalDetail = leaveRecord
+        ? `<span class="muted small">Ausencia justificada programada</span>`
+        : `<span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.client_time || lastEvent.created_at)}` : "—"}</span>${overtimeDetail}`;
 
       return `
         <tr class="${rowClasses}">
           <td><strong>${escapeHtml(operator?.full_name || "—")}</strong><br><span class="muted small">${escapeHtml(operator?.phone || "")}</span></td>
           <td><strong>${escapeHtml(site?.name || "—")}</strong><br>${typeBadge ? `${typeBadge}<br>` : ""}<span class="muted small">${escapeHtml(site?.address || "")}</span></td>
           <td>${row.isSelfReportedExtra ? `<span class="extra-schedule-label">Sin horario previo</span>` : `${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`}</td>
-          <td>${statusDetailCell(entryStatus, entryEvent || dayOffEvent, "Sin entrada")}${lateEntryNote}${otherServiceEntryNote}</td>
-          <td>${statusDetailCell(exitStatus, exitEvent || dayOffEvent, "Sin salida")}</td>
-          <td><span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.client_time || lastEvent.created_at)}` : "—"}</span>${overtimeDetail}</td>
+          <td>${entryCell}</td>
+          <td>${exitCell}</td>
+          <td><span class="status-pill ${status.className}">${status.label}</span><br>${operationalDetail}</td>
           <td class="row-actions">
             ${mapButtons}
             ${observationButton}
@@ -3111,6 +3219,12 @@
         </thead>
         <tbody>${tableRows || `<tr><td colspan="7">${rows.length ? "No hay personas que coincidan con este filtro." : "No hay cobertura programada para esta fecha."}</td></tr>`}</tbody>
       </table>`;
+    $("#liveTable").querySelectorAll("[data-open-leave]").forEach(btn => btn.addEventListener("click", () => {
+      const leave = (state.leaveRecords || []).find(item => item.id === btn.dataset.openLeave);
+      if (!leave) return;
+      renderTab("leaves");
+      editLeave(leave.id);
+    }));
     $("#lastRefreshLabel").textContent = `Actualizado ${new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: APP_TIME_ZONE })}`;
     setupLiveFloatingScrollbar();
     requestAnimationFrame(refreshLiveFloatingScrollbar);
@@ -3563,6 +3677,9 @@
     $("#assignmentSite").innerHTML = siteOptions;
     if ($("#extraAssignmentOperator")) $("#extraAssignmentOperator").innerHTML = operatorOptions;
     if ($("#extraAssignmentSite")) $("#extraAssignmentSite").innerHTML = siteOptions;
+    if ($("#specialAssignmentOperator")) $("#specialAssignmentOperator").innerHTML = operatorOptions;
+    if ($("#specialAssignmentSite")) $("#specialAssignmentSite").innerHTML = siteOptions;
+    if ($("#leaveOperator")) $("#leaveOperator").innerHTML = operatorOptions;
     if ($("#extraCoveredOperator")) $("#extraCoveredOperator").innerHTML = `<option value="">Sin especificar</option>${operatorOptions}`;
   }
 
@@ -4567,6 +4684,87 @@
     }
   }
 
+  function resetSpecialAssignmentForm() {
+    state.specialAssignmentEditingId = null;
+    $("#specialAssignmentForm")?.reset();
+    if ($("#specialAssignmentDate")) $("#specialAssignmentDate").value = todayISO();
+    if ($("#specialAssignmentStart")) $("#specialAssignmentStart").value = "08:00";
+    if ($("#specialAssignmentEnd")) $("#specialAssignmentEnd").value = "12:00";
+    if ($("#specialAssignmentGrace")) $("#specialAssignmentGrace").value = "10";
+    if ($("#specialAssignmentAbsent")) $("#specialAssignmentAbsent").value = "30";
+    if ($("#specialAssignmentFormTitle")) $("#specialAssignmentFormTitle").textContent = "Asignación especial por un día";
+    $("#cancelSpecialAssignmentEditBtn")?.classList.add("hidden");
+    if ($("#saveSpecialAssignmentBtn")) $("#saveSpecialAssignmentBtn").textContent = "Programar asignación especial";
+  }
+
+  function editSpecialAssignment(id) {
+    const assignment = byId(state.assignments, id);
+    if (!assignment || String(assignment.assignment_type || "") !== "special") return;
+    state.specialAssignmentEditingId = id;
+    $("#specialAssignmentOperator").value = assignment.operator_id;
+    $("#specialAssignmentSite").value = assignment.site_id;
+    $("#specialAssignmentDate").value = assignment.valid_from || todayISO();
+    $("#specialAssignmentStart").value = formatTime(assignment.scheduled_start);
+    $("#specialAssignmentEnd").value = formatTime(assignment.scheduled_end);
+    $("#specialAssignmentGrace").value = assignment.grace_minutes ?? 10;
+    $("#specialAssignmentAbsent").value = assignment.absence_after_minutes ?? 30;
+    $("#specialAssignmentNotes").value = assignment.notes || "";
+    $("#specialAssignmentFormTitle").textContent = "Editar asignación especial";
+    $("#cancelSpecialAssignmentEditBtn").classList.remove("hidden");
+    $("#saveSpecialAssignmentBtn").textContent = "Guardar cambio especial";
+    renderTab("assignments");
+    scrollToActiveEditor("#specialAssignmentForm");
+  }
+
+  async function saveSpecialAssignment(event) {
+    event.preventDefault();
+    const operatorId = $("#specialAssignmentOperator")?.value;
+    const siteId = $("#specialAssignmentSite")?.value;
+    const date = $("#specialAssignmentDate")?.value || todayISO();
+    const start = $("#specialAssignmentStart")?.value;
+    const end = $("#specialAssignmentEnd")?.value;
+    const grace = Number($("#specialAssignmentGrace")?.value || 10);
+    const absent = Number($("#specialAssignmentAbsent")?.value || 30);
+    const notes = $("#specialAssignmentNotes")?.value.trim() || "";
+    const editingId = state.specialAssignmentEditingId || null;
+
+    if (!operatorId || !siteId || !date || !start || !end) throw new Error("Completá operario, servicio, fecha y horario.");
+    if (end === start) throw new Error("Entrada y salida no pueden ser iguales. Los turnos nocturnos, por ejemplo 22:00 a 06:00, sí están permitidos.");
+    if (absent <= grace) throw new Error("El margen de ausencia debe ser posterior a la tolerancia de demora.");
+
+    const existing = state.assignments.find(a =>
+      a.id !== editingId
+      && a.operator_id === operatorId
+      && String(a.assignment_type || "") === "special"
+      && a.is_active !== false
+      && assignmentAppliesOnDate(a, date)
+    );
+    if (existing) throw new Error("Ese operario ya tiene una asignación especial para esa fecha. Editá o eliminá la existente antes de crear otra.");
+
+    await store.upsertAssignment({
+      ...(editingId ? { id: editingId } : {}),
+      operator_id: operatorId,
+      site_id: siteId,
+      days_of_week: [isoDayId(date)],
+      scheduled_start: start,
+      scheduled_end: end,
+      grace_minutes: grace,
+      absence_after_minutes: absent,
+      valid_from: date,
+      valid_to: date,
+      assignment_type: "special",
+      covered_operator_id: null,
+      ...(!editingId ? { created_by: state.currentProfile?.id || null } : {}),
+      suppress_regular_assignments: true,
+      notes: notes || "Cambio excepcional de horario / asignación por un día",
+      is_active: true
+    });
+
+    resetSpecialAssignmentForm();
+    toast("Asignación especial guardada. Ese día reemplaza la jornada habitual del operario.", "success");
+    await renderSupervisorView();
+  }
+
   async function saveExtraAssignment(event) {
     event.preventDefault();
     const operatorId = $("#extraAssignmentOperator")?.value;
@@ -4612,6 +4810,160 @@
     await renderSupervisorView();
   }
 
+  function resetLeaveForm() {
+    state.leaveEditingId = null;
+    $("#leaveForm")?.reset();
+    if ($("#leaveStartDate")) $("#leaveStartDate").value = todayISO();
+    if ($("#leaveEndDate")) $("#leaveEndDate").value = todayISO();
+    if ($("#leaveFormTitle")) $("#leaveFormTitle").textContent = "Registrar / programar novedad";
+    $("#cancelLeaveEditBtn")?.classList.add("hidden");
+    if ($("#saveLeaveBtn")) $("#saveLeaveBtn").textContent = "Guardar novedad";
+  }
+
+  function editLeave(id) {
+    const leave = (state.leaveRecords || []).find(item => item.id === id);
+    if (!leave) return;
+    state.leaveEditingId = id;
+    $("#leaveOperator").value = leave.operator_id;
+    $("#leaveType").value = leave.leave_type || "other_leave";
+    $("#leaveStartDate").value = leave.start_date || todayISO();
+    $("#leaveEndDate").value = leave.end_date || leave.start_date || todayISO();
+    $("#leaveReference").value = leave.reference || "";
+    $("#leaveNotes").value = leave.notes || "";
+    $("#leaveFormTitle").textContent = "Editar novedad";
+    $("#cancelLeaveEditBtn").classList.remove("hidden");
+    $("#saveLeaveBtn").textContent = "Guardar cambios";
+    renderTab("leaves");
+    scrollToActiveEditor("#leaveForm");
+  }
+
+  async function saveLeave(event) {
+    event.preventDefault();
+    const operatorId = $("#leaveOperator")?.value;
+    const leaveType = $("#leaveType")?.value || "other_leave";
+    const startDate = $("#leaveStartDate")?.value;
+    const endDate = $("#leaveEndDate")?.value || startDate;
+    const reference = $("#leaveReference")?.value.trim() || "";
+    const notes = $("#leaveNotes")?.value.trim() || "";
+    const editingId = state.leaveEditingId || null;
+    if (!operatorId || !startDate || !endDate) throw new Error("Completá operario, fecha desde y fecha hasta.");
+    if (endDate < startDate) throw new Error("La fecha hasta no puede ser anterior a la fecha desde.");
+
+    const overlap = (state.leaveRecords || []).find(leave =>
+      leave.id !== editingId
+      && leave.operator_id === operatorId
+      && isActiveLeave(leave)
+      && leave.start_date <= endDate
+      && leave.end_date >= startDate
+    );
+    if (overlap && !window.confirm(`Ya existe una novedad activa para este operario entre ${leavePeriodLabel(overlap)}. ¿Querés guardar igualmente este registro superpuesto?`)) return;
+
+    await store.upsertLeaveEvent({
+      ...(editingId ? { id: editingId } : {}),
+      operator_id: operatorId,
+      leave_type: leaveType,
+      start_date: startDate,
+      end_date: endDate,
+      reference,
+      notes,
+      status: "active",
+      ...(!editingId ? { created_by: state.currentProfile?.id || null } : {}),
+      updated_by: state.currentProfile?.id || null
+    });
+
+    resetLeaveForm();
+    toast(`${leaveTypeLabel(leaveType)} guardado. Esos días no generarán ausencia automática.`, "success");
+    await renderSupervisorView();
+  }
+
+  async function cancelLeave(id) {
+    const leave = (state.leaveRecords || []).find(item => item.id === id);
+    if (!leave) return;
+    const operator = byId(state.profiles, leave.operator_id);
+    if (!window.confirm(`¿Cancelar ${leaveTypeLabel(leave.leave_type).toLowerCase()} de ${operator?.full_name || "este operario"} (${leavePeriodLabel(leave)})? El registro quedará en la trazabilidad.`)) return;
+    await store.cancelLeaveEvent(id, state.currentProfile?.id || null);
+    toast("Novedad cancelada. El historial se conserva.", "success");
+    if (state.leaveEditingId === id) resetLeaveForm();
+    await renderSupervisorView();
+  }
+
+  function leaveAuditActionLabel(action) {
+    if (action === "INSERT") return "Creada";
+    if (action === "UPDATE") return "Modificada";
+    if (action === "DELETE") return "Eliminada";
+    return action || "Cambio";
+  }
+
+  async function refreshLeaveAudit() {
+    try {
+      state.leaveAudit = await (store.listLeaveAudit?.() || Promise.resolve([]));
+    } catch (error) {
+      console.warn("No se pudo cargar trazabilidad de novedades", error);
+      state.leaveAudit = [];
+    }
+  }
+
+  function renderLeaves() {
+    const list = $("#leavesList");
+    if (!list) return;
+    const statusFilter = $("#leaveStatusFilter")?.value || "active";
+    const searchTerm = sectionSearchTerm("leaves");
+    const sorted = [...(state.leaveRecords || [])].sort((a, b) => `${b.start_date}|${b.created_at || ""}`.localeCompare(`${a.start_date}|${a.created_at || ""}`));
+    const statusRows = sorted.filter(leave => statusFilter === "all" || String(leave.status || "active") === statusFilter);
+    const visible = searchTerm ? statusRows.filter(leave => {
+      const operator = byId(state.profiles, leave.operator_id);
+      return valuesMatchSearch(searchTerm, operator?.full_name, leaveTypeLabel(leave.leave_type), leave.start_date, leave.end_date, leave.reference, leave.notes, leave.status);
+    }) : statusRows;
+    updateSectionSearchCount("leaves", visible.length, statusRows.length);
+
+    list.innerHTML = visible.map(leave => {
+      const operator = byId(state.profiles, leave.operator_id);
+      const creator = byId(state.profiles, leave.created_by);
+      const updater = byId(state.profiles, leave.updated_by);
+      const cancelled = String(leave.status || "active") === "cancelled";
+      return `
+        <div class="list-item leave-list-item ${cancelled ? "leave-cancelled" : ""} ${searchTerm ? "search-match-card" : ""}">
+          <div class="list-item-title-row">
+            <div>
+              <div class="list-item-title">${escapeHtml(operator?.full_name || "—")}</div>
+              <div class="muted small">${escapeHtml(leavePeriodLabel(leave))}</div>
+            </div>
+            <div class="leave-badge-stack">
+              <span class="leave-type-badge ${escapeHtml(leave.leave_type || "other_leave")}">${escapeHtml(leaveTypeLabel(leave.leave_type))}</span>
+              ${cancelled ? `<span class="status-pill status-rejected">Cancelada</span>` : `<span class="status-pill status-leave">Activa</span>`}
+            </div>
+          </div>
+          ${leave.reference ? `<div class="muted small"><strong>Referencia:</strong> ${escapeHtml(leave.reference)}</div>` : ""}
+          ${leave.notes ? `<div class="muted small"><strong>Observación:</strong> ${escapeHtml(leave.notes)}</div>` : ""}
+          <div class="muted small leave-trace-line">Creada ${leave.created_at ? escapeHtml(formatDateTime(leave.created_at)) : "—"}${creator ? ` por ${escapeHtml(creator.full_name)}` : ""}${leave.updated_at && leave.updated_at !== leave.created_at ? ` · Último cambio ${escapeHtml(formatDateTime(leave.updated_at))}${updater ? ` por ${escapeHtml(updater.full_name)}` : ""}` : ""}</div>
+          <div class="list-item-actions">
+            ${cancelled ? "" : `<button class="secondary-btn small-btn" data-edit-leave="${escapeHtml(leave.id)}" type="button">Editar</button><button class="danger-btn small-btn" data-cancel-leave="${escapeHtml(leave.id)}" type="button">Cancelar novedad</button>`}
+          </div>
+        </div>`;
+    }).join("") || `<p class="muted">No hay novedades que coincidan con este filtro.</p>`;
+
+    list.querySelectorAll("[data-edit-leave]").forEach(btn => btn.addEventListener("click", () => editLeave(btn.dataset.editLeave)));
+    list.querySelectorAll("[data-cancel-leave]").forEach(btn => btn.addEventListener("click", () => cancelLeave(btn.dataset.cancelLeave).catch(error => toast(error.message || "No se pudo cancelar la novedad."))));
+
+    const auditContainer = $("#leaveAuditList");
+    if (auditContainer) {
+      const rows = (state.leaveAudit || []).slice(0, 80);
+      auditContainer.innerHTML = rows.length ? `
+        <div class="responsive-table">
+          <table>
+            <thead><tr><th>Fecha</th><th>Acción</th><th>Operario</th><th>Novedad</th><th>Período</th><th>Usuario</th></tr></thead>
+            <tbody>${rows.map(change => {
+              const data = change.new_data || change.old_data || {};
+              const operator = byId(state.profiles, data.operator_id);
+              const user = byId(state.profiles, change.changed_by);
+              const period = data.start_date ? (data.start_date === data.end_date ? data.start_date : `${data.start_date} a ${data.end_date}`) : "—";
+              return `<tr><td>${escapeHtml(formatDateTime(change.changed_at))}</td><td>${escapeHtml(leaveAuditActionLabel(change.action))}</td><td>${escapeHtml(operator?.full_name || "—")}</td><td>${escapeHtml(leaveTypeLabel(data.leave_type))}${data.status === "cancelled" ? " · Cancelada" : ""}</td><td>${escapeHtml(period)}</td><td>${escapeHtml(user?.full_name || "Sistema")}</td></tr>`;
+            }).join("")}</tbody>
+          </table>
+        </div>` : `<p class="muted">Todavía no hay cambios registrados.</p>`;
+    }
+  }
+
   function renderAssignments() {
     const list = $("#assignmentsList");
     const validIds = new Set(state.assignments.map(assignment => assignment.id));
@@ -4649,12 +5001,12 @@
           <div class="list-item-title-row"><div class="list-item-title">${escapeHtml(site?.name || "—")}</div>${assignmentType !== "fixed" ? `<span class="extra-duty-badge ${escapeHtml(assignmentType)}">${escapeHtml(assignmentTypeLabel(assignmentType))}</span>` : ""}</div>
           <div class="muted small"><strong>${escapeHtml(op?.full_name || "—")}</strong> · ${formatTime(assignment.scheduled_start)} a ${formatTime(assignment.scheduled_end)}</div>
           ${coveredOp ? `<div class="muted small">Cubre a: <strong>${escapeHtml(coveredOp.full_name || "—")}</strong></div>` : ""}
-          ${assignment.suppress_regular_assignments ? `<div class="muted small"><strong>Reemplaza la asignación habitual del operario en ese horario.</strong></div>` : ""}
+          ${assignment.suppress_regular_assignments ? `<div class="muted small"><strong>${assignmentType === "special" ? "Reemplaza toda la jornada habitual del operario para ese día." : "Reemplaza la asignación habitual del operario en ese horario."}</strong></div>` : ""}
           <div class="muted small">Días: ${escapeHtml(days || "—")} · Vigencia: ${escapeHtml(vigencia)}</div>
           <div class="muted small">Tolerancia: ${assignment.grace_minutes} min · Ausente desde: ${assignment.absence_after_minutes} min</div>
           ${assignment.notes ? `<div class="muted small">Notas: ${escapeHtml(assignment.notes)}</div>` : ""}
           <div class="list-item-actions">
-            <button class="secondary-btn small-btn" data-edit-assignment="${assignment.id}" type="button">Editar</button>
+            ${assignmentType === "special" ? `<button class="secondary-btn small-btn" data-edit-special-assignment="${assignment.id}" type="button">Editar</button>` : `<button class="secondary-btn small-btn" data-edit-assignment="${assignment.id}" type="button">Editar</button>`}
             <button class="danger-btn small-btn" data-delete-assignment="${assignment.id}" type="button">Eliminar</button>
           </div>
         </div>`;
@@ -4667,6 +5019,7 @@
       updateBulkSelectionSummaries();
     }));
     list.querySelectorAll("[data-edit-assignment]").forEach(btn => btn.addEventListener("click", () => editAssignment(btn.dataset.editAssignment)));
+    list.querySelectorAll("[data-edit-special-assignment]").forEach(btn => btn.addEventListener("click", () => editSpecialAssignment(btn.dataset.editSpecialAssignment)));
     list.querySelectorAll("[data-delete-assignment]").forEach(btn => btn.addEventListener("click", () => deleteAssignment(btn.dataset.deleteAssignment)));
     updateBulkSelectionSummaries();
   }
@@ -4732,7 +5085,9 @@
   }
 
   async function deleteAssignment(id) {
-    if (!window.confirm("¿Eliminar esta asignación fija? Las marcaciones históricas quedan guardadas.")) return;
+    const assignment = byId(state.assignments, id);
+    const label = assignmentTypeLabel(assignment?.assignment_type || "fixed").toLowerCase();
+    if (!window.confirm(`¿Eliminar esta ${label}? Las marcaciones históricas quedan guardadas.`)) return;
     await store.deleteAssignment(id);
     toast("Asignación eliminada.");
     await renderSupervisorView();
@@ -4960,7 +5315,7 @@
       (extra.assignment_type || "fixed") !== "fixed" &&
       extra.suppress_regular_assignments === true &&
       assignmentAppliesHistorically(extra, dateString) &&
-      assignmentsOverlap(extra, assignment)
+      (String(extra.assignment_type || "") === "special" || assignmentsOverlap(extra, assignment))
     );
   }
 
@@ -4979,7 +5334,7 @@
     return event.is_inside_site === true ? "Sí" : event.is_inside_site === false ? "No" : "";
   }
 
-  function getHistoricalShiftEvaluation(shift, events, now = new Date()) {
+  function getHistoricalShiftEvaluation(shift, events, now = new Date(), leaveRecord = null) {
     const entry = latestEventFromList(events, "present");
     const exit = latestEventFromList(events, "checkout");
     const absentEvent = latestEventFromList(events, "absent");
@@ -5000,6 +5355,10 @@
       if (entry.is_inside_site === false) { entryStatus = "Entrada fuera de radio"; entryKey = "outside"; }
       else if (entry.observed_status === "late" || new Date(eventTimestamp(entry)).getTime() > start.getTime() + grace * 60000) { entryStatus = "Entrada tarde"; entryKey = "late"; }
       else { entryStatus = "Entrada correcta"; entryKey = "present"; }
+    } else if (leaveRecord) {
+      entryStatus = leaveTypeLabel(leaveRecord.leave_type);
+      entryKey = "leave";
+      source = "Novedad justificada programada";
     } else if (dayOffEvent) {
       entryStatus = "Franco";
       entryKey = "day_off";
@@ -5018,8 +5377,8 @@
       source = "Demora registrada";
     }
 
-    let exitStatus = dayOffEvent && !entry ? "Franco" : "Sin entrada";
-    let exitKey = dayOffEvent && !entry ? "day_off" : "not_started";
+    let exitStatus = leaveRecord && !entry ? "No corresponde" : dayOffEvent && !entry ? "Franco" : "Sin entrada";
+    let exitKey = leaveRecord && !entry ? "leave" : dayOffEvent && !entry ? "day_off" : "not_started";
     if (exit) {
       source = source === "Programación" ? (exit.recorded_via === "system_auto" ? "Cierre automático del sistema" : exit.recorded_via === "supervisor_manual" ? "Marcación manual supervisor/admin" : "Marcación") : source;
       if (exit.recorded_via === "system_auto") { exitStatus = "Cierre automático · operario no registró salida"; exitKey = "auto_checkout"; }
@@ -5045,7 +5404,8 @@
     if (exitKey === "missing_exit") alerts.push("Salida no registrada");
 
     let operational = "Pendiente";
-    if (entryKey === "day_off") operational = "Franco";
+    if (entryKey === "leave") operational = entryStatus;
+    else if (entryKey === "day_off") operational = "Franco";
     else if (entryKey === "absent") operational = entryStatus;
     else if (entry && !exit) operational = exitStatus;
     else if (entry && exit) {
@@ -5068,20 +5428,22 @@
   }
 
   async function fetchReportContext(period) {
-    const [profiles, sites, assignments, events] = await Promise.all([
+    const [profiles, sites, assignments, events, leaves] = await Promise.all([
       store.listAllProfiles(),
       store.listAllSites(),
       store.listAllAssignments(),
-      store.listEventsRange(period.from, period.to)
+      store.listEventsRange(period.from, period.to),
+      store.listLeaveEvents?.() || Promise.resolve([])
     ]);
-    return { profiles, sites, assignments, events };
+    return { profiles, sites, assignments, events, leaves: leaves || [] };
   }
 
   function resolveCompleteOperationalPeriod(period, context) {
     if (!period.isAll) return period;
     const starts = [
       ...context.assignments.map(a => a.valid_from || timestampToBusinessDate(a.created_at)),
-      ...context.events.map(e => e.shift_date)
+      ...context.events.map(e => e.shift_date),
+      ...(context.leaves || []).map(leave => leave.start_date)
     ];
     const earliest = minISO(starts) || todayISO();
     return { ...period, from: earliest, to: todayISO(), label: `${earliest}-al-${todayISO()}` };
@@ -5130,12 +5492,13 @@
           };
           const shiftEvents = eventsByShift.get(shiftId) || eventsByAssignmentDate.get(`${assignment.id}__${date}`) || [];
           shiftEvents.forEach(e => matchedShiftIds.add(e.shift_id));
-          const evalResult = getHistoricalShiftEvaluation(shift, shiftEvents, reportNow);
+          const leaveRecord = (context.leaves || []).find(leave => leave.operator_id === assignment.operator_id && isActiveLeave(leave) && leave.start_date <= date && leave.end_date >= date) || null;
+          const evalResult = getHistoricalShiftEvaluation(shift, shiftEvents, reportNow, leaveRecord);
           const operator = profilesById.get(assignment.operator_id);
           const site = sitesById.get(assignment.site_id);
           const coveredOperator = assignment.covered_operator_id ? profilesById.get(assignment.covered_operator_id) : null;
           const assignmentType = assignment.assignment_type || "fixed";
-          const notes = [assignment.notes, evalResult.dayOffEvent?.notes, evalResult.absentEvent?.notes, evalResult.lateEvent?.notes, evalResult.entry?.notes, evalResult.exit?.notes].filter(Boolean).join(" | ");
+          const notes = [assignment.notes, leaveRecord?.notes, leaveRecord?.reference, evalResult.dayOffEvent?.notes, evalResult.absentEvent?.notes, evalResult.lateEvent?.notes, evalResult.entry?.notes, evalResult.exit?.notes].filter(Boolean).join(" | ");
           const duration = workedDuration(evalResult.entry, evalResult.exit);
 
           rows.push({
@@ -5149,6 +5512,8 @@
             "Dirección": site?.address || "",
             "Horario programado": `${String(assignment.scheduled_start || "").slice(0, 5)} - ${String(assignment.scheduled_end || "").slice(0, 5)}`,
             "Franco": evalResult.entryKey === "day_off" ? "Sí" : "No",
+            "Novedad justificada": leaveRecord ? leaveTypeLabel(leaveRecord.leave_type) : "",
+            "Período novedad": leaveRecord ? leavePeriodLabel(leaveRecord) : "",
             "Hora entrada": evalResult.entry ? formatClock(eventTimestamp(evalResult.entry)) : "",
             "Fecha/hora entrada": evalResult.entry ? eventTimestamp(evalResult.entry) : "",
             "Registro entrada": evalResult.entry ? recordedViaLabel(evalResult.entry) : (evalResult.dayOffEvent ? recordedViaLabel(evalResult.dayOffEvent) : ""),
@@ -6675,7 +7040,13 @@
     $("#bulkSiteScope").addEventListener("change", updateBulkSelectionSummaries);
     $("#applyBulkSitesBtn").addEventListener("click", () => applyBulkSiteRadius().catch(error => toast(error.message || "No se pudo actualizar el radio GPS.")));
 
+    $("#specialAssignmentForm")?.addEventListener("submit", (event) => saveSpecialAssignment(event).catch(error => toast(error.message || "No se pudo guardar la asignación especial.")));
+    $("#cancelSpecialAssignmentEditBtn")?.addEventListener("click", resetSpecialAssignmentForm);
     $("#extraAssignmentForm")?.addEventListener("submit", (event) => saveExtraAssignment(event).catch(error => toast(error.message || "No se pudo crear la tarea extraordinaria.")));
+
+    $("#leaveForm")?.addEventListener("submit", (event) => saveLeave(event).catch(error => toast(error.message || "No se pudo guardar la novedad.")));
+    $("#cancelLeaveEditBtn")?.addEventListener("click", resetLeaveForm);
+    $("#leaveStatusFilter")?.addEventListener("change", renderLeaves);
 
     $("#assignmentForm").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -6876,6 +7247,9 @@
     $("#assignmentValidFrom").value = todayISO();
     if ($("#assignmentAuditEffectiveDate")) $("#assignmentAuditEffectiveDate").value = todayISO();
     if ($("#extraAssignmentDate")) $("#extraAssignmentDate").value = todayISO();
+    if ($("#specialAssignmentDate")) $("#specialAssignmentDate").value = todayISO();
+    if ($("#leaveStartDate")) $("#leaveStartDate").value = todayISO();
+    if ($("#leaveEndDate")) $("#leaveEndDate").value = todayISO();
     syncPeriodControls("live", false);
     syncPeriodControls("records", false);
     syncPeriodControls("analytics", false);

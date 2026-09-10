@@ -8,10 +8,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Presentismo GPS" />
   <title>Clean It · Presentismo GPS</title>
-  <link rel="manifest" href="manifest.webmanifest?v=20260909-night-exit1" />
+  <link rel="manifest" href="manifest.webmanifest?v=20260910-leaves-special1" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20260909-night-exit1" />
+  <link rel="stylesheet" href="styles.css?v=20260910-leaves-special1" />
 </head>
 <body>
   <div class="app-shell">
@@ -137,6 +137,7 @@
           <button class="tab-btn" data-tab="fichaje" type="button">Fichaje</button>
           <button class="tab-btn" data-tab="coverage" type="button">Cobertura</button>
           <button class="tab-btn" data-tab="assignments" type="button">Asignaciones</button>
+          <button class="tab-btn" data-tab="leaves" type="button">Novedades</button>
           <button class="tab-btn" data-tab="sites" type="button">Servicios</button>
           <button class="tab-btn" data-tab="users" type="button">Usuarios</button>
           <button class="tab-btn" data-tab="records" type="button">Registros</button>
@@ -510,6 +511,28 @@
               <span class="muted small">Podés dejar un campo vacío para conservar su valor actual.</span>
             </div>
           </div>
+          <div class="data-card special-assignment-card">
+            <div class="card-title-row">
+              <div>
+                <h3 id="specialAssignmentFormTitle">Asignación especial por un día</h3>
+                <p class="muted small no-margin">Para un cambio excepcional de horario o servicio. Ese día reemplaza toda la jornada habitual del operario y al día siguiente vuelve automáticamente a su cronograma normal.</p>
+              </div>
+              <button class="ghost-btn small-btn hidden" id="cancelSpecialAssignmentEditBtn" type="button">Cancelar edición</button>
+            </div>
+            <form id="specialAssignmentForm" class="extra-assignment-grid">
+              <label><span>Operario</span><select id="specialAssignmentOperator" required></select></label>
+              <label><span>Servicio</span><select id="specialAssignmentSite" required></select></label>
+              <label><span>Fecha</span><input id="specialAssignmentDate" type="date" required /></label>
+              <label><span>Entrada</span><input id="specialAssignmentStart" type="time" value="08:00" required /></label>
+              <label><span>Salida</span><input id="specialAssignmentEnd" type="time" value="12:00" required /></label>
+              <label><span>Tolerancia demora (min.)</span><input id="specialAssignmentGrace" type="number" min="0" max="120" value="10" /></label>
+              <label><span>Ausente desde (min.)</span><input id="specialAssignmentAbsent" type="number" min="1" max="240" value="30" /></label>
+              <label class="extra-notes-field"><span>Motivo / nota</span><input id="specialAssignmentNotes" placeholder="Ej. Hoy ingresa 11:00 por cambio excepcional solicitado por el cliente" /></label>
+              <div class="special-assignment-rule"><strong>Regla:</strong> la asignación fija de ese operario queda anulada solo para esta fecha.</div>
+              <button class="primary-btn" id="saveSpecialAssignmentBtn" type="submit">Programar asignación especial</button>
+            </form>
+          </div>
+
           <div class="data-card extraordinary-assignment-card">
             <div class="card-title-row">
               <div>
@@ -583,6 +606,58 @@
               </div>
               <div id="assignmentsList" class="list-stack"></div>
             </div>
+          </div>
+        </section>
+
+        <section id="leavesTab" class="tab-panel">
+          <div class="split-layout leaves-management-layout">
+            <form id="leaveForm" class="data-card form-stack">
+              <div class="card-title-row">
+                <div>
+                  <h3 id="leaveFormTitle">Registrar / programar novedad</h3>
+                  <p class="muted small no-margin">Certificados médicos, licencias y vacaciones. Durante el período cargado no se genera ausencia automática.</p>
+                </div>
+                <button class="ghost-btn small-btn hidden" id="cancelLeaveEditBtn" type="button">Cancelar edición</button>
+              </div>
+              <label><span>Operario</span><select id="leaveOperator" required></select></label>
+              <label><span>Tipo de novedad</span>
+                <select id="leaveType" required>
+                  <option value="medical_certificate">Certificado médico</option>
+                  <option value="medical_leave">Licencia médica</option>
+                  <option value="other_leave">Otra licencia</option>
+                  <option value="vacation">Vacaciones</option>
+                </select>
+              </label>
+              <div class="form-grid two-cols">
+                <label><span>Desde</span><input id="leaveStartDate" type="date" required /></label>
+                <label><span>Hasta</span><input id="leaveEndDate" type="date" required /></label>
+              </div>
+              <label><span>Referencia / certificado <small class="muted">(opcional)</small></span><input id="leaveReference" placeholder="Ej. Certificado recibido / Exp. interno / Vacaciones aprobadas" /></label>
+              <label><span>Observación</span><textarea id="leaveNotes" placeholder="Detalle interno, motivo o información útil para RRHH y supervisión"></textarea></label>
+              <div class="inline-info leave-rule-info"><strong>Efecto operativo:</strong> en En vivo figurará la novedad correspondiente y ese turno no se contabilizará como ausencia.</div>
+              <button class="primary-btn" id="saveLeaveBtn" type="submit">Guardar novedad</button>
+            </form>
+
+            <div class="data-card">
+              <div class="card-title-row">
+                <div>
+                  <h3>Programadas e históricas</h3>
+                  <p class="muted small no-margin">La cancelación no borra el registro: queda trazabilidad de quién creó o modificó cada novedad.</p>
+                </div>
+                <label class="compact-filter"><span>Mostrar</span><select id="leaveStatusFilter"><option value="active">Activas</option><option value="all">Todas</option><option value="cancelled">Canceladas</option></select></label>
+              </div>
+              <div id="leavesList" class="list-stack"></div>
+            </div>
+          </div>
+
+          <div class="data-card leave-audit-card">
+            <div class="card-title-row">
+              <div>
+                <h3>Trazabilidad de cambios</h3>
+                <p class="muted small no-margin">Últimos movimientos sobre certificados, licencias y vacaciones.</p>
+              </div>
+            </div>
+            <div id="leaveAuditList"></div>
           </div>
         </section>
 
@@ -861,8 +936,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="js/config.js?v=20260909-night-exit1"></script>
-  <script src="js/storage.js?v=20260909-night-exit1"></script>
-  <script src="js/app.js?v=20260909-night-exit1"></script>
+  <script src="js/config.js?v=20260910-leaves-special1"></script>
+  <script src="js/storage.js?v=20260910-leaves-special1"></script>
+  <script src="js/app.js?v=20260910-leaves-special1"></script>
 </body>
 </html>

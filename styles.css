@@ -1775,3 +1775,137 @@ body.modal-open { overflow: hidden; }
   border-color: #cbd5e1;
   color: #475569;
 }
+
+/* 2026-09-10 · Novedades de presentismo + asignaciones especiales */
+.status-leave {
+  background: #eef2ff;
+  color: #3730a3;
+  border-color: #c7d2fe;
+}
+
+.status-filter-btn.tone-leave .filter-dot {
+  background: #6366f1;
+}
+
+.live-leave-row {
+  background: #f8faff;
+}
+
+.live-leave-row td:first-child {
+  box-shadow: inset 4px 0 0 #818cf8;
+}
+
+.operator-leave-card {
+  border-color: #c7d2fe;
+  background: linear-gradient(180deg, #ffffff 0%, #f7f8ff 100%);
+}
+
+.leave-operator-message {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  padding: 14px 16px;
+  border: 1px solid #c7d2fe;
+  border-radius: 12px;
+  background: #eef2ff;
+  color: #3730a3;
+}
+
+.leave-operator-message small {
+  color: #4f46e5;
+}
+
+.extra-duty-badge.special {
+  background: #ecfeff;
+  color: #0f766e;
+  border-color: #99f6e4;
+}
+
+.special-assignment-card {
+  border-color: #99f6e4;
+}
+
+.special-assignment-rule,
+.leave-rule-info {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  font-size: 0.86rem;
+  line-height: 1.35;
+}
+
+.leaves-management-layout {
+  align-items: start;
+}
+
+.leave-list-item {
+  gap: 8px;
+}
+
+.leave-cancelled {
+  opacity: 0.68;
+}
+
+.leave-badge-stack {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.leave-type-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid #c7d2fe;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.leave-type-badge.medical_certificate,
+.leave-type-badge.medical_leave {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border-color: #bfdbfe;
+}
+
+.leave-type-badge.vacation {
+  background: #ecfdf5;
+  color: #047857;
+  border-color: #a7f3d0;
+}
+
+.leave-type-badge.other_leave {
+  background: #f5f3ff;
+  color: #6d28d9;
+  border-color: #ddd6fe;
+}
+
+.leave-trace-line {
+  padding-top: 4px;
+  border-top: 1px dashed #e2e8f0;
+}
+
+.compact-filter {
+  min-width: 150px;
+}
+
+.compact-filter span {
+  font-size: 0.78rem;
+}
+
+.leave-audit-card {
+  margin-top: 18px;
+}
+
+@media (max-width: 820px) {
+  .leave-badge-stack {
+    justify-content: flex-start;
+  }
+}

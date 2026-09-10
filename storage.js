@@ -68,7 +68,9 @@
     const suppressors = active.filter(a => (a.assignment_type || "fixed") !== "fixed" && a.suppress_regular_assignments === true);
     const effective = active.filter(a => {
       if ((a.assignment_type || "fixed") !== "fixed") return true;
-      return !suppressors.some(extra => extra.operator_id === a.operator_id && assignmentTimesOverlap(extra, a));
+      return !suppressors.some(extra => extra.operator_id === a.operator_id && (
+        String(extra.assignment_type || "") === "special" || assignmentTimesOverlap(extra, a)
+      ));
     });
     return effective
       .map(a => materializeShift(a, dateString))
@@ -460,6 +462,56 @@
         const ids = new Set(pendingOwn.map(item => item?.id));
         return [...pendingOwn.map(item => ({ ...item, __offline_pending: true })), ...cached.filter(item => !ids.has(item?.id))];
       }
+    }
+
+    async listLeaveEvents() {
+      try {
+        const { data, error } = await this.client
+          .from("attendance_leaves")
+          .select("*")
+          .order("start_date", { ascending: false })
+          .limit(2000);
+        if (error) throw error;
+        const rows = data || [];
+        this.cacheOfflineData("leaves", rows);
+        return rows;
+      } catch (error) {
+        if (!this.isNetworkError(error)) throw error;
+        const cached = this.readOfflineData("leaves");
+        if (cached.length) return cached;
+        return [];
+      }
+    }
+
+    async upsertLeaveEvent(payload) {
+      const { data, error } = await this.client
+        .from("attendance_leaves")
+        .upsert(this.clean(payload))
+        .select("*")
+        .single();
+      if (error) throw error;
+      return data;
+    }
+
+    async cancelLeaveEvent(id, updatedBy = null) {
+      const { data, error } = await this.client
+        .from("attendance_leaves")
+        .update(this.clean({ status: "cancelled", updated_by: updatedBy }))
+        .eq("id", id)
+        .select("*")
+        .single();
+      if (error) throw error;
+      return data;
+    }
+
+    async listLeaveAudit() {
+      const { data, error } = await this.client
+        .from("attendance_leave_audit")
+        .select("*")
+        .order("changed_at", { ascending: false })
+        .limit(300);
+      if (error) throw error;
+      return data || [];
     }
 
     async listAllProfiles() {
