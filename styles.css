@@ -1920,3 +1920,55 @@ body.modal-open { overflow: hidden; }
 }
 .absence-reason-btn:hover { background: rgba(255, 237, 213, .98); }
 .quick-absence-modal-panel { max-width: 560px; }
+
+/* Jornada flexible excepcional */
+.flexible-user-config {
+  padding: 14px;
+  border: 1px solid rgba(15, 118, 110, 0.24);
+  border-radius: 14px;
+  background: rgba(15, 118, 110, 0.055);
+}
+.flexible-user-config.hidden { display: none; }
+.flexible-user-toggle { margin-bottom: 10px; }
+.flexible-user-badge,
+.extra-duty-badge.flexible {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin-top: 6px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  background: rgba(15, 118, 110, 0.12);
+  border: 1px solid rgba(15, 118, 110, 0.22);
+}
+.flexible-attendance-card { border-color: rgba(15, 118, 110, 0.22); }
+.flexible-attendance-notice {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  margin: 12px 0;
+  border-radius: 12px;
+  background: rgba(15, 118, 110, 0.08);
+  border: 1px solid rgba(15, 118, 110, 0.18);
+}
+.flexible-cycles-box {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border, #dfe3e8);
+  border-radius: 12px;
+}
+.flexible-cycle-row {
+  display: grid;
+  grid-template-columns: minmax(80px, 0.7fr) 1fr 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+  font-size: 13px;
+}
+.flexible-cycle-row:last-child { border-bottom: 0; }
+@media (max-width: 700px) {
+  .flexible-cycle-row { grid-template-columns: 1fr; gap: 2px; }
+}

@@ -464,6 +464,91 @@
       }
     }
 
+    async listFlexibleAttendanceModes() {
+      try {
+        const { data, error } = await this.client
+          .from("flexible_attendance_modes")
+          .select("*")
+          .order("valid_from", { ascending: false });
+        if (error) throw error;
+        const rows = data || [];
+        this.cacheOfflineData("flexible_modes", rows);
+        return rows;
+      } catch (error) {
+        const code = String(error?.code || "");
+        const message = String(error?.message || "").toLowerCase();
+        if (code === "42P01" || message.includes("flexible_attendance_modes")) return [];
+        if (!this.isNetworkError(error)) throw error;
+        return this.readOfflineData("flexible_modes");
+      }
+    }
+
+    async setFlexibleAttendanceMode(operatorId, enabled, siteId = null, effectiveDate = todayISO()) {
+      const { data: activeRows, error: activeError } = await this.client
+        .from("flexible_attendance_modes")
+        .select("*")
+        .eq("operator_id", operatorId)
+        .is("valid_to", null)
+        .order("valid_from", { ascending: false });
+      if (activeError) throw activeError;
+      const active = (activeRows || [])[0] || null;
+
+      if (enabled) {
+        if (!siteId) throw new Error("Seleccioná el servicio para la jornada flexible.");
+        if (active && active.site_id === siteId) return active;
+
+        if (active) {
+          if (active.valid_from === effectiveDate) {
+            const { data, error } = await this.client
+              .from("flexible_attendance_modes")
+              .update({ site_id: siteId })
+              .eq("id", active.id)
+              .select("*")
+              .single();
+            if (error) throw error;
+            return data;
+          }
+          const yesterday = new Date(`${effectiveDate}T12:00:00Z`);
+          yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+          const validTo = yesterday.toISOString().slice(0, 10);
+          const { error: closeError } = await this.client
+            .from("flexible_attendance_modes")
+            .update({ valid_to: validTo })
+            .eq("id", active.id);
+          if (closeError) throw closeError;
+        }
+
+        const { data, error } = await this.client
+          .from("flexible_attendance_modes")
+          .insert({ operator_id: operatorId, site_id: siteId, valid_from: effectiveDate })
+          .select("*")
+          .single();
+        if (error) throw error;
+        return data;
+      }
+
+      if (!active) return null;
+      if (active.valid_from === effectiveDate) {
+        const { error } = await this.client
+          .from("flexible_attendance_modes")
+          .delete()
+          .eq("id", active.id);
+        if (error) throw error;
+        return null;
+      }
+      const yesterday = new Date(`${effectiveDate}T12:00:00Z`);
+      yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+      const validTo = yesterday.toISOString().slice(0, 10);
+      const { data, error } = await this.client
+        .from("flexible_attendance_modes")
+        .update({ valid_to: validTo })
+        .eq("id", active.id)
+        .select("*")
+        .single();
+      if (error) throw error;
+      return data;
+    }
+
     async listLeaveEvents() {
       try {
         const { data, error } = await this.client

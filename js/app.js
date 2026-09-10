@@ -25,6 +25,7 @@
     overtimeAuthorizations: [],
     overtimeRequests: [],
     leaveRecords: [],
+    flexibleModes: [],
     leaveAudit: [],
     leaveEditingId: null,
     specialAssignmentEditingId: null,
@@ -935,7 +936,7 @@
   }
 
   async function refreshBaseData(date = $("#dashboardDate")?.value || todayISO()) {
-    const [profiles, sites, assignments, shifts, events, overtimeAuthorizations, overtimeRequests, leaveRecords] = await Promise.all([
+    const [profiles, sites, assignments, shifts, events, overtimeAuthorizations, overtimeRequests, leaveRecords, flexibleModes] = await Promise.all([
       store.listProfiles(),
       store.listSites(),
       store.listAssignments(),
@@ -943,12 +944,14 @@
       store.listEvents(),
       store.listOvertimeAuthorizations?.(date, date) || Promise.resolve([]),
       store.listOvertimeRequests?.(date, date) || Promise.resolve([]),
-      store.listLeaveEvents?.() || Promise.resolve([])
+      store.listLeaveEvents?.() || Promise.resolve([]),
+      store.listFlexibleAttendanceModes?.() || Promise.resolve([])
     ]);
     state.profiles = profiles;
     state.sites = sites;
     state.assignments = assignments;
-    state.shifts = shifts;
+    state.flexibleModes = flexibleModes || [];
+    state.shifts = (shifts || []).filter(shift => !flexibleModeForOperatorDate(shift.operator_id, date));
     state.events = events;
     state.overtimeAuthorizations = overtimeAuthorizations || [];
     state.overtimeRequests = overtimeRequests || [];
@@ -1044,7 +1047,26 @@
     if (normalized === "coverage") return "Cobertura por ausencia";
     if (normalized === "reinforcement") return "Refuerzo";
     if (normalized === "special") return "Asignación especial";
+    if (normalized === "flexible") return "Jornada flexible";
     return "Asignación fija";
+  }
+
+  function flexibleModeAppliesOnDate(mode, dateString) {
+    if (!mode || mode.is_active === false || !dateString) return false;
+    if (mode.valid_from && mode.valid_from > dateString) return false;
+    if (mode.valid_to && mode.valid_to < dateString) return false;
+    return true;
+  }
+
+  function flexibleModeForOperatorDate(operatorId, dateString) {
+    if (!operatorId || !dateString) return null;
+    return (state.flexibleModes || [])
+      .filter(mode => mode.operator_id === operatorId && flexibleModeAppliesOnDate(mode, dateString))
+      .sort((a, b) => String(b.valid_from || "").localeCompare(String(a.valid_from || "")))[0] || null;
+  }
+
+  function isFlexibleShiftId(shiftId) {
+    return String(shiftId || "").startsWith("flex__");
   }
 
   function workTypeLabel(type) {
@@ -1280,13 +1302,14 @@
       operatorExitProtectionTimer = null;
     }
     const today = todayISO();
-    const [sites, events, assignments, overtimeAuthorizations, overtimeRequests, leaveRecords] = await Promise.all([
+    const [sites, events, assignments, overtimeAuthorizations, overtimeRequests, leaveRecords, flexibleModes] = await Promise.all([
       store.listSites(),
       store.listEvents(),
       store.listAssignments(),
       store.listOvertimeAuthorizations?.(addDaysISO(today, -1), today) || Promise.resolve([]),
       store.listOvertimeRequests?.(addDaysISO(today, -1), today) || Promise.resolve([]),
-      store.listLeaveEvents?.() || Promise.resolve([])
+      store.listLeaveEvents?.() || Promise.resolve([]),
+      store.listFlexibleAttendanceModes?.() || Promise.resolve([])
     ]);
     state.sites = sites;
     state.events = events;
@@ -1294,11 +1317,13 @@
     state.overtimeAuthorizations = overtimeAuthorizations || [];
     state.overtimeRequests = overtimeRequests || [];
     state.leaveRecords = leaveRecords || [];
+    state.flexibleModes = flexibleModes || [];
 
     $("#operatorTitle").textContent = `Hola, ${state.currentProfile.full_name}`;
 
     const leaveToday = leaveForOperatorDate(state.currentProfile.id, today);
-    const activeToday = state.assignments.filter(a => a.operator_id === state.currentProfile.id && assignmentAppliesOnDate(a, today));
+    const flexibleMode = flexibleModeForOperatorDate(state.currentProfile.id, today);
+    const activeToday = flexibleMode ? [] : state.assignments.filter(a => a.operator_id === state.currentProfile.id && assignmentAppliesOnDate(a, today));
     const suppressors = activeToday.filter(a => (a.assignment_type || "fixed") !== "fixed" && a.suppress_regular_assignments === true);
     const todaysAssignments = leaveToday ? [] : activeToday
       .filter(a => {
@@ -1346,6 +1371,8 @@
 
     if (leaveToday) {
       cards.push(renderOperatorLeaveCard(leaveToday));
+    } else if (flexibleMode) {
+      cards.push(renderFlexibleAttendanceCard(flexibleMode));
     } else if (!todaysAssignments.length && !overnightCarryovers.length && !extraGroups.size) {
       cards.push(`
         <article class="operator-card operator-empty-card">
@@ -1382,7 +1409,7 @@
     });
 
     const hasOpenExtra = Array.from(extraGroups.values()).some(group => group.some(e => e.event_type === "present") && !group.some(e => e.event_type === "checkout"));
-    if (!leaveToday) cards.push(renderExtraDutyStartCard(hasOpenExtra));
+    if (!leaveToday && !flexibleMode) cards.push(renderExtraDutyStartCard(hasOpenExtra));
     container.innerHTML = cards.join("");
 
     overnightCarryovers.forEach(assignment => {
@@ -1401,8 +1428,126 @@
       container.querySelector(`[data-gps-checkout="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckout(shiftId));
     });
     container.querySelector("[data-extra-checkin]")?.addEventListener("click", handleExtraDutyCheckin);
+    container.querySelector("[data-flexible-checkin]")?.addEventListener("click", () => handleFlexibleCheckin(flexibleMode));
+    container.querySelectorAll("[data-flexible-checkout]").forEach(btn => btn.addEventListener("click", () => handleGpsCheckout(btn.dataset.flexibleCheckout)));
     await renderOperatorConnectivity();
     scheduleOperatorExitProtectionRefresh(container);
+  }
+
+  function flexibleAttendanceGroupsForOperator(operatorId) {
+    const groups = new Map();
+    (state.events || []).filter(event => event.operator_id === operatorId && isFlexibleShiftId(event.shift_id)).forEach(event => {
+      if (!groups.has(event.shift_id)) groups.set(event.shift_id, []);
+      groups.get(event.shift_id).push(event);
+    });
+    return groups;
+  }
+
+  function renderFlexibleAttendanceCard(mode) {
+    const site = byId(state.sites, mode?.site_id);
+    const today = todayISO();
+    const groups = flexibleAttendanceGroupsForOperator(state.currentProfile.id);
+    const groupRows = [...groups.entries()].map(([shiftId, events]) => {
+      const entry = latestEventFromList(events, "present");
+      const exit = latestEventFromList(events, "checkout");
+      return { shiftId, events, entry, exit, shiftDate: entry?.shift_date || exit?.shift_date || shiftDateFromId(shiftId) };
+    }).filter(row => row.entry);
+    const open = groupRows
+      .filter(row => !row.exit)
+      .sort((a, b) => new Date(eventTimestamp(b.entry) || 0) - new Date(eventTimestamp(a.entry) || 0))[0] || null;
+    const todays = groupRows
+      .filter(row => row.shiftDate === today)
+      .sort((a, b) => new Date(eventTimestamp(a.entry) || 0) - new Date(eventTimestamp(b.entry) || 0));
+    const hasSite = Boolean(site);
+    const entryInfo = open?.entry ? `${formatDateTime(eventTimestamp(open.entry))} · ${gpsSummary(open.entry)}` : "Sin turno abierto";
+    const currentStatus = open ? "En servicio" : "Disponible para fichar";
+    const currentClass = open ? "status-ok" : "status-pending";
+    const history = todays.length ? todays.map((row, index) => `
+      <div class="flexible-cycle-row">
+        <strong>Tramo ${index + 1}</strong>
+        <span>Entrada ${escapeHtml(formatClock(eventTimestamp(row.entry)))}</span>
+        <span>${row.exit ? `Salida ${escapeHtml(formatClock(eventTimestamp(row.exit)))}` : "En curso"}</span>
+      </div>`).join("") : `<p class="muted small no-margin">Todavía no hay tramos registrados hoy.</p>`;
+    const action = open ? `
+      <div class="checkin-box exit-box">
+        <div class="checkpoint-title-row"><strong>Registrar salida real</strong><span class="status-pill status-pending">Pendiente</span></div>
+        <label class="checkbox-row"><input type="checkbox" id="confirm-out-${escapeHtml(open.shiftId)}" /><span><strong>Confirmo que estoy saliendo del servicio</strong><br><span class="muted small">Se registra la hora y la ubicación GPS reales. Luego podés volver a fichar una nueva entrada si retomás la jornada.</span></span></label>
+        <label><span>Observación opcional</span><textarea id="notes-out-${escapeHtml(open.shiftId)}" placeholder="Ej. Finalizo este tramo / retomo más tarde..."></textarea></label>
+        <button class="secondary-btn big-action" data-flexible-checkout="${escapeHtml(open.shiftId)}" type="button">Registrar salida con GPS</button>
+      </div>` : `
+      <div class="checkin-box">
+        <div class="checkpoint-title-row"><strong>Registrar entrada real</strong><span class="status-pill status-pending">Sin horario fijo</span></div>
+        <label class="checkbox-row"><input type="checkbox" id="confirm-flex-in" ${hasSite ? "" : "disabled"} /><span><strong>Confirmo que estoy en el servicio</strong><br><span class="muted small">No se aplica horario programado, tardanza ni ausencia automática. Se guarda la hora y ubicación GPS reales.</span></span></label>
+        <label><span>Observación opcional</span><textarea id="notes-flex-in" placeholder="Ej. Inicio primer tramo / regreso al servicio..." ${hasSite ? "" : "disabled"}></textarea></label>
+        <button class="primary-btn big-action" data-flexible-checkin type="button" ${hasSite ? "" : "disabled"}>Registrar entrada con GPS</button>
+      </div>`;
+
+    return `
+      <article class="operator-card main-checkin flexible-attendance-card">
+        <div class="card-title-row">
+          <div>
+            <p class="eyebrow">Modalidad excepcional</p>
+            <div class="extra-duty-meta"><span class="extra-duty-badge flexible">Jornada flexible</span></div>
+            <h3 class="service-title">${escapeHtml(site?.name || "Servicio flexible no configurado")}</h3>
+            <p class="muted">${escapeHtml(site?.address || "Pedile al supervisor que configure el servicio asignado a tu jornada flexible.")}</p>
+          </div>
+          <span class="status-pill ${currentClass}">${currentStatus}</span>
+        </div>
+        <div class="flexible-attendance-notice">
+          <strong>Tu jornada no tiene un horario fijo de entrada o salida.</strong>
+          <span>Fichá cada entrada y salida real. Si fraccionás la jornada, podés repetir el ciclo todas las veces que corresponda durante el día.</span>
+        </div>
+        <div class="meta-grid">
+          <div class="meta-item"><strong>Estado actual</strong><span class="meta-subline">${escapeHtml(entryInfo)}</span></div>
+          <div class="meta-item"><strong>Control</strong><span class="meta-subline">GPS y hora real · sin control de tardanza</span></div>
+        </div>
+        ${action}
+        <div class="flexible-cycles-box"><strong>Marcaciones de hoy</strong>${history}</div>
+      </article>`;
+  }
+
+  async function handleFlexibleCheckin(mode) {
+    if (!mode?.site_id) return toast("No hay un servicio configurado para tu jornada flexible.");
+    const confirm = $("#confirm-flex-in");
+    if (!confirm?.checked) return toast("Confirmá que estás en el servicio antes de registrar la entrada.");
+    const groups = flexibleAttendanceGroupsForOperator(state.currentProfile.id);
+    const hasOpen = [...groups.values()].some(events => latestEventFromList(events, "present") && !latestEventFromList(events, "checkout"));
+    if (hasOpen) return toast("Ya tenés una entrada abierta. Registrá la salida antes de iniciar otro tramo.");
+    try {
+      const site = byId(state.sites, mode.site_id);
+      if (!site) throw new Error("No se encontró el servicio configurado para tu jornada flexible.");
+      const coords = await getCurrentPosition();
+      const distance = haversineMeters(coords.lat, coords.lng, Number(site.lat), Number(site.lng));
+      const isInside = distance <= Number(site.gps_radius_m || 120);
+      const shiftDate = todayISO();
+      const shiftId = `flex__${state.currentProfile.id}__${shiftDate}__${Date.now()}`;
+      const notes = $("#notes-flex-in")?.value.trim() || "";
+      await store.createEvent({
+        shift_id: shiftId,
+        assignment_id: null,
+        shift_date: shiftDate,
+        operator_id: state.currentProfile.id,
+        site_id: site.id,
+        event_type: "present",
+        observed_status: "present",
+        work_type: "regular",
+        entry_source: "assignment",
+        validation_status: "confirmed",
+        notes: `Jornada flexible · entrada real.${notes ? ` ${notes}` : ""}${isInside ? "" : " · Entrada fuera de radio."}`,
+        lat: coords.lat,
+        lng: coords.lng,
+        gps_accuracy_m: coords.accuracy,
+        distance_m: Math.round(distance),
+        is_inside_site: isInside,
+        client_time: new Date().toISOString(),
+        recorded_via: "operator",
+        recorded_by: state.currentProfile.id
+      });
+      toast(isInside ? "Entrada de jornada flexible registrada." : "Entrada registrada fuera del radio del servicio.", isInside ? "success" : undefined);
+      await renderOperatorView();
+    } catch (error) {
+      toast(error.message || "No se pudo registrar la entrada.");
+    }
   }
 
   function renderOperatorLeaveCard(leave) {
@@ -1966,7 +2111,7 @@
     const shiftMap = new Map();
     for (const event of events) {
       if (!shiftMap.has(event.shift_id)) {
-        shiftMap.set(event.shift_id, { shift_id: event.shift_id, shift_date: event.shift_date, operator_id: event.operator_id, site_id: null });
+        shiftMap.set(event.shift_id, { shift_id: event.shift_id, shift_date: event.shift_date, operator_id: event.operator_id, site_id: null, is_flexible: isFlexibleShiftId(event.shift_id) });
       }
       const s = shiftMap.get(event.shift_id);
       if (event.event_type === "present") {
@@ -1996,12 +2141,13 @@
       else { estado = "Sin marcación"; estadoClass = "status-absent"; }
 
       return {
+        shift_id: s.shift_id,
         shift_date: s.shift_date,
         operator_id: s.operator_id,
         operator_name: operator?.full_name || "—",
         site_name: site?.name || "—",
         work_type: s.work_type || "regular",
-        work_type_label: workTypeLabel(s.work_type || "regular"),
+        work_type_label: s.is_flexible ? "Jornada flexible" : workTypeLabel(s.work_type || "regular"),
         entry_source: s.entry_source || "assignment",
         validation_status: s.validation_status || "confirmed",
         validation_label: validationLabel(s.validation_status || "confirmed"),
@@ -2066,7 +2212,7 @@
         <td>${escapeHtml(row.shift_date)}</td>
         <td><strong>${escapeHtml(row.operator_name)}</strong></td>
         <td>${escapeHtml(row.site_name)}</td>
-        <td>${escapeHtml(row.work_type_label)}${row.entry_source === "operator_extra" ? `<br><span class="muted small">Declarado por operario · ${escapeHtml(row.validation_label)}</span>` : ""}</td>
+        <td>${escapeHtml(row.work_type_label)}${row.shift_id?.startsWith?.("flex__") ? `<br><span class="muted small">Sin horario fijo · hora real</span>` : row.entry_source === "operator_extra" ? `<br><span class="muted small">Declarado por operario · ${escapeHtml(row.validation_label)}</span>` : ""}</td>
         <td>${row.entry_time ? formatDateTime(row.entry_time) : "—"}${row.entry_recorded_via ? `<br><span class="muted small">${escapeHtml(row.entry_recorded_via)}</span>` : ""}</td>
         <td>${row.exit_time ? formatDateTime(row.exit_time) : "—"}${row.exit_recorded_via ? `<br><span class="muted small">${escapeHtml(row.exit_recorded_via)}</span>` : ""}</td>
         <td><strong>${escapeHtml(row.horasLabel)}</strong></td>
@@ -2116,7 +2262,7 @@
       "Operario": r.operator_name,
       "Servicio": r.site_name,
       "Tipo de trabajo": r.work_type_label,
-      "Origen": r.entry_source === "operator_extra" ? "Declarado por operario" : "Asignación",
+      "Origen": isFlexibleShiftId(r.shift_id) ? "Jornada flexible" : r.entry_source === "operator_extra" ? "Declarado por operario" : "Asignación",
       "Validación": r.validation_label,
       "Franco": r.is_day_off ? "Sí" : "No",
       "Registro entrada": r.entry_recorded_via,
@@ -2552,6 +2698,79 @@
     return rows;
   }
 
+  function getFlexibleDashboardRows() {
+    const date = $("#dashboardDate")?.value || todayISO();
+    const groups = new Map();
+    (state.events || []).filter(event => isFlexibleShiftId(event.shift_id)).forEach(event => {
+      if (!groups.has(event.shift_id)) groups.set(event.shift_id, []);
+      groups.get(event.shift_id).push(event);
+    });
+    const rows = [];
+    groups.forEach((group, shiftId) => {
+      const entryEvent = latestEventFromList(group, "present");
+      if (!entryEvent) return;
+      const exitEvent = latestEventFromList(group, "checkout");
+      const belongsToDate = entryEvent.shift_date === date;
+      const openCarryover = date === todayISO() && !exitEvent && entryEvent.shift_date < date;
+      if (!belongsToDate && !openCarryover) return;
+      const entryStatus = entryEvent.is_inside_site === false
+        ? { key: "outside", label: "Entrada fuera de radio", className: "status-outside" }
+        : { key: "present", label: "Entrada registrada", className: "status-present" };
+      const exitStatus = exitEvent
+        ? (exitEvent.is_inside_site === false
+          ? { key: "exit_outside", label: "Salida fuera de radio", className: "status-outside" }
+          : { key: "completed", label: "Salida registrada", className: "status-present" })
+        : { key: "in_service_flexible", label: "En servicio · jornada flexible", className: "status-ok" };
+      const status = exitEvent ? { ...exitStatus } : { key: "flexible", label: "Jornada flexible · en servicio", className: "status-ok" };
+      const shift = {
+        id: shiftId,
+        assignment_id: null,
+        shift_date: entryEvent.shift_date,
+        operator_id: entryEvent.operator_id,
+        site_id: entryEvent.site_id,
+        scheduled_start: null,
+        scheduled_end: null,
+        grace_minutes: 0,
+        absence_after_minutes: 0,
+        assignment_type: "flexible",
+        notes: entryEvent.notes || ""
+      };
+      const lastEvent = [...group].sort((a, b) => new Date(eventTimestamp(b) || 0) - new Date(eventTimestamp(a) || 0))[0];
+      rows.push({ shift, entryEvent, exitEvent, manualEvent: null, entryStatus, exitStatus, status, lastEvent, entryTiming: { isLate: false, isAfterAbsenceThreshold: false, lateMinutes: 0 }, automaticAbsenceEvent: null, otherServiceEntry: null, isSelfReportedExtra: false, isFlexible: true, overtimeAuthorization: null, overtimeRequest: null, overtimeRequestPending: false, overtimeMinutes: 0, leaveRecord: null });
+    });
+    const operatorsWithRows = new Set(rows.map(row => row.shift.operator_id));
+    (state.flexibleModes || []).forEach(mode => {
+      if (!flexibleModeAppliesOnDate(mode, date) || operatorsWithRows.has(mode.operator_id)) return;
+      const flexLeave = leaveForOperatorDate(mode.operator_id, date);
+      rows.push({
+        shift: {
+          id: `flex__${mode.operator_id}__${date}__placeholder`,
+          assignment_id: null,
+          shift_date: date,
+          operator_id: mode.operator_id,
+          site_id: mode.site_id,
+          scheduled_start: null,
+          scheduled_end: null,
+          grace_minutes: 0,
+          absence_after_minutes: 0,
+          assignment_type: "flexible",
+          notes: "Jornada flexible asignada"
+        },
+        entryEvent: null,
+        exitEvent: null,
+        manualEvent: null,
+        entryStatus: flexLeave ? { key: "leave", label: leaveTypeLabel(flexLeave.leave_type), className: "status-leave" } : { key: "flexible_pending", label: "Sin ingreso registrado", className: "status-pending" },
+        exitStatus: flexLeave ? { key: "leave", label: "No corresponde", className: "status-leave" } : { key: "not_started", label: "Sin salida", className: "status-pending" },
+        status: flexLeave ? { key: "leave", label: leaveTypeLabel(flexLeave.leave_type), className: "status-leave" } : { key: "flexible_idle", label: "Jornada flexible · sin fichaje", className: "status-pending" },
+        lastEvent: null,
+        entryTiming: { isLate: false, isAfterAbsenceThreshold: false, lateMinutes: 0 },
+        automaticAbsenceEvent: null, otherServiceEntry: null, isSelfReportedExtra: false, isFlexible: true,
+        overtimeAuthorization: null, overtimeRequest: null, overtimeRequestPending: false, overtimeMinutes: 0, leaveRecord: flexLeave || null
+      });
+    });
+    return rows;
+  }
+
   function getDashboardRows() {
     const regularRows = state.shifts.map(shift => {
       const entryEvent = getEntryEvent(shift);
@@ -2571,7 +2790,7 @@
       const leaveRecord = leaveForShift(shift);
       return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent, entryTiming, automaticAbsenceEvent, otherServiceEntry, isSelfReportedExtra: false, overtimeAuthorization, overtimeRequest, overtimeRequestPending, overtimeMinutes, leaveRecord };
     });
-    return [...regularRows, ...getSelfReportedExtraDashboardRows()].sort((a, b) => `${a.shift.scheduled_start || "99:99"}|${byId(state.sites, a.shift.site_id)?.name || ""}`.localeCompare(`${b.shift.scheduled_start || "99:99"}|${byId(state.sites, b.shift.site_id)?.name || ""}`));
+    return [...regularRows, ...getFlexibleDashboardRows(), ...getSelfReportedExtraDashboardRows()].sort((a, b) => `${a.shift.scheduled_start || "99:99"}|${byId(state.sites, a.shift.site_id)?.name || ""}`.localeCompare(`${b.shift.scheduled_start || "99:99"}|${byId(state.sites, b.shift.site_id)?.name || ""}`));
   }
 
   function liveStatusFilterDefinitions(rows) {
@@ -2579,7 +2798,7 @@
     const definitions = [
       { key: "all", label: "Todos", tone: "neutral", matches: () => true },
       { key: "alerts", label: "Con alerta", tone: "alert", matches: row => hasOperationalAlert(row) },
-      { key: "on_time", label: "Ingreso correcto", tone: "present", matches: row => row.entryStatus.key === "present" && !row.entryTiming?.isLate },
+      { key: "on_time", label: "Ingreso correcto", tone: "present", matches: row => !row.isFlexible && row.entryStatus.key === "present" && !row.entryTiming?.isLate },
       { key: "late", label: "Llegada tarde", tone: "late", matches: row => row.entryStatus.key === "late" || row.entryTiming?.isLate === true || row.entryEvent?.observed_status === "late" },
       { key: "outside", label: "Fuera de radio", tone: "outside", matches: row => row.entryStatus.key === "outside" },
       { key: "absent", label: "Ausentes", tone: "absent", matches: row => row.entryStatus.key === "absent" },
@@ -2587,6 +2806,7 @@
       { key: "leave", label: "Licencias / vacaciones", tone: "leave", matches: row => row.entryStatus.key === "leave" || Boolean(row.leaveRecord) },
       { key: "pending", label: "Pendientes", tone: "pending", matches: row => ["scheduled", "on_window"].includes(row.entryStatus.key) },
       { key: "extra", label: "Coberturas / refuerzos", tone: "extra", matches: row => row.isSelfReportedExtra || ["coverage", "reinforcement"].includes(String(row.shift.assignment_type || "")) },
+      { key: "flexible", label: "Jornada flexible", tone: "neutral", matches: row => row.isFlexible === true },
       { key: "overtime", label: "Horas extra", tone: "overtime", matches: row => Boolean(row.overtimeAuthorization || row.overtimeRequest) },
       { key: "auto_checkout", label: "Cierres automáticos", tone: "exit", matches: row => row.exitStatus.key === "auto_checkout" },
       { key: "exit_alert", label: "Alertas de salida", tone: "exit", matches: row => exitAlertKeys.includes(row.exitStatus.key) }
@@ -3250,7 +3470,7 @@
       const { shift, entryEvent, exitEvent, entryStatus, exitStatus, status, lastEvent } = row;
       const operator = byId(state.profiles, shift.operator_id);
       const site = byId(state.sites, shift.site_id);
-      const message = row.isSelfReportedExtra ? `Trabajo extraordinario registrado por ${operator?.full_name || "operario"} en ${site?.name || "servicio"}.` : buildWhatsAppMessage(shift, status);
+      const message = row.isFlexible ? `${operator?.full_name || "El operario"} tiene jornada flexible en ${site?.name || "el servicio"}; las marcaciones reflejan la hora real de entrada y salida.` : row.isSelfReportedExtra ? `Trabajo extraordinario registrado por ${operator?.full_name || "operario"} en ${site?.name || "servicio"}.` : buildWhatsAppMessage(shift, status);
       const url = whatsappUrl(site?.whatsapp_phone, message);
       const assignmentType = row.isSelfReportedExtra ? (row.extraWorkType || "coverage") : (shift.assignment_type || "fixed");
       const typeBadge = assignmentType !== "fixed" ? `<span class="extra-duty-badge ${escapeHtml(assignmentType)}">${escapeHtml(assignmentTypeLabel(assignmentType))}</span>` : "";
@@ -3325,7 +3545,7 @@
         <tr class="${rowClasses}">
           <td><strong>${escapeHtml(operator?.full_name || "—")}</strong><br><span class="muted small">${escapeHtml(operator?.phone || "")}</span></td>
           <td><strong>${escapeHtml(site?.name || "—")}</strong><br>${typeBadge ? `${typeBadge}<br>` : ""}<span class="muted small">${escapeHtml(site?.address || "")}</span></td>
-          <td>${row.isSelfReportedExtra ? `<span class="extra-schedule-label">Sin horario previo</span>` : `${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`}</td>
+          <td>${row.isFlexible ? `<span class="extra-schedule-label">Flexible · hora real</span>` : row.isSelfReportedExtra ? `<span class="extra-schedule-label">Sin horario previo</span>` : `${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`}</td>
           <td>${entryCell}</td>
           <td>${exitCell}</td>
           <td><span class="status-pill ${status.className}">${status.label}</span><br>${operationalDetail}</td>
@@ -3812,6 +4032,11 @@
     if ($("#specialAssignmentOperator")) $("#specialAssignmentOperator").innerHTML = operatorOptions;
     if ($("#specialAssignmentSite")) $("#specialAssignmentSite").innerHTML = siteOptions;
     if ($("#leaveOperator")) $("#leaveOperator").innerHTML = operatorOptions;
+    if ($("#userFlexibleSite")) {
+      const selected = $("#userFlexibleSite").value;
+      $("#userFlexibleSite").innerHTML = `<option value="">Seleccionar servicio</option>${siteOptions}`;
+      if (selected && state.sites.some(site => site.id === selected)) $("#userFlexibleSite").value = selected;
+    }
     if ($("#extraCoveredOperator")) $("#extraCoveredOperator").innerHTML = `<option value="">Sin especificar</option>${operatorOptions}`;
   }
 
@@ -5237,7 +5462,11 @@
   function renderUsers() {
     const list = $("#usersList");
     const searchTerm = sectionSearchTerm("users");
-    const visibleUsers = searchTerm ? state.profiles.filter(user => valuesMatchSearch(searchTerm, user.full_name, user.username, user.phone, roleLabel(user.role), user.notes, user.pending_recovery_email)) : state.profiles;
+    const visibleUsers = searchTerm ? state.profiles.filter(user => {
+      const flexibleMode = flexibleModeForOperatorDate(user.id, todayISO());
+      const flexSite = flexibleMode ? byId(state.sites, flexibleMode.site_id) : null;
+      return valuesMatchSearch(searchTerm, user.full_name, user.username, user.phone, roleLabel(user.role), user.notes, user.pending_recovery_email, flexibleMode ? "jornada flexible" : "", flexSite?.name);
+    }) : state.profiles;
     updateSectionSearchCount("users", visibleUsers.length, state.profiles.length);
     list.innerHTML = visibleUsers.map(user => {
       const manageable = canManageAccountUser(user);
@@ -5247,6 +5476,7 @@
       <div class="list-item ${searchTerm ? "search-match-card" : ""}">
         <div class="list-item-title">${escapeHtml(user.full_name)}</div>
         <div class="muted small">${escapeHtml(roleLabel(user.role).replace(/^./, c => c.toUpperCase()))} · Usuario: <strong>${escapeHtml(username)}</strong></div>
+        ${flexibleModeForOperatorDate(user.id, todayISO()) ? `<div class="flexible-user-badge">Jornada flexible · ${escapeHtml(byId(state.sites, flexibleModeForOperatorDate(user.id, todayISO())?.site_id)?.name || "servicio sin configurar")}</div>` : ""}
         ${pendingRecoveryEmail ? `<div class="recovery-request-box"><strong>Recuperación solicitada:</strong> ${escapeHtml(pendingRecoveryEmail)}<div class="muted small">La persona informó este correo desde «Olvidaste tu contraseña».</div></div>` : ""}
         <div class="muted small">${escapeHtml(user.phone || "Sin teléfono")}</div>
         ${user.notes ? `<div class="muted small">Notas: ${escapeHtml(user.notes)}</div>` : ""}
@@ -5322,8 +5552,13 @@
     const passwordInput = $("#userPassword");
     const passwordLabel = $("#userPasswordLabel");
     const passwordHelp = $("#userPasswordHelp");
+    const flexibleBlock = $("#userFlexibleBlock");
+    const flexibleToggle = $("#userFlexibleAttendance");
+    const flexibleSite = $("#userFlexibleSite");
 
     syncUserRolePermissions();
+    if (flexibleBlock) flexibleBlock.classList.toggle("hidden", role !== "operator");
+    if (flexibleSite) flexibleSite.disabled = role !== "operator" || !flexibleToggle?.checked;
     passwordInput.required = !isEditing;
     passwordLabel.textContent = isEditing ? "Nueva contraseña (opcional)" : "Contraseña inicial";
     passwordInput.placeholder = isEditing ? "Dejar vacío para mantener la actual" : "Mínimo 6 caracteres";
@@ -5351,7 +5586,9 @@
       full_name: fullName,
       phone: $("#userPhone").value.trim(),
       role: $("#userRole").value,
-      notes: $("#userNotes").value.trim()
+      notes: $("#userNotes").value.trim(),
+      flexible_attendance: $("#userRole").value === "operator" && Boolean($("#userFlexibleAttendance")?.checked),
+      flexible_site_id: $("#userRole").value === "operator" && $("#userFlexibleAttendance")?.checked ? ($("#userFlexibleSite")?.value || null) : null
     };
   }
 
@@ -5361,6 +5598,8 @@
     $("#userUsername").value = "";
     $("#userPassword").value = "";
     $("#userRole").value = "operator";
+    if ($("#userFlexibleAttendance")) $("#userFlexibleAttendance").checked = false;
+    if ($("#userFlexibleSite")) $("#userFlexibleSite").value = "";
     $("#userFormTitle").textContent = "Nuevo usuario";
     $("#cancelUserEditBtn").classList.add("hidden");
     syncUserFormFields();
@@ -5376,6 +5615,9 @@
     $("#userName").value = user.full_name || "";
     $("#userPhone").value = user.phone || "";
     $("#userNotes").value = user.notes || "";
+    const flexibleMode = flexibleModeForOperatorDate(user.id, todayISO());
+    if ($("#userFlexibleAttendance")) $("#userFlexibleAttendance").checked = Boolean(flexibleMode);
+    if ($("#userFlexibleSite")) $("#userFlexibleSite").value = flexibleMode?.site_id || "";
     $("#userFormTitle").textContent = "Editar usuario";
     $("#cancelUserEditBtn").classList.remove("hidden");
     syncUserFormFields();
@@ -5560,14 +5802,15 @@
   }
 
   async function fetchReportContext(period) {
-    const [profiles, sites, assignments, events, leaves] = await Promise.all([
+    const [profiles, sites, assignments, events, leaves, flexibleModes] = await Promise.all([
       store.listAllProfiles(),
       store.listAllSites(),
       store.listAllAssignments(),
       store.listEventsRange(period.from, period.to),
-      store.listLeaveEvents?.() || Promise.resolve([])
+      store.listLeaveEvents?.() || Promise.resolve([]),
+      store.listFlexibleAttendanceModes?.() || Promise.resolve([])
     ]);
-    return { profiles, sites, assignments, events, leaves: leaves || [] };
+    return { profiles, sites, assignments, events, leaves: leaves || [], flexibleModes: flexibleModes || [] };
   }
 
   function resolveCompleteOperationalPeriod(period, context) {
@@ -5575,7 +5818,8 @@
     const starts = [
       ...context.assignments.map(a => a.valid_from || timestampToBusinessDate(a.created_at)),
       ...context.events.map(e => e.shift_date),
-      ...(context.leaves || []).map(leave => leave.start_date)
+      ...(context.leaves || []).map(leave => leave.start_date),
+      ...(context.flexibleModes || []).map(mode => mode.valid_from)
     ];
     const earliest = minISO(starts) || todayISO();
     return { ...period, from: earliest, to: todayISO(), label: `${earliest}-al-${todayISO()}` };
@@ -5608,7 +5852,8 @@
       if (!date || !endDate || date > endDate) continue;
 
       while (date <= endDate) {
-        if (assignmentAppliesHistorically(assignment, date) && !assignmentSuppressedHistorically(assignment, date, context.assignments)) {
+        const flexibleMode = (context.flexibleModes || []).find(mode => mode.operator_id === assignment.operator_id && flexibleModeAppliesOnDate(mode, date));
+        if (assignmentAppliesHistorically(assignment, date) && !assignmentSuppressedHistorically(assignment, date, context.assignments) && !flexibleMode) {
           const shiftId = `${assignment.id}__${date}`;
           const shift = {
             id: shiftId,
@@ -5696,10 +5941,11 @@
       const entry = latestEventFromList(events, "present");
       const exit = latestEventFromList(events, "checkout");
       const dayOff = latestEventFromList(events, "day_off");
+      const isFlexibleEvent = isFlexibleShiftId(sample.shift_id);
       const operator = profilesById.get(sample.operator_id);
       const site = sitesById.get(sample.site_id);
       const alerts = [];
-      if (entry?.observed_status === "late") alerts.push("Llegada tarde");
+      if (!isFlexibleEvent && entry?.observed_status === "late") alerts.push("Llegada tarde");
       if (entry?.is_inside_site === false) alerts.push("Entrada fuera de radio");
       if (exit?.recorded_via === "system_auto") alerts.push("Cierre automático por falta de salida");
       if (exit?.observed_status === "early_exit") alerts.push("Salida anticipada");
@@ -5709,17 +5955,17 @@
         "Fecha": sample.shift_date || "",
         "Operario": operator?.full_name || sample.operator_id || "",
         "Servicio": site?.name || sample.site_id || "",
-        "Tipo de trabajo": workTypeLabel(entry?.work_type || sample.work_type || "regular"),
+        "Tipo de trabajo": isFlexibleEvent ? "Jornada flexible" : workTypeLabel(entry?.work_type || sample.work_type || "regular"),
         "Cubre a": "",
-        "Origen de tarea": (entry?.entry_source || sample.entry_source) === "operator_extra" ? "Declarado por operario" : "Marcación sin turno reconstruido",
+        "Origen de tarea": isFlexibleEvent ? "Jornada flexible asignada" : (entry?.entry_source || sample.entry_source) === "operator_extra" ? "Declarado por operario" : "Marcación sin turno reconstruido",
         "Validación": validationLabel(entry?.validation_status || sample.validation_status || "confirmed"),
         "Dirección": site?.address || "",
-        "Horario programado": "No reconstruido",
+        "Horario programado": isFlexibleEvent ? "Flexible · hora real" : "No reconstruido",
         "Franco": dayOff && !entry ? "Sí" : "No",
         "Hora entrada": entry ? formatClock(eventTimestamp(entry)) : "",
         "Fecha/hora entrada": entry ? eventTimestamp(entry) : "",
         "Registro entrada": entry ? recordedViaLabel(entry) : (dayOff ? recordedViaLabel(dayOff) : ""),
-        "Estado entrada": entry ? (entry.is_inside_site === false ? "Entrada fuera de radio" : entry.observed_status === "late" ? "Entrada tarde" : "Entrada registrada") : (dayOff ? "Franco" : "Sin entrada"),
+        "Estado entrada": entry ? (entry.is_inside_site === false ? "Entrada fuera de radio" : (!isFlexibleEvent && entry.observed_status === "late") ? "Entrada tarde" : "Entrada registrada") : (dayOff ? "Franco" : "Sin entrada"),
         "Minutos demora": "",
         "Entrada dentro radio": eventInsideLabel(entry),
         "Distancia entrada (m)": entry?.distance_m != null ? Math.round(Number(entry.distance_m)) : "",
@@ -5739,9 +5985,9 @@
         "Precisión salida (m)": exit?.gps_accuracy_m != null ? Math.round(Number(exit.gps_accuracy_m)) : "",
         "Lat salida": exit?.lat ?? "",
         "Lng salida": exit?.lng ?? "",
-        "Estado operativo": entry ? (exit ? (exit.recorded_via === "system_auto" ? "Jornada cerrada automáticamente" : "Jornada con fichajes") : "En servicio / sin salida") : (dayOff ? "Franco" : eventTypeLabel(sample.event_type)),
+        "Estado operativo": isFlexibleEvent ? (entry ? (exit ? "Tramo flexible completado" : "Jornada flexible · en servicio") : "Jornada flexible") : entry ? (exit ? (exit.recorded_via === "system_auto" ? "Jornada cerrada automáticamente" : "Jornada con fichajes") : "En servicio / sin salida") : (dayOff ? "Franco" : eventTypeLabel(sample.event_type)),
         "Alertas RRHH": alerts.join(" | "),
-        "Origen del estado": dayOff ? "Franco cargado por supervisor/admin" : "Marcación sin turno reconstruido",
+        "Origen del estado": isFlexibleEvent ? "Marcación de jornada flexible" : dayOff ? "Franco cargado por supervisor/admin" : "Marcación sin turno reconstruido",
         "Observaciones": events.map(e => e.notes).filter(Boolean).join(" | "),
         "Operator ID": sample.operator_id || "",
         "Site ID": sample.site_id || "",
@@ -6793,8 +7039,8 @@
       "Operario": op?.full_name || event.operator_id || "",
       "Servicio": site?.name || event.site_id || "",
       "Dirección": site?.address || "",
-      "Tipo de trabajo": workTypeLabel(event.work_type || "regular"),
-      "Origen de tarea": event.entry_source === "operator_extra" ? "Declarado por operario" : "Asignación",
+      "Tipo de trabajo": isFlexibleShiftId(event.shift_id) ? "Jornada flexible" : workTypeLabel(event.work_type || "regular"),
+      "Origen de tarea": isFlexibleShiftId(event.shift_id) ? "Jornada flexible asignada" : event.entry_source === "operator_extra" ? "Declarado por operario" : "Asignación",
       "Validación": validationLabel(event.validation_status || "confirmed"),
       "Registrado por": recordedViaLabel(event),
       "Usuario que cargó": recorder?.full_name || "",
@@ -6930,7 +7176,7 @@
           <td>${escapeHtml(event.shift_date || "—")}</td>
           <td>${escapeHtml(op?.full_name || event.operator_id || "—")}</td>
           <td>${escapeHtml(site?.name || event.site_id || "—")}</td>
-          <td>${escapeHtml(workTypeLabel(event.work_type || "regular"))}${event.entry_source === "operator_extra" ? `<br><span class="muted small">Declarado por operario · ${escapeHtml(validationLabel(event.validation_status || "pending"))}</span>` : ""}</td>
+          <td>${escapeHtml(isFlexibleShiftId(event.shift_id) ? "Jornada flexible" : workTypeLabel(event.work_type || "regular"))}${isFlexibleShiftId(event.shift_id) ? `<br><span class="muted small">Sin horario fijo · hora real</span>` : event.entry_source === "operator_extra" ? `<br><span class="muted small">Declarado por operario · ${escapeHtml(validationLabel(event.validation_status || "pending"))}</span>` : ""}</td>
           <td><strong>${escapeHtml(eventTypeLabel(event.event_type))}</strong><br><span class="muted small">${escapeHtml(event.recorded_via === "system_auto" && event.event_type === "checkout" ? "Cierre automático" : observedStatusLabel(event.observed_status))}</span></td>
           <td><strong>${escapeHtml(recordedViaLabel(event))}</strong>${recorder?.full_name ? `<br><span class="muted small">${escapeHtml(recorder.full_name)}</span>` : ""}${event.recorded_via === "system_auto" && event.created_at ? `<br><span class="muted small">Ejecutado ${escapeHtml(formatDateTime(event.created_at))}</span>` : ""}</td>
           <td>${event.lat != null ? `${Number(event.lat).toFixed(6)}, ${Number(event.lng).toFixed(6)}` : "—"}</td>
@@ -6977,7 +7223,7 @@
           operario: op?.full_name || event.operator_id || "",
           servicio: site?.name || event.site_id || "",
           tipo_trabajo: workTypeLabel(event.work_type || "regular"),
-          origen_tarea: event.entry_source === "operator_extra" ? "Declarado por operario" : "Asignación",
+          origen_tarea: isFlexibleShiftId(event.shift_id) ? "Jornada flexible" : event.entry_source === "operator_extra" ? "Declarado por operario" : "Asignación",
           validacion: validationLabel(event.validation_status || "confirmed"),
           tipo: event.event_type || "",
           tipo_legible: eventTypeLabel(event.event_type),
@@ -7255,10 +7501,31 @@
       try {
         const isEditing = Boolean($("#userId").value);
         const payload = userAccountPayloadFromForm();
+        const flexibleAttendance = Boolean(payload.flexible_attendance);
+        const flexibleSiteId = payload.flexible_site_id || null;
+        if (flexibleAttendance && !flexibleSiteId) throw new Error("Seleccioná el servicio para la jornada flexible.");
         if (isEditing) {
-          await store.updateManagedUser($("#userId").value, payload);
+          const editingId = $("#userId").value;
+          const currentFlexibleMode = flexibleModeForOperatorDate(editingId, todayISO());
+          const flexGroups = flexibleAttendanceGroupsForOperator(editingId);
+          const hasOpenFlexibleShift = [...flexGroups.values()].some(events => latestEventFromList(events, "present") && !latestEventFromList(events, "checkout"));
+          const changesFlexibleMode = Boolean(currentFlexibleMode) !== flexibleAttendance || (flexibleAttendance && currentFlexibleMode?.site_id !== flexibleSiteId);
+          if (hasOpenFlexibleShift && changesFlexibleMode) throw new Error("Este operario tiene un tramo de jornada flexible abierto. Registrá primero su salida antes de cambiar o desactivar esta modalidad.");
+        }
+        const accountPayload = { ...payload };
+        delete accountPayload.flexible_attendance;
+        delete accountPayload.flexible_site_id;
+        let savedProfile;
+        if (isEditing) {
+          savedProfile = await store.updateManagedUser($("#userId").value, accountPayload);
         } else {
-          await store.createManagedUser(payload);
+          savedProfile = await store.createManagedUser(accountPayload);
+        }
+        const profileId = isEditing ? $("#userId").value : savedProfile?.id;
+        if (profileId && String(accountPayload.role) === "operator") {
+          await store.setFlexibleAttendanceMode?.(profileId, flexibleAttendance, flexibleSiteId, todayISO());
+        } else if (profileId) {
+          await store.setFlexibleAttendanceMode?.(profileId, false, null, todayISO());
         }
         resetUserForm();
         toast(isEditing ? "Usuario actualizado." : "Usuario creado.", "success");
@@ -7268,6 +7535,7 @@
       }
     });
     $("#userRole").addEventListener("change", syncUserFormFields);
+    $("#userFlexibleAttendance")?.addEventListener("change", syncUserFormFields);
     $("#cancelUserEditBtn").addEventListener("click", resetUserForm);
     $("#recordsPeriod").addEventListener("change", () => {
       syncPeriodControls("records", false);

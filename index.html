@@ -8,10 +8,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Presentismo GPS" />
   <title>Clean It · Presentismo GPS</title>
-  <link rel="manifest" href="manifest.webmanifest?v=20260910-quick-absence1" />
+  <link rel="manifest" href="manifest.webmanifest?v=20260910-flexible1" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20260910-quick-absence1" />
+  <link rel="stylesheet" href="styles.css?v=20260910-flexible1" />
 </head>
 <body>
   <div class="app-shell">
@@ -741,6 +741,14 @@
               </label>
               <p id="userPasswordHelp" class="muted small">Para operarios podés usar el DNI como contraseña inicial.</p>
               <label><span>Teléfono</span><input id="userPhone" placeholder="+549..." /></label>
+              <div id="userFlexibleBlock" class="flexible-user-config hidden">
+                <label class="checkbox-row flexible-user-toggle">
+                  <input type="checkbox" id="userFlexibleAttendance" />
+                  <span><strong>Jornada flexible / sin horario fijo</strong><br><span class="muted small">Caso excepcional: el operario ficha la hora real de cada entrada y salida, sin control de tardanza ni ausencia por horario.</span></span>
+                </label>
+                <label><span>Servicio asignado para fichaje flexible</span><select id="userFlexibleSite"><option value="">Seleccionar servicio</option></select></label>
+                <p class="muted small no-margin">Puede fraccionar la jornada: registra salida y luego una nueva entrada si retoma. El GPS sigue validando el servicio.</p>
+              </div>
               <label><span>Notas</span><textarea id="userNotes" placeholder="Datos internos, reemplazos, observaciones operativas..."></textarea></label>
               <button class="primary-btn" type="submit">Guardar usuario</button>
             </form>
@@ -964,8 +972,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="js/config.js?v=20260910-quick-absence1"></script>
-  <script src="js/storage.js?v=20260910-quick-absence1"></script>
-  <script src="js/app.js?v=20260910-quick-absence1"></script>
+  <script src="js/config.js?v=20260910-flexible1"></script>
+  <script src="js/storage.js?v=20260910-flexible1"></script>
+  <script src="js/app.js?v=20260910-flexible1"></script>
 </body>
 </html>
