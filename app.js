@@ -35,6 +35,11 @@
     recordsProfiles: [],
     recordsSites: [],
     recordsLoaded: false,
+    errorLogs: [],
+    errorLogsLoaded: false,
+    errorLogDate: null,
+    errorLogStatus: "all",
+    errorLogUnreviewedToday: 0,
     analyticsLoaded: false,
     analyticsAllRows: [],
     analyticsRows: [],
@@ -43,7 +48,7 @@
     analyticsProfiles: [],
     analyticsPeriodResolved: null,
     activeTab: "live",
-    sectionSearch: { live: "", opsmap: "", analytics: "", fichaje: "", coverage: "", assignments: "", leaves: "", sites: "", users: "", records: "" },
+    sectionSearch: { live: "", opsmap: "", analytics: "", fichaje: "", coverage: "", assignments: "", leaves: "", sites: "", users: "", errors: "", records: "" },
     operationalMapLoaded: false,
     operationalMapDate: null,
     operationalMapRows: [],
@@ -224,6 +229,7 @@
     leaves: { label: "Novedades", placeholder: "Buscar operario, licencia, vacaciones o certificado...", noun: "novedades", target: "#leavesList" },
     sites: { label: "Servicios", placeholder: "Buscar servicio, dirección o zona...", noun: "servicios", target: "#sitesList" },
     users: { label: "Usuarios", placeholder: "Buscar nombre, usuario, teléfono o rol...", noun: "usuarios", target: "#usersList" },
+    errors: { label: "Errores", placeholder: "Buscar operario, servicio, error o acción...", noun: "incidencias", target: "#errorLogsTable" },
     records: { label: "Registros", placeholder: "Buscar operario, servicio o estado...", noun: "marcaciones", target: "#recordsTable" }
   };
 
@@ -290,6 +296,7 @@
     if (tab === "leaves") return renderLeaves();
     if (tab === "sites") return renderSites();
     if (tab === "users") return renderUsers();
+    if (tab === "errors") return renderErrorLogs();
     if (tab === "records") return renderRecords();
   }
 
@@ -510,6 +517,86 @@
     el.className = `toast show ${type}`;
     window.clearTimeout(toast._timer);
     toast._timer = window.setTimeout(() => el.classList.remove("show"), 3600);
+  }
+
+  const APP_BUILD_VERSION = "20260911-error-monitor1";
+
+  function errorValue(value) {
+    if (value === undefined || value === null || value === "") return null;
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+    try { return JSON.parse(JSON.stringify(value)); } catch (_) { return String(value); }
+  }
+
+  function classifyOperatorIssue(message, error = null, preferred = "") {
+    if (preferred) return preferred;
+    const text = `${message || ""} ${error?.message || ""} ${error?.name || ""}`.toLowerCase();
+    if (/gps|geolocal|ubicaci[oó]n|position|permission|permiso|denied|timeout/.test(text)) return "gps";
+    if (/network|failed to fetch|fetch|sin conexi[oó]n|offline|internet/.test(text)) return "connectivity";
+    if (/checkbox|confirm[aá]|primero ten[eé]s|ya fue registrada|ya ten[eé]s|salida accidental|turno est[aá] abierto|seleccion[aá]/.test(text)) return "usage";
+    if (/configurad|no se encontr[oó] el servicio|sin servicio|coordenad/.test(text)) return "configuration";
+    if (error?.code || /supabase|postgres|row-level|rls|database|base de datos/.test(text)) return "database";
+    return "technical";
+  }
+
+  function inferIssueSiteId({ siteId = null, shiftId = null } = {}) {
+    if (siteId) return siteId;
+    if (shiftId) {
+      const event = (state.events || []).find(item => item.shift_id === shiftId && item.site_id);
+      if (event?.site_id) return event.site_id;
+      const assignmentId = String(shiftId).split("__")[0];
+      const assignment = (state.assignments || []).find(item => item.id === assignmentId);
+      if (assignment?.site_id) return assignment.site_id;
+    }
+    const openEntry = (state.events || []).find(entry => entry.operator_id === state.currentProfile?.id && entry.event_type === "present" && !(state.events || []).some(exit => exit.shift_id === entry.shift_id && exit.event_type === "checkout"));
+    return openEntry?.site_id || null;
+  }
+
+  async function reportOperatorIssue({ message, error = null, action = "unknown", category = "", severity = "error", siteId = null, shiftId = null, extra = null } = {}) {
+    if (state.currentProfile?.role !== "operator" || !state.currentProfile?.id || !message) return;
+    const resolvedSiteId = inferIssueSiteId({ siteId, shiftId });
+    const site = resolvedSiteId ? byId(state.sites, resolvedSiteId) : null;
+    const details = {
+      online: typeof navigator === "undefined" ? null : navigator.onLine,
+      shift_id: shiftId || null,
+      error_message: error?.message || null,
+      error_stack: error?.stack || null,
+      error_details: errorValue(error?.details),
+      error_hint: errorValue(error?.hint),
+      extra: errorValue(extra)
+    };
+    try {
+      await store.createAppErrorLog?.({
+        occurred_at: new Date().toISOString(),
+        operator_id: state.currentProfile.id,
+        operator_name_snapshot: state.currentProfile.full_name || state.currentProfile.username || "Operario",
+        site_id: resolvedSiteId,
+        site_name_snapshot: site?.name || null,
+        shift_id: shiftId || null,
+        action: action || "unknown",
+        category: classifyOperatorIssue(message, error, category),
+        severity,
+        message: String(message),
+        error_name: error?.name || null,
+        error_code: error?.code != null ? String(error.code) : null,
+        technical_details: details,
+        user_agent: window.navigator?.userAgent || null,
+        app_url: `${window.location.origin}${window.location.pathname}`,
+        app_version: APP_BUILD_VERSION
+      });
+    } catch (logError) {
+      console.warn("No se pudo registrar la incidencia del operario", logError);
+    }
+  }
+
+  function operatorProblem(message, options = {}) {
+    toast(message, options.toastType || "error");
+    reportOperatorIssue({ message, ...options }).catch(() => {});
+  }
+
+  function operatorException(error, fallback, options = {}) {
+    const message = error?.message || fallback || "Se produjo un error inesperado.";
+    toast(message, "error");
+    reportOperatorIssue({ message, error, ...options }).catch(() => {});
   }
 
   function setView(viewId) {
@@ -1182,7 +1269,8 @@
       await afterLogin();
     } catch (error) {
       passwordInput.value = "";
-      toast(error.message || "No se pudo ingresar.");
+      if (state.currentProfile?.role === "operator") operatorException(error, "No se pudo cargar tu jornada.", { action: "carga_jornada" });
+      else toast(error.message || "No se pudo ingresar.");
     } finally {
       submitButton.disabled = false;
     }
@@ -1297,6 +1385,9 @@
   async function renderOperatorView() {
     // Respaldo del cron: si quedó un turno vencido abierto, se cierra antes de mostrar la jornada siguiente.
     await store.runAutomaticCheckouts?.();
+    if (typeof navigator === "undefined" || navigator.onLine !== false) {
+      try { await store.flushOfflineErrorQueue?.(); } catch (_) { /* no bloquear el fichaje por el monitor */ }
+    }
     if (operatorExitProtectionTimer) {
       clearTimeout(operatorExitProtectionTimer);
       operatorExitProtectionTimer = null;
@@ -1507,12 +1598,12 @@
   }
 
   async function handleFlexibleCheckin(mode) {
-    if (!mode?.site_id) return toast("No hay un servicio configurado para tu jornada flexible.");
+    if (!mode?.site_id) return operatorProblem("No hay un servicio configurado para tu jornada flexible.", { action: "entrada_flexible", category: "configuration", severity: "warning" });
     const confirm = $("#confirm-flex-in");
-    if (!confirm?.checked) return toast("Confirmá que estás en el servicio antes de registrar la entrada.");
+    if (!confirm?.checked) return operatorProblem("Confirmá que estás en el servicio antes de registrar la entrada.", { action: "entrada_flexible", category: "usage", severity: "warning", siteId: mode?.site_id });
     const groups = flexibleAttendanceGroupsForOperator(state.currentProfile.id);
     const hasOpen = [...groups.values()].some(events => latestEventFromList(events, "present") && !latestEventFromList(events, "checkout"));
-    if (hasOpen) return toast("Ya tenés una entrada abierta. Registrá la salida antes de iniciar otro tramo.");
+    if (hasOpen) return operatorProblem("Ya tenés una entrada abierta. Registrá la salida antes de iniciar otro tramo.", { action: "entrada_flexible", category: "usage", severity: "warning", siteId: mode?.site_id });
     try {
       const site = byId(state.sites, mode.site_id);
       if (!site) throw new Error("No se encontró el servicio configurado para tu jornada flexible.");
@@ -1549,7 +1640,7 @@
       toast(isInside ? "Entrada de jornada flexible registrada." : "Entrada registrada fuera del radio del servicio.", isInside ? "success" : undefined);
       await renderOperatorView();
     } catch (error) {
-      toast(error.message || "No se pudo registrar la entrada.");
+      operatorException(error, "No se pudo registrar la entrada.", { action: "entrada_flexible", siteId: mode?.site_id });
     }
   }
 
@@ -1804,13 +1895,13 @@
     const type = $("#operatorExtraType")?.value || "coverage";
     const notes = $("#operatorExtraNotes")?.value || "";
     const confirm = $("#operatorExtraConfirm");
-    if (!confirm?.checked) return toast("Confirmá que fuiste enviado a ese servicio.");
+    if (!confirm?.checked) return operatorProblem("Confirmá que fuiste enviado a ese servicio.", { action: "entrada_extraordinaria", category: "usage", severity: "warning", siteId });
     const site = byId(state.sites, siteId);
-    if (!site) return toast("Seleccioná el servicio al que fuiste enviado.");
+    if (!site) return operatorProblem("Seleccioná el servicio al que fuiste enviado.", { action: "entrada_extraordinaria", category: "usage", severity: "warning" });
 
     const earliestOpenExtraDate = addDaysISO(todayISO(), -1);
     const existingOpen = state.events.some(e => e.operator_id === state.currentProfile.id && e.shift_date >= earliestOpenExtraDate && e.assignment_id == null && e.entry_source === "operator_extra" && e.event_type === "present" && !state.events.some(x => x.shift_id === e.shift_id && x.event_type === "checkout"));
-    if (existingOpen) return toast("Ya tenés una cobertura/refuerzo extraordinario abierto. Registrá primero la salida.");
+    if (existingOpen) return operatorProblem("Ya tenés una cobertura/refuerzo extraordinario abierto. Registrá primero la salida.", { action: "entrada_extraordinaria", category: "usage", severity: "warning", siteId });
 
     try {
       toast("Solicitando GPS de alta precisión...");
@@ -1847,7 +1938,7 @@
         : `${workTypeLabel(type)} registrada en ${site.name}. Quedó pendiente de validación del supervisor.`, "success");
       await renderOperatorView();
     } catch (error) {
-      toast(error.message || "No se pudo registrar el trabajo extraordinario.");
+      operatorException(error, "No se pudo registrar el trabajo extraordinario.", { action: "entrada_extraordinaria", siteId });
     }
   }
 
@@ -1871,8 +1962,8 @@
     const checkbox = document.getElementById(`confirm-in-${shiftId}`);
     const notes = document.getElementById(`notes-in-${shiftId}`)?.value || "";
 
-    if (existingEntry) return toast("La entrada ya fue registrada para hoy.");
-    if (!checkbox?.checked) return toast("Primero marcá el checkbox de entrada.");
+    if (existingEntry) return operatorProblem("La entrada ya fue registrada para hoy.", { action: "entrada", category: "usage", severity: "warning", shiftId, siteId: assignment?.site_id });
+    if (!checkbox?.checked) return operatorProblem("Primero marcá el checkbox de entrada.", { action: "entrada", category: "usage", severity: "warning", shiftId, siteId: assignment?.site_id });
 
     try {
       toast("Solicitando GPS de alta precisión...");
@@ -1957,7 +2048,7 @@
       }
       await renderOperatorView();
     } catch (error) {
-      toast(error.message || "No se pudo obtener ubicación GPS.");
+      operatorException(error, "No se pudo obtener ubicación GPS.", { action: "entrada", shiftId, siteId: assignment?.site_id });
     }
   }
 
@@ -1967,16 +2058,16 @@
     const checkbox = document.getElementById(`confirm-out-${shiftId}`);
     const notes = document.getElementById(`notes-out-${shiftId}`)?.value || "";
 
-    if (!entryEvent) return toast("Primero tenés que registrar la entrada.");
-    if (existingExit) return toast("La salida ya fue registrada para hoy.");
+    if (!entryEvent) return operatorProblem("Primero tenés que registrar la entrada.", { action: "salida", category: "usage", severity: "warning", shiftId });
+    if (existingExit) return operatorProblem("La salida ya fue registrada para hoy.", { action: "salida", category: "usage", severity: "warning", shiftId, siteId: entryEvent?.site_id });
 
     const protection = exitProtectionState(entryEvent);
     if (protection.active) {
       const unlockTime = protection.unlockAt.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: APP_TIME_ZONE });
-      return toast(`Para evitar una salida accidental, la salida se habilita a las ${unlockTime}. Faltan ${formatExitProtectionRemaining(protection.remainingMs)}.`);
+      return operatorProblem(`Para evitar una salida accidental, la salida se habilita a las ${unlockTime}. Faltan ${formatExitProtectionRemaining(protection.remainingMs)}.`, { action: "salida", category: "usage", severity: "warning", shiftId, siteId: entryEvent?.site_id });
     }
 
-    if (!checkbox?.checked) return toast("Primero marcá el checkbox de salida.");
+    if (!checkbox?.checked) return operatorProblem("Primero marcá el checkbox de salida.", { action: "salida", category: "usage", severity: "warning", shiftId, siteId: entryEvent?.site_id });
 
     const exitSite = byId(state.sites, entryEvent.site_id);
     const confirmed = window.confirm(`Vas a registrar la SALIDA${exitSite?.name ? ` de ${exitSite.name}` : ""}. Esta acción cierra el turno y no podrás volver a registrar otra salida. ¿Confirmás que realmente estás finalizando el servicio?`);
@@ -2041,13 +2132,13 @@
         : (isInside ? "Salida registrada correctamente." : "Salida registrada, pero fuera del radio del servicio."), "success");
       await renderOperatorView();
     } catch (error) {
-      toast(error.message || "No se pudo obtener ubicación GPS.");
+      operatorException(error, "No se pudo obtener ubicación GPS.", { action: "salida", shiftId, siteId: entryEvent?.site_id });
     }
   }
 
   async function handleManualStatus(shiftId, eventType) {
     const shift = state.shifts.find(s => s.id === shiftId);
-    if (!shift) return toast("No se encontró el servicio asignado.");
+    if (!shift) return operatorProblem("No se encontró el servicio asignado.", { action: `informar_${eventType}`, category: "configuration", severity: "warning", shiftId });
     const notes = document.getElementById(`notes-in-${shiftId}`)?.value || "";
     const label = eventType === "late" ? "demora" : "ausencia";
     try {
@@ -2067,7 +2158,7 @@
       toast(`Se informó ${label}.`);
       await renderOperatorView();
     } catch (error) {
-      toast(error.message || `No se pudo informar ${label}.`);
+      operatorException(error, `No se pudo informar ${label}.`, { action: `informar_${eventType}`, shiftId, siteId: shift?.site_id });
     }
   }
 
@@ -2579,6 +2670,9 @@
     else renderAssignmentAudit();
     renderUsers();
     syncUserFormFields();
+    await refreshErrorBadge();
+    if (state.activeTab === "errors" && !state.errorLogsLoaded) await loadErrorLogs({ quiet: true });
+    renderErrorLogs();
     renderRecords();
   }
 
@@ -2588,6 +2682,161 @@
     $$(".tab-panel").forEach(panel => panel.classList.remove("active"));
     $(`#${tab}Tab`).classList.add("active");
     syncContextSearchUI(tab);
+  }
+
+  function errorCategoryLabel(category) {
+    const labels = {
+      gps: "GPS / permisos",
+      connectivity: "Conectividad",
+      usage: "Uso / operación",
+      configuration: "Configuración",
+      database: "Base de datos",
+      javascript: "Error JavaScript",
+      technical: "Error técnico"
+    };
+    return labels[String(category || "technical").toLowerCase()] || String(category || "Error técnico");
+  }
+
+  function errorActionLabel(action) {
+    const labels = {
+      entrada: "Registrar entrada",
+      salida: "Registrar salida",
+      entrada_flexible: "Entrada flexible",
+      entrada_extraordinaria: "Entrada extraordinaria",
+      solicitud_hora_extra: "Solicitud de hora extra",
+      carga_jornada: "Cargar jornada",
+      actualizar_jornada: "Actualizar jornada",
+      javascript_error: "Ejecución de la app",
+      promise_rejection: "Proceso interno",
+      unknown: "Acción no identificada"
+    };
+    const key = String(action || "unknown");
+    if (labels[key]) return labels[key];
+    if (key.startsWith("informar_")) return `Informar ${key.slice(9).replaceAll("_", " ")}`;
+    return key.replaceAll("_", " ");
+  }
+
+  function errorCategoryClass(category) {
+    const normalized = String(category || "technical").toLowerCase();
+    return ["gps", "connectivity", "usage", "configuration", "database", "javascript", "technical"].includes(normalized) ? normalized : "technical";
+  }
+
+  async function refreshErrorBadge() {
+    const badge = $("#errorTabBadge");
+    if (!badge || !isManagementProfile() || !store.listAppErrorLogs) return;
+    try {
+      const rows = await store.listAppErrorLogs(todayISO(), todayISO(), "new");
+      state.errorLogUnreviewedToday = rows.length;
+      badge.textContent = String(rows.length);
+      badge.classList.toggle("hidden", rows.length === 0);
+    } catch (_) {
+      state.errorLogUnreviewedToday = 0;
+      badge.classList.add("hidden");
+    }
+  }
+
+  async function loadErrorLogs({ quiet = false } = {}) {
+    if (!isManagementProfile() || !store.listAppErrorLogs) return;
+    const date = $("#errorLogDate")?.value || state.errorLogDate || todayISO();
+    const status = $("#errorLogStatus")?.value || state.errorLogStatus || "all";
+    state.errorLogDate = date;
+    state.errorLogStatus = status;
+    const table = $("#errorLogsTable");
+    if (table && !quiet) table.innerHTML = `<div class="empty-card">Cargando incidencias…</div>`;
+    try {
+      state.errorLogs = await store.listAppErrorLogs(date, date, status);
+      state.errorLogsLoaded = true;
+      renderErrorLogs();
+      await refreshErrorBadge();
+    } catch (error) {
+      state.errorLogsLoaded = false;
+      if (table) table.innerHTML = `<div class="empty-card"><strong>No se pudieron cargar los errores.</strong><br><span class="muted small">${escapeHtml(error?.message || "Revisá que el SQL del monitor de errores esté ejecutado en Supabase.")}</span></div>`;
+      if (!quiet) toast(error?.message || "No se pudieron cargar los errores.", "error");
+    }
+  }
+
+  function renderErrorLogs() {
+    const table = $("#errorLogsTable");
+    const summary = $("#errorLogsSummary");
+    if (!table) return;
+    const allRows = state.errorLogs || [];
+    const term = sectionSearchTerm("errors");
+    const rows = term ? allRows.filter(row => valuesMatchSearch(term,
+      row.operator_name_snapshot, row.site_name_snapshot, row.message, row.action, row.category, row.error_name, row.error_code, row.review_note
+    )) : allRows;
+    updateSectionSearchCount("errors", rows.length, allRows.length);
+
+    const newCount = allRows.filter(row => row.status === "new").length;
+    const gpsCount = allRows.filter(row => row.category === "gps").length;
+    const usageCount = allRows.filter(row => row.category === "usage").length;
+    if (summary) summary.innerHTML = `
+      <span><strong>${allRows.length}</strong> incidencia${allRows.length === 1 ? "" : "s"}</span>
+      <span><strong>${newCount}</strong> nueva${newCount === 1 ? "" : "s"}</span>
+      <span><strong>${gpsCount}</strong> GPS</span>
+      <span><strong>${usageCount}</strong> uso / operación</span>`;
+
+    if (!state.errorLogsLoaded) {
+      table.innerHTML = `<div class="empty-card">Elegí una fecha y tocá <strong>Actualizar</strong>.</div>`;
+      return;
+    }
+    if (!rows.length) {
+      table.innerHTML = `<div class="empty-card">No hay incidencias para los filtros seleccionados.</div>`;
+      return;
+    }
+
+    table.innerHTML = `<table class="data-table error-log-table">
+      <thead><tr><th>Fecha / hora</th><th>Operario / servicio</th><th>Tipo</th><th>Problema</th><th>Estado</th><th>Acción</th></tr></thead>
+      <tbody>${rows.map(row => {
+        const reviewer = row.reviewed_by ? byId(state.profiles, row.reviewed_by) : null;
+        const tech = row.technical_details && typeof row.technical_details === "object" ? row.technical_details : {};
+        const detailJson = JSON.stringify({
+          error_name: row.error_name || null,
+          error_code: row.error_code || null,
+          ...tech,
+          navegador: row.user_agent || null,
+          version_app: row.app_version || null
+        }, null, 2);
+        const reviewedText = row.status === "reviewed"
+          ? `${row.reviewed_at ? formatDateTime(row.reviewed_at) : "Revisado"}${reviewer?.full_name ? ` · ${reviewer.full_name}` : ""}${row.review_note ? ` · ${row.review_note}` : ""}`
+          : "Pendiente de revisar";
+        return `<tr class="${term ? "search-match-row" : ""}">
+          <td><strong>${escapeHtml(formatDateTime(row.occurred_at))}</strong><br><span class="muted small">${escapeHtml(errorActionLabel(row.action))}</span></td>
+          <td><strong>${escapeHtml(row.operator_name_snapshot || "Operario")}</strong><br><span class="muted small">${escapeHtml(row.site_name_snapshot || "Sin servicio asociado")}</span>${row.shift_id ? `<br><span class="muted tiny">Turno: ${escapeHtml(row.shift_id)}</span>` : ""}</td>
+          <td><span class="issue-type-badge ${escapeHtml(errorCategoryClass(row.category))}">${escapeHtml(errorCategoryLabel(row.category))}</span><br><span class="muted small">${escapeHtml(row.severity || "error")}</span></td>
+          <td><strong>${escapeHtml(row.message || "Error sin mensaje")}</strong>
+            <details class="technical-error-details"><summary>Ver detalle técnico</summary><pre>${escapeHtml(detailJson)}</pre></details>
+          </td>
+          <td><span class="status-pill ${row.status === "reviewed" ? "status-reviewed" : "status-error-new"}">${row.status === "reviewed" ? "Revisado" : "Nuevo"}</span><br><span class="muted small">${escapeHtml(reviewedText)}</span></td>
+          <td>${row.status === "reviewed"
+            ? `<button class="ghost-btn small-btn" type="button" data-reopen-error="${escapeHtml(row.id)}">Reabrir</button>`
+            : `<button class="primary-btn small-btn" type="button" data-review-error="${escapeHtml(row.id)}">Marcar revisado</button>`}</td>
+        </tr>`;
+      }).join("")}</tbody>
+    </table>`;
+  }
+
+  async function reviewErrorLog(id) {
+    const row = (state.errorLogs || []).find(item => item.id === id);
+    if (!row) return;
+    const note = window.prompt("Observación de revisión (opcional):", row.review_note || "");
+    if (note === null) return;
+    try {
+      await store.reviewAppErrorLog(id, note.trim());
+      await loadErrorLogs({ quiet: true });
+      toast("Incidencia marcada como revisada.", "success");
+    } catch (error) {
+      toast(error?.message || "No se pudo marcar la incidencia como revisada.", "error");
+    }
+  }
+
+  async function reopenErrorLog(id) {
+    try {
+      await store.reopenAppErrorLog(id);
+      await loadErrorLogs({ quiet: true });
+      toast("Incidencia reabierta.", "success");
+    } catch (error) {
+      toast(error?.message || "No se pudo reabrir la incidencia.", "error");
+    }
   }
 
   function statusDetailCell(status, event, emptyText) {
@@ -3284,9 +3533,9 @@
   function openOperatorOvertimeRequestModal(shiftId, assignment) {
     const entryEvent = state.events.find(event => event.shift_id === shiftId && event.event_type === "present");
     const exitEvent = state.events.find(event => event.shift_id === shiftId && event.event_type === "checkout");
-    if (!entryEvent || exitEvent) return toast("La solicitud de hora extra solo está disponible mientras el turno está abierto.");
+    if (!entryEvent || exitEvent) return operatorProblem("La solicitud de hora extra solo está disponible mientras el turno está abierto.", { action: "solicitud_hora_extra", category: "usage", severity: "warning", shiftId, siteId: entryEvent?.site_id });
     const existingAuthorization = overtimeAuthorizationForShift(shiftId);
-    if (existingAuthorization) return toast("Este turno ya tiene horas extra autorizadas.");
+    if (existingAuthorization) return operatorProblem("Este turno ya tiene horas extra autorizadas.", { action: "solicitud_hora_extra", category: "usage", severity: "warning", shiftId, siteId: entryEvent?.site_id });
     const request = overtimeRequestForShift(shiftId);
     const shiftDate = entryEvent.shift_date || shiftDateFromId(shiftId, todayISO());
     const shift = { shift_date: shiftDate, scheduled_start: assignment?.scheduled_start, scheduled_end: assignment?.scheduled_end };
@@ -3308,14 +3557,14 @@
   async function saveOperatorOvertimeRequest(event) {
     event.preventDefault();
     const shiftId = state.overtimeRequestContext?.shiftId;
-    if (!shiftId) return toast("No se encontró el turno para solicitar la hora extra.");
+    if (!shiftId) return operatorProblem("No se encontró el turno para solicitar la hora extra.", { action: "solicitud_hora_extra", category: "configuration", severity: "warning" });
     const raw = $("#operatorOvertimeRequestedUntil")?.value;
     const reason = $("#operatorOvertimeRequestReason")?.value.trim() || "";
-    if (!raw) return toast("Indicá hasta qué hora necesitás continuar.");
-    if (!reason) return toast("Indicá por qué necesitás realizar la hora extra.");
+    if (!raw) return operatorProblem("Indicá hasta qué hora necesitás continuar.", { action: "solicitud_hora_extra", category: "usage", severity: "warning", shiftId });
+    if (!reason) return operatorProblem("Indicá por qué necesitás realizar la hora extra.", { action: "solicitud_hora_extra", category: "usage", severity: "warning", shiftId });
     const requestedUntil = parseBusinessDateTimeLocal(raw);
-    if (!Number.isFinite(requestedUntil.getTime())) return toast("La fecha y hora solicitadas no son válidas.");
-    if (requestedUntil <= new Date()) return toast("La hora solicitada debe estar en el futuro.");
+    if (!Number.isFinite(requestedUntil.getTime())) return operatorProblem("La fecha y hora solicitadas no son válidas.", { action: "solicitud_hora_extra", category: "usage", severity: "warning", shiftId });
+    if (requestedUntil <= new Date()) return operatorProblem("La hora solicitada debe estar en el futuro.", { action: "solicitud_hora_extra", category: "usage", severity: "warning", shiftId });
 
     try {
       await store.requestOvertime(shiftId, requestedUntil.toISOString(), reason);
@@ -3324,7 +3573,7 @@
       toast("Solicitud enviada. Quedó pendiente de aprobación del supervisor.", "success");
       await renderOperatorView();
     } catch (error) {
-      toast(error.message || "No se pudo enviar la solicitud de hora extra.");
+      operatorException(error, "No se pudo enviar la solicitud de hora extra.", { action: "solicitud_hora_extra", shiftId });
     }
   }
 
@@ -7263,7 +7512,7 @@
     $("#forgotPasswordForm").addEventListener("submit", handleForgotPassword);
     $("#resetPasswordForm").addEventListener("submit", handleResetPassword);
     $("#operatorLogoutBtn").addEventListener("click", logout);
-    $("#refreshOperatorBtn")?.addEventListener("click", () => renderOperatorView().catch(error => toast(error.message || "No se pudieron actualizar los servicios.")));
+    $("#refreshOperatorBtn")?.addEventListener("click", () => renderOperatorView().catch(error => operatorException(error, "No se pudieron actualizar los servicios.", { action: "actualizar_jornada" })));
     $("#supervisorLogoutBtn").addEventListener("click", logout);
     $("#contextSearchInput")?.addEventListener("input", (event) => {
       const tab = state.activeTab;
@@ -7292,6 +7541,7 @@
         if (!state.operationalMapLoaded || state.operationalMapDate !== ($("#operationalMapDate")?.value || todayISO())) loadOperationalMapData().catch(error => toast(error.message || "No se pudo cargar el mapa operativo."));
         else renderOperationalMapFromState();
       }
+      if (btn.dataset.tab === "errors") loadErrorLogs().catch(error => toast(error.message || "No se pudieron cargar los errores.", "error"));
       if (btn.dataset.tab === "records") loadRecordsPeriod().catch(error => toast(error.message || "No se pudieron cargar los registros."));
       if (btn.dataset.tab === "analytics" && !state.analyticsLoaded) loadAnalyticsData().catch(error => toast(error.message || "No se pudo generar el análisis."));
       if (btn.dataset.tab === "fichaje") loadFichajePeriod().catch(error => toast(error.message || "No se pudo cargar el fichaje del período."));
@@ -7540,6 +7790,22 @@
     $("#userRole").addEventListener("change", syncUserFormFields);
     $("#userFlexibleAttendance")?.addEventListener("change", syncUserFormFields);
     $("#cancelUserEditBtn").addEventListener("click", resetUserForm);
+    $("#errorLogDate")?.addEventListener("change", () => { state.errorLogDate = $("#errorLogDate").value || todayISO(); state.errorLogsLoaded = false; });
+    $("#errorLogStatus")?.addEventListener("change", () => { state.errorLogStatus = $("#errorLogStatus").value || "all"; loadErrorLogs().catch(error => toast(error.message || "No se pudieron cargar los errores.", "error")); });
+    $("#refreshErrorLogsBtn")?.addEventListener("click", () => loadErrorLogs().catch(error => toast(error.message || "No se pudieron cargar los errores.", "error")));
+    $("#errorLogsTodayBtn")?.addEventListener("click", () => {
+      $("#errorLogDate").value = todayISO();
+      state.errorLogDate = todayISO();
+      state.errorLogsLoaded = false;
+      loadErrorLogs().catch(error => toast(error.message || "No se pudieron cargar los errores.", "error"));
+    });
+    $("#errorLogsTable")?.addEventListener("click", (event) => {
+      const reviewButton = event.target.closest("[data-review-error]");
+      if (reviewButton) return reviewErrorLog(reviewButton.dataset.reviewError);
+      const reopenButton = event.target.closest("[data-reopen-error]");
+      if (reopenButton) return reopenErrorLog(reopenButton.dataset.reopenError);
+    });
+
     $("#recordsPeriod").addEventListener("change", () => {
       syncPeriodControls("records", false);
       state.recordsLoaded = false;
@@ -7657,6 +7923,8 @@
     if ($("#specialAssignmentDate")) $("#specialAssignmentDate").value = todayISO();
     if ($("#leaveStartDate")) $("#leaveStartDate").value = todayISO();
     if ($("#leaveEndDate")) $("#leaveEndDate").value = todayISO();
+    if ($("#errorLogDate")) $("#errorLogDate").value = todayISO();
+    state.errorLogDate = todayISO();
     syncPeriodControls("live", false);
     syncPeriodControls("records", false);
     syncPeriodControls("analytics", false);
@@ -7670,13 +7938,38 @@
         .then(registration => registration.update().catch(() => {}))
         .catch(() => { /* la app sigue funcionando online */ });
     }
+    window.addEventListener("error", (event) => {
+      if (state.currentProfile?.role !== "operator") return;
+      const error = event.error || new Error(event.message || "Error JavaScript no controlado");
+      reportOperatorIssue({
+        message: event.message || error.message || "Error JavaScript no controlado",
+        error,
+        action: "javascript_error",
+        category: "javascript",
+        severity: "critical",
+        extra: { filename: event.filename || null, lineno: event.lineno || null, colno: event.colno || null }
+      }).catch(() => {});
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      if (state.currentProfile?.role !== "operator") return;
+      const reason = event.reason instanceof Error ? event.reason : new Error(String(event.reason || "Promesa rechazada sin detalle"));
+      reportOperatorIssue({
+        message: reason.message || "Error interno no controlado",
+        error: reason,
+        action: "promise_rejection",
+        category: "javascript",
+        severity: "critical"
+      }).catch(() => {});
+    });
+
     window.addEventListener("offline", () => {
       if (state.currentProfile?.role === "operator") renderOperatorConnectivity();
     });
     window.addEventListener("online", async () => {
       if (state.currentProfile?.role !== "operator") return;
       await syncOfflineAttendance({ notify: true });
-      try { await renderOperatorView(); } catch (_) { /* se reintentará al actualizar */ }
+      try { await store.flushOfflineErrorQueue?.(); } catch (_) { /* se reintentará luego */ }
+      try { await renderOperatorView(); } catch (error) { operatorException(error, "No se pudo actualizar tu jornada.", { action: "actualizar_jornada" }); }
     });
 
     store.onAuthStateChange((event, session) => {

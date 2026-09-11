@@ -8,10 +8,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Presentismo GPS" />
   <title>Clean It · Presentismo GPS</title>
-  <link rel="manifest" href="manifest.webmanifest?v=20260910-flexible2" />
+  <link rel="manifest" href="manifest.webmanifest?v=20260911-errors1" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20260910-flexible2" />
+  <link rel="stylesheet" href="styles.css?v=20260911-errors1" />
 </head>
 <body>
   <div class="app-shell">
@@ -140,6 +140,7 @@
           <button class="tab-btn" data-tab="leaves" type="button">Novedades</button>
           <button class="tab-btn" data-tab="sites" type="button">Servicios</button>
           <button class="tab-btn" data-tab="users" type="button">Usuarios</button>
+          <button class="tab-btn" data-tab="errors" type="button">Errores <span id="errorTabBadge" class="tab-count-badge hidden">0</span></button>
           <button class="tab-btn" data-tab="records" type="button">Registros</button>
         </nav>
 
@@ -759,6 +760,26 @@
           </div>
         </section>
 
+        <section id="errorsTab" class="tab-panel">
+          <div class="data-card error-monitor-card">
+            <div class="card-title-row">
+              <div>
+                <h3>Errores e incidencias del operario</h3>
+                <p class="muted small no-margin">Acá quedan registrados los errores técnicos y también los bloqueos de uso que el operario ve en pantalla. Sirve para distinguir una falla real de un uso incorrecto de la app.</p>
+              </div>
+              <button class="secondary-btn small-btn" id="errorLogsTodayBtn" type="button">Hoy</button>
+            </div>
+            <div class="error-monitor-toolbar">
+              <label><span>Fecha</span><input id="errorLogDate" type="date" /></label>
+              <label><span>Estado</span><select id="errorLogStatus"><option value="all">Todos</option><option value="new">Nuevos</option><option value="reviewed">Revisados</option></select></label>
+              <button class="primary-btn small-btn" id="refreshErrorLogsBtn" type="button">Actualizar</button>
+            </div>
+            <div id="errorLogsSummary" class="error-monitor-summary"></div>
+            <div class="inline-info error-monitor-info"><strong>Cómo leerlo:</strong> “Uso / operación” suele indicar que la app funcionó pero el operario intentó una acción que no correspondía. “GPS / permisos”, “Conectividad”, “Base de datos” o “Error técnico” apuntan a una falla o condición técnica que conviene revisar.</div>
+            <div id="errorLogsTable" class="responsive-table"><div class="empty-card">Elegí una fecha y tocá <strong>Actualizar</strong>.</div></div>
+          </div>
+        </section>
+
         <section id="recordsTab" class="tab-panel">
           <div class="data-card">
             <div class="card-title-row">
@@ -972,8 +993,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="js/config.js?v=20260910-flexible2"></script>
-  <script src="js/storage.js?v=20260910-flexible2"></script>
-  <script src="js/app.js?v=20260910-flexible2"></script>
+  <script src="js/config.js?v=20260911-errors1"></script>
+  <script src="js/storage.js?v=20260911-errors1"></script>
+  <script src="js/app.js?v=20260911-errors1"></script>
 </body>
 </html>

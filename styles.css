@@ -1972,3 +1972,83 @@ body.modal-open { overflow: hidden; }
 @media (max-width: 700px) {
   .flexible-cycle-row { grid-template-columns: 1fr; gap: 2px; }
 }
+
+/* Monitor de errores / incidencias del operario */
+.tab-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  margin-left: 5px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #b42318;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1;
+}
+.tab-count-badge.hidden { display: none; }
+.error-monitor-card { display: grid; gap: 14px; }
+.error-monitor-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+}
+.error-monitor-toolbar label { min-width: 170px; }
+.error-monitor-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.error-monitor-summary span {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  font-size: 12px;
+}
+.error-monitor-info { margin: 0; }
+.issue-type-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 5px 8px;
+  font-size: 11px;
+  font-weight: 900;
+  white-space: nowrap;
+  background: #eef2f6;
+  color: #344054;
+}
+.issue-type-badge.gps { background: #fff3cd; color: #7a4d00; }
+.issue-type-badge.connectivity { background: #e0f2fe; color: #075985; }
+.issue-type-badge.usage { background: #f2f4f7; color: #475467; }
+.issue-type-badge.configuration { background: #fef0c7; color: #7a2e0e; }
+.issue-type-badge.database { background: #fce7f3; color: #9d174d; }
+.issue-type-badge.javascript,
+.issue-type-badge.technical { background: #fee4e2; color: #b42318; }
+.status-error-new { background: #fee4e2; color: #b42318; }
+.status-reviewed { background: #dcfae6; color: #067647; }
+.technical-error-details { margin-top: 8px; }
+.technical-error-details summary { cursor: pointer; color: var(--primary); font-size: 12px; font-weight: 800; }
+.technical-error-details pre {
+  max-width: 520px;
+  max-height: 280px;
+  overflow: auto;
+  padding: 10px;
+  border-radius: 10px;
+  background: #101828;
+  color: #f2f4f7;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.error-log-table td { vertical-align: top; }
+.toast.error { background: #b42318; }
+.toast.success { background: #067647; }
+.tiny { font-size: 10px; }

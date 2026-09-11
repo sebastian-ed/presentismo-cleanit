@@ -95,6 +95,7 @@
       this.offlineUserId = null;
       this.OFFLINE_AUTH_KEY = "cleanit-presentismo-offline-auth-v1";
       this.OFFLINE_QUEUE_KEY = "cleanit-presentismo-offline-events-v1";
+      this.OFFLINE_ERROR_QUEUE_KEY = "cleanit-presentismo-offline-error-logs-v1";
     }
 
     isNetworkError(error) {
@@ -790,6 +791,130 @@
 
     async revokeOvertimeAuthorization(shiftId) {
       const { data, error } = await this.client.rpc("revoke_overtime_authorization", { p_shift_id: shiftId });
+      if (error) throw error;
+      return data;
+    }
+
+    readOfflineErrorQueue() {
+      const rows = this.readJson(this.OFFLINE_ERROR_QUEUE_KEY, []);
+      return Array.isArray(rows) ? rows : [];
+    }
+
+    writeOfflineErrorQueue(rows) {
+      this.writeJson(this.OFFLINE_ERROR_QUEUE_KEY, Array.isArray(rows) ? rows : []);
+    }
+
+    queueOfflineErrorLog(payload) {
+      const cleanPayload = this.clean(payload || {});
+      if (!cleanPayload.id) {
+        cleanPayload.id = window.crypto?.randomUUID?.() || `00000000-0000-4000-8000-${Date.now().toString(16).padStart(12, "0").slice(-12)}`;
+      }
+      const queue = this.readOfflineErrorQueue();
+      if (!queue.some(item => item?.id === cleanPayload.id)) queue.push(cleanPayload);
+      this.writeOfflineErrorQueue(queue.slice(-500));
+      return { ...cleanPayload, __offline_pending: true };
+    }
+
+    async createAppErrorLog(payload) {
+      const cleanPayload = this.clean(payload || {});
+      if (typeof navigator !== "undefined" && navigator.onLine === false) {
+        return this.queueOfflineErrorLog(cleanPayload);
+      }
+      try {
+        const { error } = await this.client.from("app_error_logs").insert(cleanPayload);
+        if (error) {
+          if (this.isNetworkError(error)) return this.queueOfflineErrorLog(cleanPayload);
+          throw error;
+        }
+        return cleanPayload;
+      } catch (error) {
+        if (this.isNetworkError(error)) return this.queueOfflineErrorLog(cleanPayload);
+        throw error;
+      }
+    }
+
+    async flushOfflineErrorQueue() {
+      if (typeof navigator !== "undefined" && navigator.onLine === false) return { synced: 0, pending: this.readOfflineErrorQueue().length };
+      const queue = this.readOfflineErrorQueue();
+      if (!queue.length) return { synced: 0, pending: 0 };
+      let sessionUserId = null;
+      try {
+        const { data } = await this.client.auth.getSession();
+        sessionUserId = data?.session?.user?.id || null;
+      } catch (_) { /* noop */ }
+      if (!sessionUserId) return { synced: 0, pending: queue.length };
+
+      let synced = 0;
+      const remaining = [];
+      for (let i = 0; i < queue.length; i++) {
+        const item = queue[i];
+        if (item?.operator_id && item.operator_id !== sessionUserId) {
+          remaining.push(item);
+          continue;
+        }
+        try {
+          const { error } = await this.client.from("app_error_logs").insert(this.clean(item));
+          if (error) {
+            if (String(error.code || "") === "23505") { synced++; continue; }
+            remaining.push(item);
+            if (this.isNetworkError(error)) {
+              remaining.push(...queue.slice(i + 1));
+              break;
+            }
+            continue;
+          }
+          synced++;
+        } catch (error) {
+          remaining.push(item);
+          if (this.isNetworkError(error)) {
+            remaining.push(...queue.slice(i + 1));
+            break;
+          }
+        }
+      }
+      this.writeOfflineErrorQueue(remaining);
+      return { synced, pending: remaining.length };
+    }
+
+    async listAppErrorLogs(dateFrom = null, dateTo = null, status = "all") {
+      let query = this.client
+        .from("app_error_logs")
+        .select("*")
+        .order("occurred_at", { ascending: false })
+        .limit(1500);
+      if (dateFrom) query = query.gte("occurred_at", new Date(`${dateFrom}T00:00:00-03:00`).toISOString());
+      if (dateTo) query = query.lte("occurred_at", new Date(`${dateTo}T23:59:59.999-03:00`).toISOString());
+      if (status && status !== "all") query = query.eq("status", status);
+      const { data, error } = await query;
+      if (error) throw error;
+      return data || [];
+    }
+
+    async reviewAppErrorLog(id, note = "") {
+      const { data: sessionData } = await this.client.auth.getSession();
+      const reviewerId = sessionData?.session?.user?.id || null;
+      const { data, error } = await this.client
+        .from("app_error_logs")
+        .update({
+          status: "reviewed",
+          reviewed_at: new Date().toISOString(),
+          reviewed_by: reviewerId,
+          review_note: note || null
+        })
+        .eq("id", id)
+        .select("*")
+        .single();
+      if (error) throw error;
+      return data;
+    }
+
+    async reopenAppErrorLog(id) {
+      const { data, error } = await this.client
+        .from("app_error_logs")
+        .update({ status: "new", reviewed_at: null, reviewed_by: null, review_note: null })
+        .eq("id", id)
+        .select("*")
+        .single();
       if (error) throw error;
       return data;
     }
