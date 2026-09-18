@@ -703,6 +703,7 @@
   const QUICK_ABSENCE_REASON_LABELS = {
     medical: "Médico / certificado",
     leave: "Licencia",
+    vacation: "Vacaciones",
     personal: "Motivo personal",
     family: "Motivo familiar",
     transport: "Problema de traslado",
@@ -3396,9 +3397,48 @@
 
     const actor = state.currentProfile?.full_name || "supervisor/admin";
     const existing = getAbsenceEvent(row.shift);
-    const notes = buildQuickAbsenceNotes(existing?.notes || "", reasonCode, detail, actor);
 
     try {
+      if (reasonCode === "vacation") {
+        const date = row.shift.shift_date;
+        const overlappingVacation = (state.leaveRecords || []).find(leave =>
+          leave.operator_id === row.shift.operator_id
+          && isActiveLeave(leave)
+          && leave.leave_type === "vacation"
+          && leave.start_date <= date
+          && leave.end_date >= date
+        );
+
+        if (!overlappingVacation) {
+          await store.upsertLeaveEvent({
+            operator_id: row.shift.operator_id,
+            leave_type: "vacation",
+            start_date: date,
+            end_date: date,
+            reference: "Registro rápido desde En vivo",
+            notes: detail || `Vacaciones registradas por ${actor}.`,
+            status: "active",
+            created_by: state.currentProfile?.id || null,
+            updated_by: state.currentProfile?.id || null
+          });
+        }
+
+        if (existing?.id) {
+          const vacationNote = [stripQuickAbsenceMetadata(existing.notes || ""), `Reclasificada como vacaciones por ${actor}.${detail ? ` Detalle: ${detail}` : ""}`].filter(Boolean).join("\n");
+          await store.updateAttendanceEvent(existing.id, {
+            notes: vacationNote,
+            recorded_by: state.currentProfile?.id || null
+          });
+        }
+
+        closeModal("quickAbsenceModal");
+        state.absenceReasonContext = null;
+        toast("Vacaciones registradas. Ese día no se contabiliza como ausencia.", "success");
+        await renderSupervisorView();
+        return;
+      }
+
+      const notes = buildQuickAbsenceNotes(existing?.notes || "", reasonCode, detail, actor);
       if (existing?.id) {
         await store.updateAttendanceEvent(existing.id, {
           notes,
@@ -5427,6 +5467,16 @@
     if ($("#leaveFormTitle")) $("#leaveFormTitle").textContent = "Registrar / programar novedad";
     $("#cancelLeaveEditBtn")?.classList.add("hidden");
     if ($("#saveLeaveBtn")) $("#saveLeaveBtn").textContent = "Guardar novedad";
+  }
+
+
+  function prepareVacationPlanning() {
+    resetLeaveForm();
+    renderTab("leaves");
+    if ($("#leaveType")) $("#leaveType").value = "vacation";
+    if ($("#leaveFormTitle")) $("#leaveFormTitle").textContent = "Planificar vacaciones";
+    if ($("#saveLeaveBtn")) $("#saveLeaveBtn").textContent = "Guardar vacaciones";
+    scrollToActiveEditor("#leaveForm");
   }
 
   function editLeave(id) {
@@ -7680,6 +7730,7 @@
     $("#extraAssignmentForm")?.addEventListener("submit", (event) => saveExtraAssignment(event).catch(error => toast(error.message || "No se pudo crear la tarea extraordinaria.")));
 
     $("#leaveForm")?.addEventListener("submit", (event) => saveLeave(event).catch(error => toast(error.message || "No se pudo guardar la novedad.")));
+    $("#planVacationBtn")?.addEventListener("click", prepareVacationPlanning);
     $("#cancelLeaveEditBtn")?.addEventListener("click", resetLeaveForm);
     $("#leaveStatusFilter")?.addEventListener("change", renderLeaves);
 

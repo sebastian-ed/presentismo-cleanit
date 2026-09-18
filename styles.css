@@ -294,6 +294,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--primary); box-sh
 .summary-card .kpi-label { margin-top: 6px; color: var(--muted); font-weight: 800; font-size: .8rem; }
 .card-title-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
 .card-title-row h3 { margin: 0; }
+.card-title-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .live-status-filters {
   display: flex;
   flex-wrap: wrap;

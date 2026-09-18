@@ -8,10 +8,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Presentismo GPS" />
   <title>Clean It · Presentismo GPS</title>
-  <link rel="manifest" href="manifest.webmanifest?v=20260911-errors1" />
+  <link rel="manifest" href="manifest.webmanifest?v=20260917-vacaciones1" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20260911-errors1" />
+  <link rel="stylesheet" href="styles.css?v=20260917-vacaciones1" />
 </head>
 <body>
   <div class="app-shell">
@@ -137,7 +137,7 @@
           <button class="tab-btn" data-tab="fichaje" type="button">Fichaje</button>
           <button class="tab-btn" data-tab="coverage" type="button">Cobertura</button>
           <button class="tab-btn" data-tab="assignments" type="button">Asignaciones</button>
-          <button class="tab-btn" data-tab="leaves" type="button">Novedades</button>
+          <button class="tab-btn" data-tab="leaves" type="button">Novedades / Vacaciones</button>
           <button class="tab-btn" data-tab="sites" type="button">Servicios</button>
           <button class="tab-btn" data-tab="users" type="button">Usuarios</button>
           <button class="tab-btn" data-tab="errors" type="button">Errores <span id="errorTabBadge" class="tab-count-badge hidden">0</span></button>
@@ -618,7 +618,10 @@
                   <h3 id="leaveFormTitle">Registrar / programar novedad</h3>
                   <p class="muted small no-margin">Certificados médicos, licencias y vacaciones. Durante el período cargado no se genera ausencia automática.</p>
                 </div>
-                <button class="ghost-btn small-btn hidden" id="cancelLeaveEditBtn" type="button">Cancelar edición</button>
+                <div class="card-title-actions">
+                  <button class="secondary-btn small-btn" id="planVacationBtn" type="button">Planificar vacaciones</button>
+                  <button class="ghost-btn small-btn hidden" id="cancelLeaveEditBtn" type="button">Cancelar edición</button>
+                </div>
               </div>
               <label><span>Operario</span><select id="leaveOperator" required></select></label>
               <label><span>Tipo de novedad</span>
@@ -893,6 +896,7 @@
           <select id="quickAbsenceReason" required>
             <option value="medical">Médico / certificado</option>
             <option value="leave">Licencia</option>
+            <option value="vacation">Vacaciones</option>
             <option value="personal">Motivo personal</option>
             <option value="family">Motivo familiar</option>
             <option value="transport">Problema de traslado</option>
@@ -900,7 +904,7 @@
           </select>
         </label>
         <label><span>Observación <small class="muted">(opcional, salvo “Otro motivo”)</small></span><textarea id="quickAbsenceDetail" placeholder="Ej. Avisó que va al médico / licencia informada por RRHH / inconveniente familiar."></textarea></label>
-        <div class="manual-attendance-warning"><strong>Registro rápido:</strong> marca este turno como ausente y deja asentado el motivo. Si ya existía una ausencia automática, se conserva ese mismo registro y se agrega el motivo informado por supervisor/admin.</div>
+        <div class="manual-attendance-warning"><strong>Registro rápido:</strong> para motivos habituales marca el turno como ausente y deja asentado el motivo. Si elegís <strong>Vacaciones</strong>, se registra como novedad justificada para ese día y <strong>no suma ausencia</strong>. Si ya existía una ausencia automática, se conserva como antecedente técnico pero el día queda reclasificado como vacaciones.</div>
         <button class="primary-btn" id="saveQuickAbsenceBtn" type="submit">Guardar ausencia</button>
       </form>
     </section>
@@ -993,8 +997,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="js/config.js?v=20260911-errors1"></script>
-  <script src="js/storage.js?v=20260911-errors1"></script>
-  <script src="js/app.js?v=20260911-errors1"></script>
+  <script src="js/config.js?v=20260917-vacaciones1"></script>
+  <script src="js/storage.js?v=20260917-vacaciones1"></script>
+  <script src="js/app.js?v=20260917-vacaciones1"></script>
 </body>
 </html>
