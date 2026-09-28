@@ -1,12 +1,12 @@
-const CACHE_NAME = "cleanit-presentismo-shell-20260917-vacaciones1";
+const CACHE_NAME = "cleanit-presentismo-shell-20260928-flexmulti-fix1";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=20260917-vacaciones1",
-  "./js/config.js?v=20260917-vacaciones1",
-  "./js/storage.js?v=20260917-vacaciones1",
-  "./js/app.js?v=20260917-vacaciones1",
-  "./manifest.webmanifest?v=20260917-vacaciones1",
+  "./styles.css?v=20260928-flexmulti-fix1",
+  "./js/config.js?v=20260928-flexmulti-fix1",
+  "./js/storage.js?v=20260928-flexmulti-fix1",
+  "./js/app.js?v=20260928-flexmulti-fix1",
+  "./manifest.webmanifest?v=20260928-flexmulti-fix1",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2",

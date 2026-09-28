@@ -1038,7 +1038,7 @@
     state.profiles = profiles;
     state.sites = sites;
     state.assignments = assignments;
-    state.flexibleModes = flexibleModeRows || [];
+    state.flexibleModes = flexibleModes || [];
     state.shifts = (shifts || []).filter(shift => !flexibleModeForOperatorDate(shift.operator_id, date));
     state.events = events;
     state.overtimeAuthorizations = overtimeAuthorizations || [];
@@ -1421,7 +1421,7 @@
     state.overtimeAuthorizations = overtimeAuthorizations || [];
     state.overtimeRequests = overtimeRequests || [];
     state.leaveRecords = leaveRecords || [];
-    state.flexibleModes = flexibleModes || [];
+    state.flexibleModes = flexibleModeRows || [];
 
     $("#operatorTitle").textContent = `Hola, ${state.currentProfile.full_name}`;
 
