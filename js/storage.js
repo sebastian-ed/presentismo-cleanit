@@ -484,7 +484,7 @@
       }
     }
 
-    async setFlexibleAttendanceMode(operatorId, enabled, siteId = null, effectiveDate = todayISO()) {
+    async setFlexibleAttendanceMode(operatorId, enabled, siteIds = [], effectiveDate = todayISO()) {
       const { data: activeRows, error: activeError } = await this.client
         .from("flexible_attendance_modes")
         .select("*")
@@ -492,48 +492,73 @@
         .is("valid_to", null)
         .order("valid_from", { ascending: false });
       if (activeError) throw activeError;
-      const active = (activeRows || [])[0] || null;
+      const active = activeRows || [];
+      const normalizeSiteIds = value => {
+        if (Array.isArray(value)) return [...new Set(value.map(item => String(item || "").trim()).filter(Boolean))];
+        return String(value || "").trim() ? [String(value).trim()] : [];
+      };
+      const desiredSiteIds = enabled ? normalizeSiteIds(siteIds) : [];
+      const activeSiteIds = [...new Set(active.map(row => String(row.site_id || "").trim()).filter(Boolean))];
+      const setsEqual = desiredSiteIds.length === activeSiteIds.length && desiredSiteIds.every(id => activeSiteIds.includes(id));
 
       if (enabled) {
-        if (!siteId) throw new Error("Seleccioná el servicio para la jornada flexible.");
-        if (active && active.site_id === siteId) return active;
+        if (!desiredSiteIds.length) throw new Error("Seleccioná al menos un servicio para la jornada flexible.");
+        if (setsEqual) return active;
 
-        if (active) {
-          if (active.valid_from === effectiveDate) {
-            const { data, error } = await this.client
-              .from("flexible_attendance_modes")
-              .update({ site_id: siteId })
-              .eq("id", active.id)
-              .select("*")
-              .single();
+        const rowsStartingToday = active.filter(row => row.valid_from === effectiveDate);
+        if (rowsStartingToday.length && rowsStartingToday.length === active.length) {
+          const keepTodayIds = new Set(desiredSiteIds);
+          const deleteTodayIds = rowsStartingToday.filter(row => !keepTodayIds.has(row.site_id)).map(row => row.id);
+          if (deleteTodayIds.length) {
+            const { error } = await this.client.from("flexible_attendance_modes").delete().in("id", deleteTodayIds);
             if (error) throw error;
-            return data;
           }
+          const currentTodaySiteIds = rowsStartingToday.map(row => row.site_id);
+          const insertSiteIds = desiredSiteIds.filter(id => !currentTodaySiteIds.includes(id));
+          if (insertSiteIds.length) {
+            const { error } = await this.client
+              .from("flexible_attendance_modes")
+              .insert(insertSiteIds.map(siteId => ({ operator_id: operatorId, site_id: siteId, valid_from: effectiveDate })));
+            if (error) throw error;
+          }
+          const { data, error } = await this.client
+            .from("flexible_attendance_modes")
+            .select("*")
+            .eq("operator_id", operatorId)
+            .is("valid_to", null)
+            .order("valid_from", { ascending: false });
+          if (error) throw error;
+          return data || [];
+        }
+
+        if (active.length) {
           const yesterday = new Date(`${effectiveDate}T12:00:00Z`);
           yesterday.setUTCDate(yesterday.getUTCDate() - 1);
           const validTo = yesterday.toISOString().slice(0, 10);
           const { error: closeError } = await this.client
             .from("flexible_attendance_modes")
             .update({ valid_to: validTo })
-            .eq("id", active.id);
+            .eq("operator_id", operatorId)
+            .is("valid_to", null);
           if (closeError) throw closeError;
         }
 
         const { data, error } = await this.client
           .from("flexible_attendance_modes")
-          .insert({ operator_id: operatorId, site_id: siteId, valid_from: effectiveDate })
-          .select("*")
-          .single();
+          .insert(desiredSiteIds.map(siteId => ({ operator_id: operatorId, site_id: siteId, valid_from: effectiveDate })))
+          .select("*");
         if (error) throw error;
-        return data;
+        return data || [];
       }
 
-      if (!active) return null;
-      if (active.valid_from === effectiveDate) {
+      if (!active.length) return null;
+      const rowsStartingToday = active.filter(row => row.valid_from === effectiveDate);
+      if (rowsStartingToday.length && rowsStartingToday.length === active.length) {
         const { error } = await this.client
           .from("flexible_attendance_modes")
           .delete()
-          .eq("id", active.id);
+          .eq("operator_id", operatorId)
+          .is("valid_to", null);
         if (error) throw error;
         return null;
       }
@@ -543,11 +568,11 @@
       const { data, error } = await this.client
         .from("flexible_attendance_modes")
         .update({ valid_to: validTo })
-        .eq("id", active.id)
-        .select("*")
-        .single();
+        .eq("operator_id", operatorId)
+        .is("valid_to", null)
+        .select("*");
       if (error) throw error;
-      return data;
+      return data || [];
     }
 
     async listLeaveEvents() {

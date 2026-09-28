@@ -4,8 +4,14 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0f172a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Presentismo GPS" />
   <title>Clean It · Presentismo GPS</title>
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="manifest" href="manifest.webmanifest?v=20260917-vacaciones1" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="styles.css?v=20260917-vacaciones1" />
 </head>
 <body>
   <div class="app-shell">
@@ -16,6 +22,10 @@
           <p class="eyebrow">Clean It</p>
           <h1>Presentismo GPS</h1>
         </div>
+      </div>
+      <div class="topbar-actions">
+        <span id="pwaInstalledBadge" class="connection-pill pwa-installed-badge hidden" aria-live="polite">App instalada</span>
+        <button id="installPwaBtn" class="secondary-btn small-btn pwa-install-btn hidden" type="button">Instalar app</button>
       </div>
     </header>
 
@@ -36,7 +46,7 @@
 
             <form id="supabaseLoginForm" class="form-stack">
               <label>
-                <span id="loginEmailLabel">Nombre de usuario</span>
+                <span id="loginEmailLabel">Usuario o email</span>
                 <input id="email" type="text" autocomplete="username" placeholder="ej: arielacevedo" required />
               </label>
               <label>
@@ -44,8 +54,53 @@
                 <input id="password" type="password" autocomplete="current-password" placeholder="••••••••" required />
               </label>
               <button id="loginSubmitBtn" class="primary-btn" type="submit">Ingresar como operario</button>
+              <button id="forgotPasswordBtn" class="text-btn" type="button">¿Olvidaste tu contraseña?</button>
             </form>
 
+          </div>
+        </div>
+      </section>
+
+      <section id="forgotPasswordView" class="view">
+        <div class="hero-card">
+          <div class="login-card">
+            <p class="eyebrow">Recuperar acceso</p>
+            <h3>Restablecer contraseña</h3>
+            <p class="muted small">Ingresá tu nombre de usuario o el email asociado a tu cuenta. Si nunca configuraste un correo de recuperación, podés informarlo ahora.</p>
+            <form id="forgotPasswordForm" class="form-stack">
+              <label>
+                <span>Usuario o email</span>
+                <input id="forgotIdentifier" type="text" autocomplete="username" placeholder="ej: arielacevedo" required />
+              </label>
+              <label>
+                <span>Email de recuperación <span class="muted">(solo si todavía no tenés uno)</span></span>
+                <input id="forgotRecoveryEmail" type="email" autocomplete="email" placeholder="tuemail@dominio.com" />
+              </label>
+              <p class="muted small no-margin">Si tu cuenta ya tiene un email configurado, dejá este campo vacío. Si lo cargás por primera vez, un supervisor o administrador deberá aprobarlo antes de que se envíe el enlace.</p>
+              <button class="primary-btn" id="forgotPasswordSubmitBtn" type="submit">Recuperar contraseña</button>
+              <button class="text-btn" id="backToLoginBtn" type="button">Volver al ingreso</button>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section id="resetPasswordView" class="view">
+        <div class="hero-card">
+          <div class="login-card">
+            <p class="eyebrow">Enlace de recuperación</p>
+            <h3>Crear nueva contraseña</h3>
+            <p id="resetPasswordStatus" class="muted small">Validando el enlace de recuperación…</p>
+            <form id="resetPasswordForm" class="form-stack">
+              <label>
+                <span>Nueva contraseña</span>
+                <input id="newPassword" type="password" autocomplete="new-password" minlength="6" placeholder="Mínimo 6 caracteres" required />
+              </label>
+              <label>
+                <span>Repetir contraseña</span>
+                <input id="newPasswordConfirm" type="password" autocomplete="new-password" minlength="6" placeholder="Repetí la contraseña" required />
+              </label>
+              <button class="primary-btn" id="resetPasswordSubmitBtn" type="submit">Guardar nueva contraseña</button>
+            </form>
           </div>
         </div>
       </section>
@@ -56,16 +111,20 @@
             <p class="eyebrow">Vista operario</p>
             <h2 id="operatorTitle">Mi servicio de hoy</h2>
           </div>
-          <button class="ghost-btn" id="operatorLogoutBtn" type="button">Salir</button>
+          <div class="operator-head-actions">
+            <button class="secondary-btn small-btn" id="refreshOperatorBtn" type="button">Actualizar servicios</button>
+            <button class="ghost-btn" id="operatorLogoutBtn" type="button">Salir</button>
+          </div>
         </div>
 
+        <div id="operatorConnectivity" class="connectivity-banner hidden" role="status" aria-live="polite"></div>
         <div id="operatorShiftContainer" class="operator-grid"></div>
       </section>
 
       <section id="supervisorView" class="view">
         <div class="section-head">
           <div>
-            <p class="eyebrow">Vista supervisor</p>
+            <p class="eyebrow" id="managementRoleLabel">Vista supervisor</p>
             <h2>Panel vivo de presentismo</h2>
           </div>
           <button class="ghost-btn" id="supervisorLogoutBtn" type="button">Salir</button>
@@ -73,13 +132,32 @@
 
         <nav class="tabbar" aria-label="Panel supervisor">
           <button class="tab-btn active" data-tab="live" type="button">En vivo</button>
+          <button class="tab-btn" data-tab="opsmap" type="button">Mapa operativo</button>
+          <button class="tab-btn" data-tab="analytics" type="button">Análisis</button>
           <button class="tab-btn" data-tab="fichaje" type="button">Fichaje</button>
           <button class="tab-btn" data-tab="coverage" type="button">Cobertura</button>
           <button class="tab-btn" data-tab="assignments" type="button">Asignaciones</button>
+          <button class="tab-btn" data-tab="leaves" type="button">Novedades / Vacaciones</button>
           <button class="tab-btn" data-tab="sites" type="button">Servicios</button>
           <button class="tab-btn" data-tab="users" type="button">Usuarios</button>
+          <button class="tab-btn" data-tab="errors" type="button">Errores <span id="errorTabBadge" class="tab-count-badge hidden">0</span></button>
           <button class="tab-btn" data-tab="records" type="button">Registros</button>
         </nav>
+
+        <div id="contextSearchBar" class="context-search-bar" role="search" aria-label="Buscador de la sección actual">
+          <div class="context-search-copy">
+            <span class="context-search-label">Buscar en <strong id="contextSearchSectionLabel">En vivo</strong></span>
+            <span class="muted small">Operario, servicio u otro dato visible de esta sección.</span>
+          </div>
+          <div class="context-search-controls">
+            <div class="context-search-input-wrap">
+              <span class="context-search-icon" aria-hidden="true">⌕</span>
+              <input id="contextSearchInput" type="search" autocomplete="off" placeholder="Buscar operario o servicio..." aria-label="Buscar en la sección actual" />
+              <button class="ghost-btn small-btn context-search-clear hidden" id="clearContextSearchBtn" type="button">Limpiar</button>
+            </div>
+            <span id="contextSearchResultLabel" class="context-search-result muted small" aria-live="polite"></span>
+          </div>
+        </div>
 
         <section id="fichajeTab" class="tab-panel">
           <div class="data-card">
@@ -121,24 +199,248 @@
             <button class="secondary-btn" id="refreshDashboardBtn" type="button">Actualizar</button>
           </div>
 
+          <div class="export-panel" aria-label="Exportar estado operativo">
+            <div class="export-panel-copy">
+              <strong>Exportar estado operativo</strong>
+              <span>Para RRHH: día mostrado, otro día, semana, mes, rango personalizado o historial completo.</span>
+            </div>
+            <div class="export-period-grid">
+              <label>
+                <span>Período</span>
+                <select id="liveExportPeriod">
+                  <option value="shown">Día mostrado</option>
+                  <option value="yesterday">Ayer</option>
+                  <option value="last7">Últimos 7 días</option>
+                  <option value="month">Mes de la fecha mostrada</option>
+                  <option value="lastmonth">Mes anterior</option>
+                  <option value="custom">Rango personalizado</option>
+                  <option value="all">Todo el historial</option>
+                </select>
+              </label>
+              <label>
+                <span>Desde</span>
+                <input id="liveExportFrom" type="date" />
+              </label>
+              <label>
+                <span>Hasta</span>
+                <input id="liveExportTo" type="date" />
+              </label>
+              <div class="export-actions">
+                <button class="secondary-btn small-btn" id="exportLiveCsvBtn" type="button">Descargar CSV</button>
+                <button class="primary-btn small-btn" id="exportLiveExcelBtn" type="button">Descargar Excel</button>
+              </div>
+            </div>
+          </div>
+
           <div class="kpi-grid" id="kpiGrid"></div>
           <div class="data-card">
             <div class="card-title-row">
               <h3>Estado por servicio</h3>
               <span id="lastRefreshLabel" class="muted small"></span>
             </div>
+            <div id="liveStatusFilters" class="live-status-filters" aria-label="Filtros rápidos de estado"></div>
             <div id="liveTable" class="responsive-table"></div>
           </div>
         </section>
 
-        <section id="coverageTab" class="tab-panel">
-          <div class="toolbar-card compact-toolbar">
-            <label>
-              <span>Buscar servicio, zona u operario</span>
-              <input id="coverageSearch" placeholder="Ej. Colegiales, Chaves, Alvarez Thomas" />
-            </label>
-            <button class="secondary-btn" id="clearCoverageSearchBtn" type="button">Limpiar</button>
+        <section id="opsmapTab" class="tab-panel">
+          <div class="data-card operational-map-hero">
+            <div class="card-title-row operational-map-title-row">
+              <div>
+                <p class="eyebrow">Control territorial</p>
+                <h3>Mapa operativo de servicios</h3>
+                <p class="muted small no-margin">Vista rápida de cobertura, ausencias y alertas del día. Para fechas anteriores reconstruye el estado con las asignaciones y marcaciones históricas.</p>
+              </div>
+              <span id="operationalMapLiveBadge" class="operational-map-live-badge">EN VIVO</span>
+            </div>
+            <div class="operational-map-toolbar">
+              <label>
+                <span>Fecha</span>
+                <input id="operationalMapDate" type="date" />
+              </label>
+              <div class="operational-map-toolbar-actions">
+                <button class="secondary-btn" id="operationalMapTodayBtn" type="button">Hoy</button>
+                <button class="primary-btn" id="refreshOperationalMapBtn" type="button">Actualizar mapa</button>
+              </div>
+              <div class="operational-map-refresh-copy">
+                <strong id="operationalMapDateLabel">Hoy</strong>
+                <span id="operationalMapRefreshLabel" class="muted small">Actualización automática cada 60 segundos cuando mirás el día de hoy.</span>
+              </div>
+            </div>
           </div>
+
+          <div id="operationalMapKpis" class="kpi-grid operational-map-kpis"></div>
+
+          <div class="data-card operational-map-card">
+            <div id="operationalMapFilters" class="live-status-filters operational-map-filters" aria-label="Filtros del mapa operativo"></div>
+            <div class="operational-map-legend" aria-label="Referencias del mapa operativo">
+              <span><i class="ops-legend-dot ops-tone-good"></i>Cubierto correctamente</span>
+              <span><i class="ops-legend-dot ops-tone-late"></i>Demora / alerta horaria</span>
+              <span><i class="ops-legend-dot ops-tone-outside"></i>Fuera de radio</span>
+              <span><i class="ops-legend-dot ops-tone-critical"></i>Ausente / crítico</span>
+              <span><i class="ops-legend-dot ops-tone-pending"></i>Pendiente</span>
+              <span><i class="ops-legend-dot ops-tone-inactive"></i>Franco / sin cobertura</span>
+            </div>
+            <div id="operationalStatusMap" class="operational-status-map" aria-label="Mapa del estado operativo de los servicios"></div>
+            <div id="operationalMapFootnote" class="muted small operational-map-footnote"></div>
+          </div>
+        </section>
+
+        <section id="analyticsTab" class="tab-panel">
+          <div class="data-card analytics-hero">
+            <div class="card-title-row">
+              <div>
+                <p class="eyebrow">Control de presentismo</p>
+                <h3>Análisis y ranking de operarios</h3>
+                <p class="muted small no-margin">Horas reales, ausencias, llegadas tarde y fichajes fuera de radio. El período se calcula con las entradas y salidas registradas.</p>
+              </div>
+            </div>
+            <div class="analytics-toolbar">
+              <label>
+                <span>Período</span>
+                <select id="analyticsPeriod">
+                  <option value="today">Hoy</option>
+                  <option value="yesterday">Ayer</option>
+                  <option value="last7">Últimos 7 días</option>
+                  <option value="month" selected>Mes actual</option>
+                  <option value="lastmonth">Mes anterior</option>
+                  <option value="custom">Rango personalizado</option>
+                  <option value="all">Todo el historial</option>
+                </select>
+              </label>
+              <label><span>Desde</span><input id="analyticsFrom" type="date" /></label>
+              <label><span>Hasta</span><input id="analyticsTo" type="date" /></label>
+              <label>
+                <span>Servicio</span>
+                <select id="analyticsService"><option value="">Todos los servicios</option></select>
+              </label>
+              <label>
+                <span>Orden ranking</span>
+                <select id="analyticsOrder"><option value="desc">Mayor a menor</option><option value="asc">Menor a mayor</option></select>
+              </label>
+              <label>
+                <span>Formato imágenes</span>
+                <select id="analyticsImageFormat">
+                  <option value="png" selected>PNG · máxima calidad</option>
+                  <option value="jpg">JPG · alta calidad</option>
+                </select>
+              </label>
+              <div class="analytics-toolbar-actions">
+                <button class="secondary-btn small-btn" id="applyAnalyticsBtn" type="button">Actualizar análisis</button>
+                <button class="secondary-btn small-btn" id="exportAnalyticsCsvBtn" type="button">Descargar CSV</button>
+                <button class="secondary-btn small-btn" id="exportAnalyticsExcelBtn" type="button">Excel completo</button>
+                <button class="primary-btn small-btn" id="downloadAnalyticsBundleBtn" type="button">Descargar todo (ZIP)</button>
+              </div>
+            </div>
+            <div id="analyticsRangeSummary" class="muted small analytics-range-summary"></div>
+            <div class="analytics-export-panel">
+              <div class="analytics-export-panel-head">
+                <div>
+                  <h4>Descarga seleccionable de gráficos y tablas</h4>
+                  <p class="muted small no-margin">Elegí uno, varios o todos los gráficos, rankings y tablas. Si seleccionás más de un archivo, se descargan juntos en un ZIP.</p>
+                </div>
+              </div>
+              <div class="analytics-export-panel-toolbar">
+                <label>
+                  <span>Formato de imágenes</span>
+                  <select id="analyticsSelectionImageFormat">
+                    <option value="png" selected>PNG · máxima calidad</option>
+                    <option value="jpg">JPG · alta calidad</option>
+                  </select>
+                </label>
+                <div class="analytics-export-panel-actions">
+                  <button class="ghost-btn small-btn" id="analyticsSelectAllChartsBtn" type="button">Seleccionar gráficos</button>
+                  <button class="ghost-btn small-btn" id="analyticsSelectAllRankingsBtn" type="button">Seleccionar rankings</button>
+                  <button class="ghost-btn small-btn" id="analyticsSelectAllTablesBtn" type="button">Seleccionar tablas</button>
+                  <button class="ghost-btn small-btn" id="analyticsSelectEverythingBtn" type="button">Seleccionar todo</button>
+                  <button class="ghost-btn small-btn" id="analyticsClearSelectionBtn" type="button">Limpiar</button>
+                </div>
+              </div>
+              <div class="analytics-export-selection-grid">
+                <article class="analytics-export-group">
+                  <div class="analytics-export-group-head">
+                    <h5>Gráficos</h5>
+                    <span class="muted small">Imágenes del dashboard</span>
+                  </div>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="image" value="hours" checked /> <span>Horas confirmadas</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="image" value="absence" checked /> <span>Ausencias / sin entrada</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="image" value="late" checked /> <span>Llegadas tarde</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="image" value="outside" checked /> <span>Fichajes fuera de radio</span></label>
+                </article>
+                <article class="analytics-export-group">
+                  <div class="analytics-export-group-head">
+                    <h5>Rankings</h5>
+                    <span class="muted small">Imágenes de rankings</span>
+                  </div>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="image" value="ranking-absence" checked /> <span>Ranking de ausencias</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="image" value="ranking-late" checked /> <span>Ranking de tardanzas</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="image" value="ranking-outside" checked /> <span>Ranking fuera de radio</span></label>
+                </article>
+                <article class="analytics-export-group">
+                  <div class="analytics-export-group-head">
+                    <h5>Tablas Excel</h5>
+                    <span class="muted small">Resumen y rankings</span>
+                  </div>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="table" value="summary" /> <span>Resumen completo por operario</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="table" value="absence" /> <span>Tabla ranking de ausencias</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="table" value="late" /> <span>Tabla ranking de tardanzas</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="table" value="outside" /> <span>Tabla ranking fuera de radio</span></label>
+                  <label class="analytics-export-option"><input type="checkbox" data-analytics-selection="table" value="workbook" checked /> <span>Excel completo del análisis</span></label>
+                </article>
+              </div>
+              <div class="analytics-export-panel-footer">
+                <span id="analyticsSelectionSummary" class="muted small">8 seleccionados: 7 imágenes y 1 tabla.</span>
+                <button class="primary-btn small-btn" id="downloadSelectedAnalyticsBtn" type="button">Descargar selección</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="analyticsKpis" class="kpi-grid analytics-kpis"></div>
+
+          <div class="analytics-chart-grid">
+            <article class="data-card analytics-chart-card">
+              <div class="analytics-card-head"><div><h3>Horas confirmadas</h3><span class="muted small">Top operarios</span></div><button class="secondary-btn tiny-btn" data-export-analytics-image="hours" type="button">Descargar imagen</button></div>
+              <div id="analyticsHoursChart" class="analytics-bars"></div>
+            </article>
+            <article class="data-card analytics-chart-card">
+              <div class="analytics-card-head"><div><h3>Ausencias / sin entrada</h3><span class="muted small">Incidencias</span></div><button class="secondary-btn tiny-btn" data-export-analytics-image="absence" type="button">Descargar imagen</button></div>
+              <div id="analyticsAbsenceChart" class="analytics-bars"></div>
+            </article>
+            <article class="data-card analytics-chart-card">
+              <div class="analytics-card-head"><div><h3>Llegadas tarde</h3><span class="muted small">Incidencias</span></div><button class="secondary-btn tiny-btn" data-export-analytics-image="late" type="button">Descargar imagen</button></div>
+              <div id="analyticsLateChart" class="analytics-bars"></div>
+            </article>
+            <article class="data-card analytics-chart-card">
+              <div class="analytics-card-head"><div><h3>Fichajes fuera de radio</h3><span class="muted small">Entradas + salidas</span></div><button class="secondary-btn tiny-btn" data-export-analytics-image="outside" type="button">Descargar imagen</button></div>
+              <div id="analyticsOutsideChart" class="analytics-bars"></div>
+            </article>
+          </div>
+
+          <div class="data-card">
+            <div class="card-title-row analytics-table-title-row">
+              <div><h3>Resumen completo por operario</h3><p class="muted small no-margin">Incluye horas confirmadas, pendientes de validar y principales incidencias.</p></div>
+              <button class="secondary-btn small-btn" data-export-analytics-table="summary" type="button">Descargar tabla Excel</button>
+            </div>
+            <div id="analyticsSummaryTable" class="responsive-table"></div>
+          </div>
+
+          <div class="analytics-ranking-grid">
+            <article class="data-card ranking-card">
+              <div class="analytics-card-head"><div><h3>Ranking de ausencias</h3><span class="muted small">Todos los operarios</span></div><div class="analytics-card-actions"><button class="secondary-btn tiny-btn" data-export-analytics-image="ranking-absence" type="button">Imagen</button><button class="secondary-btn tiny-btn" data-export-analytics-table="absence" type="button">Excel</button></div></div>
+              <div id="analyticsAbsenceRanking" class="ranking-list"></div>
+            </article>
+            <article class="data-card ranking-card">
+              <div class="analytics-card-head"><div><h3>Ranking de tardanzas</h3><span class="muted small">Todos los operarios</span></div><div class="analytics-card-actions"><button class="secondary-btn tiny-btn" data-export-analytics-image="ranking-late" type="button">Imagen</button><button class="secondary-btn tiny-btn" data-export-analytics-table="late" type="button">Excel</button></div></div>
+              <div id="analyticsLateRanking" class="ranking-list"></div>
+            </article>
+            <article class="data-card ranking-card">
+              <div class="analytics-card-head"><div><h3>Ranking fuera de radio</h3><span class="muted small">Todos los operarios</span></div><div class="analytics-card-actions"><button class="secondary-btn tiny-btn" data-export-analytics-image="ranking-outside" type="button">Imagen</button><button class="secondary-btn tiny-btn" data-export-analytics-table="outside" type="button">Excel</button></div></div>
+              <div id="analyticsOutsideRanking" class="ranking-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="coverageTab" class="tab-panel">
           <div class="data-card">
             <div class="card-title-row">
               <div>
@@ -151,6 +453,110 @@
         </section>
 
         <section id="assignmentsTab" class="tab-panel">
+          <div class="data-card assignment-audit-card">
+            <div class="card-title-row">
+              <div>
+                <h3>Controlar asignaciones contra Excel</h3>
+                <p class="muted small no-margin">Subí el Excel del planificador. La app compara servicio, operario, día y horario contra las asignaciones fijas vigentes y marca coincidencias, diferencias y bloqueos.</p>
+              </div>
+            </div>
+            <div class="assignment-audit-toolbar">
+              <label class="assignment-audit-file-field">
+                <span>Archivo Excel</span>
+                <input id="assignmentAuditFile" type="file" accept=".xlsx,.xls" />
+              </label>
+              <label>
+                <span>Comparar / aplicar desde</span>
+                <input id="assignmentAuditEffectiveDate" type="date" />
+              </label>
+              <button class="primary-btn" id="analyzeAssignmentsExcelBtn" type="button">Analizar Excel</button>
+              <button class="ghost-btn" id="clearAssignmentsExcelBtn" type="button">Limpiar análisis</button>
+            </div>
+            <div id="assignmentAuditFileInfo" class="muted small assignment-audit-file-info">Todavía no cargaste un archivo.</div>
+            <div id="assignmentAuditPanel" class="hidden">
+              <div id="assignmentAuditKpis" class="assignment-audit-kpis"></div>
+              <div class="assignment-audit-controls">
+                <div id="assignmentAuditFilters" class="status-filter-row">
+                  <button class="status-filter-btn active" data-audit-filter="alerts" type="button">Solo alertas</button>
+                  <button class="status-filter-btn" data-audit-filter="ok" type="button">Coinciden</button>
+                  <button class="status-filter-btn" data-audit-filter="all" type="button">Todos</button>
+                </div>
+                <div class="selection-actions assignment-audit-actions">
+                  <button class="secondary-btn small-btn" id="selectAuditAlertsBtn" type="button">Seleccionar diferencias</button>
+                  <button class="ghost-btn small-btn" id="clearAuditSelectionBtn" type="button">Limpiar selección</button>
+                  <button class="secondary-btn small-btn" id="applySelectedAuditBtn" type="button">Corregir seleccionadas</button>
+                  <button class="primary-btn small-btn" id="applyAllAuditBtn" type="button">Corregir todas las diferencias</button>
+                </div>
+              </div>
+              <p id="assignmentAuditSelectionSummary" class="muted small no-margin"></p>
+              <div id="assignmentAuditTable" class="responsive-table assignment-audit-table"></div>
+              <p class="muted small assignment-audit-note">Al corregir una diferencia se sincroniza el <strong>servicio + día completo</strong> desde la fecha indicada. Las coberturas y refuerzos extraordinarios no se tocan. El historial anterior a esa fecha se conserva.</p>
+            </div>
+          </div>
+
+          <div class="data-card bulk-edit-card">
+            <div class="card-title-row">
+              <div>
+                <h3>Ajuste masivo de tolerancias</h3>
+                <p class="muted small no-margin">Cambiá demora y/o ausencia para todas las asignaciones activas o solo para las que selecciones. La edición individual sigue funcionando igual.</p>
+              </div>
+            </div>
+            <div class="bulk-edit-grid bulk-edit-grid-assignments">
+              <label><span>Aplicar a</span><select id="bulkAssignmentScope"><option value="all">Todas las asignaciones</option><option value="selected">Solo seleccionadas</option></select></label>
+              <label><span>Tolerancia demora (min.)</span><input id="bulkAssignmentGrace" type="number" min="0" max="120" placeholder="Sin cambio" /></label>
+              <label><span>Ausente desde (min.)</span><input id="bulkAssignmentAbsent" type="number" min="1" max="240" placeholder="Sin cambio" /></label>
+              <button class="primary-btn" id="applyBulkAssignmentsBtn" type="button">Aplicar cambios</button>
+            </div>
+            <div class="bulk-edit-foot">
+              <span id="bulkAssignmentSelectionSummary" class="muted small">0 asignaciones seleccionadas.</span>
+              <span class="muted small">Podés dejar un campo vacío para conservar su valor actual.</span>
+            </div>
+          </div>
+          <div class="data-card special-assignment-card">
+            <div class="card-title-row">
+              <div>
+                <h3 id="specialAssignmentFormTitle">Asignación especial por un día</h3>
+                <p class="muted small no-margin">Para un cambio excepcional de horario o servicio. Ese día reemplaza toda la jornada habitual del operario y al día siguiente vuelve automáticamente a su cronograma normal.</p>
+              </div>
+              <button class="ghost-btn small-btn hidden" id="cancelSpecialAssignmentEditBtn" type="button">Cancelar edición</button>
+            </div>
+            <form id="specialAssignmentForm" class="extra-assignment-grid">
+              <label><span>Operario</span><select id="specialAssignmentOperator" required></select></label>
+              <label><span>Servicio</span><select id="specialAssignmentSite" required></select></label>
+              <label><span>Fecha</span><input id="specialAssignmentDate" type="date" required /></label>
+              <label><span>Entrada</span><input id="specialAssignmentStart" type="time" value="08:00" required /></label>
+              <label><span>Salida</span><input id="specialAssignmentEnd" type="time" value="12:00" required /></label>
+              <label><span>Tolerancia demora (min.)</span><input id="specialAssignmentGrace" type="number" min="0" max="120" value="10" /></label>
+              <label><span>Ausente desde (min.)</span><input id="specialAssignmentAbsent" type="number" min="1" max="240" value="30" /></label>
+              <label class="extra-notes-field"><span>Motivo / nota</span><input id="specialAssignmentNotes" placeholder="Ej. Hoy ingresa 11:00 por cambio excepcional solicitado por el cliente" /></label>
+              <div class="special-assignment-rule"><strong>Regla:</strong> la asignación fija de ese operario queda anulada solo para esta fecha.</div>
+              <button class="primary-btn" id="saveSpecialAssignmentBtn" type="submit">Programar asignación especial</button>
+            </form>
+          </div>
+
+          <div class="data-card extraordinary-assignment-card">
+            <div class="card-title-row">
+              <div>
+                <h3>Cobertura / refuerzo puntual</h3>
+                <p class="muted small no-margin">Para movimientos excepcionales de un solo día. Al guardar, el servicio le aparece al operario como una tarea extraordinaria y sus horas quedan identificadas para RRHH.</p>
+              </div>
+            </div>
+            <form id="extraAssignmentForm" class="extra-assignment-grid">
+              <label><span>Operario que va</span><select id="extraAssignmentOperator" required></select></label>
+              <label><span>Servicio</span><select id="extraAssignmentSite" required></select></label>
+              <label><span>Tipo</span><select id="extraAssignmentType" required><option value="coverage">Cobertura por ausencia</option><option value="reinforcement">Refuerzo</option></select></label>
+              <label><span>Fecha</span><input id="extraAssignmentDate" type="date" required /></label>
+              <label><span>Entrada</span><input id="extraAssignmentStart" type="time" value="08:00" required /></label>
+              <label><span>Salida</span><input id="extraAssignmentEnd" type="time" value="12:00" required /></label>
+              <label><span>Tolerancia demora (min.)</span><input id="extraAssignmentGrace" type="number" min="0" max="120" value="10" /></label>
+              <label><span>Ausente desde (min.)</span><input id="extraAssignmentAbsent" type="number" min="1" max="240" value="30" /></label>
+              <label><span>Cubre a <small class="muted">(opcional)</small></span><select id="extraCoveredOperator"><option value="">Sin especificar</option></select></label>
+              <label class="extra-notes-field"><span>Motivo / nota</span><input id="extraAssignmentNotes" placeholder="Ej. Cubre ausencia de Juan / refuerzo por carga extraordinaria" /></label>
+              <label class="checkbox-row extra-replace-check"><input id="extraSuppressRegular" type="checkbox" /><span><strong>Reemplaza su asignación habitual en ese horario</strong><br><span class="muted small">Usalo si ese operario normalmente debía ir a otro servicio: evita marcarlo ausente allí mientras está cubriendo este.</span></span></label>
+              <button class="primary-btn" id="saveExtraAssignmentBtn" type="submit">Crear tarea extraordinaria</button>
+            </form>
+          </div>
+
           <div class="split-layout">
             <form id="assignmentForm" class="data-card form-stack">
               <div class="card-title-row">
@@ -189,13 +595,94 @@
             </form>
 
             <div class="data-card">
-              <h3>Asignaciones cargadas</h3>
+              <div class="card-title-row bulk-list-head">
+                <div>
+                  <h3>Asignaciones cargadas</h3>
+                  <p class="muted small no-margin">Marcá asignaciones específicas si querés aplicar un cambio parcial.</p>
+                </div>
+                <div class="selection-actions">
+                  <button class="secondary-btn small-btn" id="selectAllAssignmentsBtn" type="button">Seleccionar todas</button>
+                  <button class="ghost-btn small-btn" id="clearSelectedAssignmentsBtn" type="button">Limpiar selección</button>
+                </div>
+              </div>
               <div id="assignmentsList" class="list-stack"></div>
             </div>
           </div>
         </section>
 
+        <section id="leavesTab" class="tab-panel">
+          <div class="split-layout leaves-management-layout">
+            <form id="leaveForm" class="data-card form-stack">
+              <div class="card-title-row">
+                <div>
+                  <h3 id="leaveFormTitle">Registrar / programar novedad</h3>
+                  <p class="muted small no-margin">Certificados médicos, licencias y vacaciones. Durante el período cargado no se genera ausencia automática.</p>
+                </div>
+                <div class="card-title-actions">
+                  <button class="secondary-btn small-btn" id="planVacationBtn" type="button">Planificar vacaciones</button>
+                  <button class="ghost-btn small-btn hidden" id="cancelLeaveEditBtn" type="button">Cancelar edición</button>
+                </div>
+              </div>
+              <label><span>Operario</span><select id="leaveOperator" required></select></label>
+              <label><span>Tipo de novedad</span>
+                <select id="leaveType" required>
+                  <option value="medical_certificate">Certificado médico</option>
+                  <option value="medical_leave">Licencia médica</option>
+                  <option value="other_leave">Otra licencia</option>
+                  <option value="vacation">Vacaciones</option>
+                </select>
+              </label>
+              <div class="form-grid two-cols">
+                <label><span>Desde</span><input id="leaveStartDate" type="date" required /></label>
+                <label><span>Hasta</span><input id="leaveEndDate" type="date" required /></label>
+              </div>
+              <label><span>Referencia / certificado <small class="muted">(opcional)</small></span><input id="leaveReference" placeholder="Ej. Certificado recibido / Exp. interno / Vacaciones aprobadas" /></label>
+              <label><span>Observación</span><textarea id="leaveNotes" placeholder="Detalle interno, motivo o información útil para RRHH y supervisión"></textarea></label>
+              <div class="inline-info leave-rule-info"><strong>Efecto operativo:</strong> en En vivo figurará la novedad correspondiente y ese turno no se contabilizará como ausencia.</div>
+              <button class="primary-btn" id="saveLeaveBtn" type="submit">Guardar novedad</button>
+            </form>
+
+            <div class="data-card">
+              <div class="card-title-row">
+                <div>
+                  <h3>Programadas e históricas</h3>
+                  <p class="muted small no-margin">La cancelación no borra el registro: queda trazabilidad de quién creó o modificó cada novedad.</p>
+                </div>
+                <label class="compact-filter"><span>Mostrar</span><select id="leaveStatusFilter"><option value="active">Activas</option><option value="all">Todas</option><option value="cancelled">Canceladas</option></select></label>
+              </div>
+              <div id="leavesList" class="list-stack"></div>
+            </div>
+          </div>
+
+          <div class="data-card leave-audit-card">
+            <div class="card-title-row">
+              <div>
+                <h3>Trazabilidad de cambios</h3>
+                <p class="muted small no-margin">Últimos movimientos sobre certificados, licencias y vacaciones.</p>
+              </div>
+            </div>
+            <div id="leaveAuditList"></div>
+          </div>
+        </section>
+
         <section id="sitesTab" class="tab-panel">
+          <div class="data-card bulk-edit-card">
+            <div class="card-title-row">
+              <div>
+                <h3>Ajuste masivo de radio GPS</h3>
+                <p class="muted small no-margin">Definí un mismo radio aceptado para todos los servicios o para una selección puntual.</p>
+              </div>
+            </div>
+            <div class="bulk-edit-grid bulk-edit-grid-sites">
+              <label><span>Aplicar a</span><select id="bulkSiteScope"><option value="all">Todos los servicios</option><option value="selected">Solo seleccionados</option></select></label>
+              <label><span>Radio GPS aceptado (m)</span><input id="bulkSiteRadius" type="number" min="10" max="1000" placeholder="Ej. 120" /></label>
+              <button class="primary-btn" id="applyBulkSitesBtn" type="button">Aplicar radio</button>
+            </div>
+            <div class="bulk-edit-foot">
+              <span id="bulkSiteSelectionSummary" class="muted small">0 servicios seleccionados.</span>
+              <span class="muted small">El cambio se aplica al punto GPS ya cargado; no modifica latitud ni longitud.</span>
+            </div>
+          </div>
           <div class="split-layout">
             <form id="siteForm" class="data-card form-stack">
               <div class="card-title-row">
@@ -213,10 +700,11 @@
                 <label><span>Tipo de cobertura</span><input id="siteType" placeholder="Ej. fixed" /></label>
                 <label><span>Radio GPS aceptado en metros</span><input id="siteRadius" required type="number" min="10" max="1000" value="120" /></label>
               </div>
-              <div class="two-cols">
-                <label><span>Latitud</span><input id="siteLat" required type="number" step="any" placeholder="-34.6037" /></label>
-                <label><span>Longitud</span><input id="siteLng" required type="number" step="any" placeholder="-58.3816" /></label>
-              </div>
+              <label>
+                <span>Coordenadas GPS (latitud, longitud)</span>
+                <input id="siteCoordinates" required type="text" inputmode="decimal" autocomplete="off" placeholder="-34.5849798751733, -58.43825497202207" />
+                <small class="muted">Podés pegar directamente las coordenadas copiadas desde Google Maps en formato <strong>latitud, longitud</strong>.</small>
+              </label>
               <div class="two-cols">
                 <label><span>Contacto consorcio</span><input id="siteContactName" placeholder="Ej. Administración / Encargado" /></label>
                 <label><span>WhatsApp</span><input id="siteWhatsapp" placeholder="+5491123456789" /></label>
@@ -225,7 +713,16 @@
               <p class="muted small">Cargá la latitud/longitud del punto real de ingreso. Un radio enorme convierte el GPS en decoración corporativa.</p>
             </form>
             <div class="data-card">
-              <h3>Servicios cargados</h3>
+              <div class="card-title-row bulk-list-head">
+                <div>
+                  <h3>Servicios cargados</h3>
+                  <p class="muted small no-margin">Seleccioná servicios si querés cambiar el radio solo en una parte de la operación.</p>
+                </div>
+                <div class="selection-actions">
+                  <button class="secondary-btn small-btn" id="selectAllSitesBtn" type="button">Seleccionar todos</button>
+                  <button class="ghost-btn small-btn" id="clearSelectedSitesBtn" type="button">Limpiar selección</button>
+                </div>
+              </div>
               <div id="sitesList" class="list-stack"></div>
             </div>
           </div>
@@ -239,13 +736,25 @@
                 <button class="ghost-btn small-btn hidden" id="cancelUserEditBtn" type="button">Cancelar edición</button>
               </div>
               <input type="hidden" id="userId" />
-              <label><span>Rol</span><select id="userRole" required><option value="operator">Operario</option><option value="supervisor">Supervisor</option></select></label>
+              <label><span>Rol</span><select id="userRole" required><option value="operator">Operario</option><option value="supervisor">Supervisor</option><option value="admin">Administrador</option></select></label>
               <label><span>Nombre completo</span><input id="userName" required placeholder="Nombre y apellido" /></label>
-              <label><span>UUID del usuario en Supabase Auth</span><input id="userAuthId" required placeholder="Ej. 00000000-0000-0000-0000-000000000000" /></label>
+              <label><span>Nombre de usuario (login)</span><input id="userUsername" autocomplete="off" required placeholder="ej: arielacevedo" /></label>
+              <label>
+                <span id="userPasswordLabel">Contraseña inicial</span>
+                <input id="userPassword" type="password" autocomplete="new-password" minlength="6" placeholder="Mínimo 6 caracteres" />
+              </label>
+              <p id="userPasswordHelp" class="muted small">Para operarios podés usar el DNI como contraseña inicial.</p>
               <label><span>Teléfono</span><input id="userPhone" placeholder="+549..." /></label>
+              <div id="userFlexibleBlock" class="flexible-user-config hidden">
+                <label class="checkbox-row flexible-user-toggle">
+                  <input type="checkbox" id="userFlexibleAttendance" />
+                  <span><strong>Jornada flexible / sin horario fijo</strong><br><span class="muted small">Caso excepcional: el operario ficha la hora real de cada entrada y salida, sin control de tardanza ni ausencia por horario.</span></span>
+                </label>
+                <label><span>Servicios asignados para fichaje flexible</span><select id="userFlexibleSite" multiple size="6"></select><small class="muted">Podés seleccionar uno o varios servicios. Mantené presionada Ctrl/Cmd para elegir múltiples opciones.</small></label>
+                <p class="muted small no-margin">Puede fraccionar la jornada: registra salida y luego una nueva entrada si retoma. El GPS sigue validando el servicio.</p>
+              </div>
               <label><span>Notas</span><textarea id="userNotes" placeholder="Datos internos, reemplazos, observaciones operativas..."></textarea></label>
-              <button class="primary-btn" type="submit">Guardar perfil</button>
-              <p class="muted small">El usuario debe existir en Supabase Authentication. Desde acá vinculás el perfil operativo usando el UUID real del usuario Auth; la contraseña se gestiona en Supabase Auth.</p>
+              <button class="primary-btn" type="submit">Guardar usuario</button>
             </form>
             <div class="data-card">
               <h3>Usuarios cargados</h3>
@@ -254,11 +763,69 @@
           </div>
         </section>
 
+        <section id="errorsTab" class="tab-panel">
+          <div class="data-card error-monitor-card">
+            <div class="card-title-row">
+              <div>
+                <h3>Errores e incidencias del operario</h3>
+                <p class="muted small no-margin">Acá quedan registrados los errores técnicos y también los bloqueos de uso que el operario ve en pantalla. Sirve para distinguir una falla real de un uso incorrecto de la app.</p>
+              </div>
+              <button class="secondary-btn small-btn" id="errorLogsTodayBtn" type="button">Hoy</button>
+            </div>
+            <div class="error-monitor-toolbar">
+              <label><span>Fecha</span><input id="errorLogDate" type="date" /></label>
+              <label><span>Estado</span><select id="errorLogStatus"><option value="all">Todos</option><option value="new">Nuevos</option><option value="reviewed">Revisados</option></select></label>
+              <button class="primary-btn small-btn" id="refreshErrorLogsBtn" type="button">Actualizar</button>
+            </div>
+            <div id="errorLogsSummary" class="error-monitor-summary"></div>
+            <div class="inline-info error-monitor-info"><strong>Cómo leerlo:</strong> “Uso / operación” suele indicar que la app funcionó pero el operario intentó una acción que no correspondía. “GPS / permisos”, “Conectividad”, “Base de datos” o “Error técnico” apuntan a una falla o condición técnica que conviene revisar.</div>
+            <div id="errorLogsTable" class="responsive-table"><div class="empty-card">Elegí una fecha y tocá <strong>Actualizar</strong>.</div></div>
+          </div>
+        </section>
+
         <section id="recordsTab" class="tab-panel">
           <div class="data-card">
             <div class="card-title-row">
-              <h3>Historial de marcaciones</h3>
-              <button class="secondary-btn small-btn" id="exportCsvBtn" type="button">Exportar CSV</button>
+              <div>
+                <h3>Historial de marcaciones</h3>
+                <p class="muted small no-margin">Filtrá el período que querés consultar y descargalo en CSV o Excel.</p>
+              </div>
+            </div>
+            <div class="records-export-toolbar">
+              <label>
+                <span>Período</span>
+                <select id="recordsPeriod">
+                  <option value="today">Hoy</option>
+                  <option value="yesterday">Ayer</option>
+                  <option value="last7">Últimos 7 días</option>
+                  <option value="month" selected>Mes actual</option>
+                  <option value="lastmonth">Mes anterior</option>
+                  <option value="custom">Rango personalizado</option>
+                  <option value="all">Todo el historial</option>
+                </select>
+              </label>
+              <label>
+                <span>Desde</span>
+                <input id="recordsFrom" type="date" />
+              </label>
+              <label>
+                <span>Hasta</span>
+                <input id="recordsTo" type="date" />
+              </label>
+              <div class="export-actions records-actions">
+                <button class="secondary-btn small-btn" id="applyRecordsBtn" type="button">Ver período</button>
+                <button class="secondary-btn small-btn" id="exportCsvBtn" type="button">Exportar CSV</button>
+                <button class="primary-btn small-btn" id="exportRecordsExcelBtn" type="button">Exportar Excel</button>
+              </div>
+            </div>
+            <div id="recordsRangeSummary" class="muted small records-range-summary"></div>
+            <div class="records-management-bar">
+              <div class="selection-actions">
+                <button class="secondary-btn small-btn" id="selectAllRecordsBtn" type="button">Seleccionar todo</button>
+                <button class="ghost-btn small-btn" id="clearSelectedRecordsBtn" type="button">Limpiar selección</button>
+                <button class="danger-btn small-btn" id="deleteSelectedRecordsBtn" type="button">Eliminar seleccionados</button>
+              </div>
+              <span id="recordsSelectionSummary" class="muted small">0 registros seleccionados.</span>
             </div>
             <div id="recordsTable" class="responsive-table"></div>
           </div>
@@ -267,12 +834,171 @@
     </main>
   </div>
 
+  <div id="quickDetailModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="quickDetailTitle">
+    <section class="modal-panel modal-panel-wide">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Estado operativo</p>
+          <h3 id="quickDetailTitle">Detalle del día</h3>
+          <p id="quickDetailSubtitle" class="muted small no-margin"></p>
+        </div>
+        <button class="ghost-btn small-btn modal-close" type="button" data-close-modal="quickDetailModal" aria-label="Cerrar">Cerrar</button>
+      </div>
+      <div id="quickDetailBody" class="quick-detail-list"></div>
+    </section>
+  </div>
+
+  <div id="observationModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="observationModalTitle">
+    <section class="modal-panel observation-modal-panel">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Cobertura / refuerzo</p>
+          <h3 id="observationModalTitle">Observaciones del operario</h3>
+          <p id="observationModalSubtitle" class="muted small no-margin"></p>
+        </div>
+        <button class="ghost-btn small-btn modal-close" type="button" data-close-modal="observationModal" aria-label="Cerrar">Cerrar</button>
+      </div>
+      <div id="observationModalBody" class="observation-modal-body"></div>
+    </section>
+  </div>
+
+  <div id="manualAttendanceModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="manualAttendanceModalTitle">
+    <section class="modal-panel manual-attendance-modal-panel">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Excepción operativa</p>
+          <h3 id="manualAttendanceModalTitle">Registrar marcación manual</h3>
+          <p id="manualAttendanceModalSubtitle" class="muted small no-margin"></p>
+        </div>
+        <button class="ghost-btn small-btn modal-close" type="button" data-close-modal="manualAttendanceModal" aria-label="Cerrar">Cerrar</button>
+      </div>
+      <form id="manualAttendanceForm" class="form-stack manual-attendance-form">
+        <label><span>Fecha y hora real</span><input id="manualAttendanceDateTime" type="datetime-local" required /></label>
+        <label><span>Motivo / observación</span><textarea id="manualAttendanceReason" required placeholder="Ej. El operario no pudo fichar por un problema excepcional con su teléfono."></textarea></label>
+        <div class="manual-attendance-warning">Esta marcación se guardará <strong>sin GPS</strong> y quedará identificada como cargada por supervisor/administrador.</div>
+        <button class="primary-btn" id="saveManualAttendanceBtn" type="submit">Guardar marcación manual</button>
+      </form>
+    </section>
+  </div>
+
+  <div id="quickAbsenceModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="quickAbsenceModalTitle">
+    <section class="modal-panel manual-attendance-modal-panel quick-absence-modal-panel">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Presentismo · registro rápido</p>
+          <h3 id="quickAbsenceModalTitle">Registrar ausencia</h3>
+          <p id="quickAbsenceModalSubtitle" class="muted small no-margin"></p>
+        </div>
+        <button class="ghost-btn small-btn modal-close" type="button" data-close-modal="quickAbsenceModal" aria-label="Cerrar">Cerrar</button>
+      </div>
+      <form id="quickAbsenceForm" class="form-stack manual-attendance-form">
+        <label><span>Motivo</span>
+          <select id="quickAbsenceReason" required>
+            <option value="medical">Médico / certificado</option>
+            <option value="leave">Licencia</option>
+            <option value="vacation">Vacaciones</option>
+            <option value="personal">Motivo personal</option>
+            <option value="family">Motivo familiar</option>
+            <option value="transport">Problema de traslado</option>
+            <option value="other">Otro motivo</option>
+          </select>
+        </label>
+        <label><span>Observación <small class="muted">(opcional, salvo “Otro motivo”)</small></span><textarea id="quickAbsenceDetail" placeholder="Ej. Avisó que va al médico / licencia informada por RRHH / inconveniente familiar."></textarea></label>
+        <div class="manual-attendance-warning"><strong>Registro rápido:</strong> para motivos habituales marca el turno como ausente y deja asentado el motivo. Si elegís <strong>Vacaciones</strong>, se registra como novedad justificada para ese día y <strong>no suma ausencia</strong>. Si ya existía una ausencia automática, se conserva como antecedente técnico pero el día queda reclasificado como vacaciones.</div>
+        <button class="primary-btn" id="saveQuickAbsenceBtn" type="submit">Guardar ausencia</button>
+      </form>
+    </section>
+  </div>
+
+  <div id="operatorOvertimeRequestModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="operatorOvertimeRequestModalTitle">
+    <section class="modal-panel manual-attendance-modal-panel overtime-authorization-modal-panel">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Solicitud de hora extra</p>
+          <h3 id="operatorOvertimeRequestModalTitle">Solicitar hora extra</h3>
+          <p id="operatorOvertimeRequestModalSubtitle" class="muted small no-margin"></p>
+        </div>
+        <button class="ghost-btn small-btn modal-close" type="button" data-close-modal="operatorOvertimeRequestModal" aria-label="Cerrar">Cerrar</button>
+      </div>
+      <form id="operatorOvertimeRequestForm" class="form-stack manual-attendance-form">
+        <label><span>Necesito continuar hasta</span><input id="operatorOvertimeRequestedUntil" type="datetime-local" required /></label>
+        <label><span>Motivo</span><textarea id="operatorOvertimeRequestReason" required placeholder="Ej. Faltó un compañero y me solicitaron cubrir hasta finalizar el servicio."></textarea></label>
+        <div class="overtime-modal-warning pending"><strong>Importante:</strong> enviar esta solicitud <strong>no aprueba la hora extra</strong>. Queda pendiente para que la revise un supervisor o administrador. Mientras esté pendiente, el sistema evita el cierre automático hasta 45 minutos después del horario solicitado para que puedas fichar tu salida real.</div>
+        <button class="primary-btn" type="submit">Enviar solicitud</button>
+      </form>
+    </section>
+  </div>
+
+  <div id="overtimeAuthorizationModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="overtimeAuthorizationModalTitle">
+    <section class="modal-panel manual-attendance-modal-panel overtime-authorization-modal-panel">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Control de horas extra</p>
+          <h3 id="overtimeAuthorizationModalTitle">Autorizar horas extra</h3>
+          <p id="overtimeAuthorizationModalSubtitle" class="muted small no-margin"></p>
+        </div>
+        <button class="ghost-btn small-btn modal-close" type="button" data-close-modal="overtimeAuthorizationModal" aria-label="Cerrar">Cerrar</button>
+      </div>
+      <form id="overtimeAuthorizationForm" class="form-stack manual-attendance-form">
+        <label><span>Autorizado hasta</span><input id="overtimeAuthorizedUntil" type="datetime-local" required /></label>
+        <label><span>Motivo / observación</span><textarea id="overtimeAuthorizationReason" required placeholder="Ej. Extensión solicitada por el cliente / tarea extraordinaria aprobada por supervisor."></textarea></label>
+        <div id="overtimeAuthorizationModalWarning" class="overtime-modal-warning"><strong>Solo supervisor o administrador.</strong> Esta aprobación posterga el cierre automático. El operario verá que la hora extra fue autorizada y podrá fichar la salida real con GPS. Si no registra salida, el sistema cerrará el turno 45 minutos después del límite autorizado.</div>
+        <div class="overtime-modal-actions">
+          <button class="danger-btn hidden" id="revokeOvertimeAuthorizationBtn" type="button">Quitar autorización</button>
+          <button class="ghost-btn hidden" id="rejectOvertimeRequestBtn" type="button">Rechazar solicitud</button>
+          <button class="primary-btn" id="saveOvertimeAuthorizationBtn" type="submit">Guardar autorización</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <div id="locationModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="locationModalTitle">
+    <section class="modal-panel modal-panel-map">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Control GPS</p>
+          <h3 id="locationModalTitle">Ubicación del fichaje</h3>
+          <p id="locationModalSubtitle" class="muted small no-margin"></p>
+        </div>
+        <button class="ghost-btn small-btn modal-close" type="button" data-close-modal="locationModal" aria-label="Cerrar">Cerrar</button>
+      </div>
+      <div id="locationSummary" class="location-summary"></div>
+      <div class="map-legend" aria-label="Referencias del mapa">
+        <span><i class="legend-dot legend-checkin"></i> Fichaje</span>
+        <span><i class="legend-dot legend-assigned"></i> Servicio asignado</span>
+        <span><i class="legend-dot legend-other"></i> Otros servicios</span>
+      </div>
+      <div id="attendanceMap" class="attendance-map" aria-label="Mapa de ubicación del fichaje"></div>
+    </section>
+  </div>
+
+  <div id="serviceLocationModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="serviceLocationModalTitle">
+    <section class="modal-panel modal-panel-map">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Ubicación del servicio</p>
+          <h3 id="serviceLocationModalTitle">Servicio</h3>
+          <p id="serviceLocationModalSubtitle" class="muted small no-margin"></p>
+        </div>
+        <button class="ghost-btn small-btn modal-close" type="button" data-close-modal="serviceLocationModal" aria-label="Cerrar">Cerrar</button>
+      </div>
+      <div id="serviceLocationSummary" class="location-summary"></div>
+      <div class="map-legend" aria-label="Referencias del mapa">
+        <span><i class="legend-dot legend-assigned"></i> Servicio seleccionado</span>
+        <span><i class="legend-dot legend-other"></i> Otros servicios Clean It</span>
+      </div>
+      <div id="serviceMap" class="attendance-map" aria-label="Mapa de ubicación del servicio"></div>
+    </section>
+  </div>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-  <script src="js/config.js"></script>
-  <script src="js/storage.js"></script>
-  <script src="js/app.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="js/config.js?v=20260917-vacaciones1"></script>
+  <script src="js/storage.js?v=20260917-vacaciones1"></script>
+  <script src="js/app.js?v=20260917-vacaciones1"></script>
 </body>
 </html>

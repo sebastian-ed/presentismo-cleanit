@@ -1,5 +1,6 @@
 (function () {
   const CONFIG = window.APP_CONFIG || {};
+  const INITIAL_AUTH_URL = window.location.href;
   const store = window.StoreFactory.create();
 
   const DAYS = [
@@ -21,19 +22,494 @@
     assignments: [],
     shifts: [],
     events: [],
-    activeTab: "live"
+    overtimeAuthorizations: [],
+    overtimeRequests: [],
+    leaveRecords: [],
+    flexibleModes: [],
+    leaveAudit: [],
+    leaveEditingId: null,
+    specialAssignmentEditingId: null,
+    dashboardRows: [],
+    liveStatusFilter: "all",
+    recordsEvents: [],
+    recordsProfiles: [],
+    recordsSites: [],
+    recordsLoaded: false,
+    errorLogs: [],
+    errorLogsLoaded: false,
+    errorLogDate: null,
+    errorLogStatus: "all",
+    errorLogUnreviewedToday: 0,
+    analyticsLoaded: false,
+    analyticsAllRows: [],
+    analyticsRows: [],
+    analyticsSummary: [],
+    analyticsDaily: [],
+    analyticsProfiles: [],
+    analyticsPeriodResolved: null,
+    activeTab: "live",
+    sectionSearch: { live: "", opsmap: "", analytics: "", fichaje: "", coverage: "", assignments: "", leaves: "", sites: "", users: "", errors: "", records: "" },
+    operationalMapLoaded: false,
+    operationalMapDate: null,
+    operationalMapRows: [],
+    operationalMapSites: [],
+    operationalMapFilter: "all",
+    searchCounts: {},
+    fichajeLoaded: false,
+    fichajeEvents: [],
+    fichajeProfiles: [],
+    fichajeSites: [],
+    bulkSelectedAssignmentIds: new Set(),
+    bulkSelectedSiteIds: new Set(),
+    bulkSelectedRecordIds: new Set(),
+    manualAttendanceContext: null,
+    absenceReasonContext: null,
+    overtimeAuthorizationContext: null,
+    overtimeRequestContext: null,
+    assignmentAuditFileName: "",
+    assignmentAuditParsed: null,
+    assignmentAuditAnalysis: null,
+    assignmentAuditFilter: "alerts",
+    assignmentAuditSelectedKeys: new Set()
   };
+
+  let attendanceMapInstance = null;
+  let serviceMapInstance = null;
+  let operationalStatusMapInstance = null;
+  let operationalMapRefreshTimer = null;
+  let passwordRecoveryActive = false;
+  let contextSearchAutoScrollTimer = null;
+  let operatorExitProtectionTimer = null;
 
   const $ = (selector) => document.querySelector(selector);
   const $$ = (selector) => Array.from(document.querySelectorAll(selector));
-  const todayISO = () => new Date().toISOString().slice(0, 10);
+  const APP_TIME_ZONE = CONFIG.TIMEZONE || CONFIG.TIME_ZONE || "America/Argentina/Buenos_Aires";
+  const EXIT_PROTECTION_MINUTES = Math.max(1, Number(CONFIG.EXIT_PROTECTION_MINUTES || 10));
+  const AUTO_CHECKOUT_DELAY_MINUTES = Math.max(1, Number(CONFIG.AUTO_CHECKOUT_DELAY_MINUTES || 45));
+
+  function datePartsInTimeZone(date = new Date(), timeZone = APP_TIME_ZONE) {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.filter(part => part.type !== "literal").map(part => [part.type, part.value]));
+    return { year: values.year, month: values.month, day: values.day };
+  }
+
+  function dateISOInTimeZone(date = new Date(), timeZone = APP_TIME_ZONE) {
+    const { year, month, day } = datePartsInTimeZone(date, timeZone);
+    return `${year}-${month}-${day}`;
+  }
+
+  function timestampToBusinessDate(value) {
+    if (!value) return null;
+    const date = value instanceof Date ? value : new Date(value);
+    if (!Number.isFinite(date.getTime())) return null;
+    return dateISOInTimeZone(date);
+  }
+
+  function timeZoneOffsetMs(date, timeZone = APP_TIME_ZONE) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      hourCycle: "h23"
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.filter(part => part.type !== "literal").map(part => [part.type, part.value]));
+    const asUTC = Date.UTC(
+      Number(values.year), Number(values.month) - 1, Number(values.day),
+      Number(values.hour), Number(values.minute), Number(values.second)
+    );
+    return asUTC - date.getTime();
+  }
+
+  function zonedDateTimeToDate(dateString, timeString = "00:00", timeZone = APP_TIME_ZONE) {
+    const [year, month, day] = String(dateString || "").split("-").map(Number);
+    const [hour, minute, second = 0] = String(timeString || "00:00").split(":").map(Number);
+    if (![year, month, day, hour, minute, second].every(Number.isFinite)) return new Date(NaN);
+    const utcGuess = Date.UTC(year, month - 1, day, hour, minute, second);
+    let candidate = new Date(utcGuess);
+    let offset = timeZoneOffsetMs(candidate, timeZone);
+    candidate = new Date(utcGuess - offset);
+    const correctedOffset = timeZoneOffsetMs(candidate, timeZone);
+    if (correctedOffset !== offset) candidate = new Date(utcGuess - correctedOffset);
+    return candidate;
+  }
+
+  const todayISO = () => dateISOInTimeZone(new Date());
+  const todayDayId = () => isoDayId(todayISO());
   const byId = (items, id) => items.find(item => item.id === id);
-  const formatDateTime = (value) => value ? new Date(value).toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" }) : "—";
+  const formatDateTime = (value) => value ? new Date(value).toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short", timeZone: APP_TIME_ZONE }) : "—";
+
+  function shiftDateFromId(shiftId, fallback = todayISO()) {
+    const match = String(shiftId || "").match(/__(\d{4}-\d{2}-\d{2})(?:__|$)/);
+    return match?.[1] || fallback;
+  }
+
   const formatTime = (value) => value ? String(value).slice(0, 5) : "—";
+
+  function exitProtectionState(entryEvent) {
+    if (!entryEvent?.assignment_id) return { active: false, remainingMs: 0, unlockAt: null };
+    const value = eventTimestamp(entryEvent);
+    const enteredAt = value ? new Date(value) : null;
+    if (!enteredAt || !Number.isFinite(enteredAt.getTime())) return { active: false, remainingMs: 0, unlockAt: null };
+    const unlockAt = new Date(enteredAt.getTime() + EXIT_PROTECTION_MINUTES * 60000);
+    const remainingMs = unlockAt.getTime() - Date.now();
+    return { active: remainingMs > 0, remainingMs: Math.max(0, remainingMs), unlockAt };
+  }
+
+  function formatExitProtectionRemaining(ms) {
+    const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    if (minutes <= 0) return `${seconds} s`;
+    return `${minutes} min${seconds ? ` ${String(seconds).padStart(2, "0")} s` : ""}`;
+  }
+
+  function scheduleOperatorExitProtectionRefresh(container) {
+    if (operatorExitProtectionTimer) {
+      clearTimeout(operatorExitProtectionTimer);
+      operatorExitProtectionTimer = null;
+    }
+    const futureUnlocks = Array.from(container?.querySelectorAll?.("[data-exit-unlock-at]") || [])
+      .map(el => Number(el.dataset.exitUnlockAt))
+      .filter(value => Number.isFinite(value) && value > Date.now());
+    if (!futureUnlocks.length) return;
+    const delay = Math.max(250, Math.min(...futureUnlocks) - Date.now() + 250);
+    operatorExitProtectionTimer = window.setTimeout(() => {
+      operatorExitProtectionTimer = null;
+      if (state.currentProfile?.role !== "operator") return;
+      renderOperatorView().catch(error => console.error("No se pudo actualizar la habilitación de salida", error));
+    }, delay);
+  }
   const toNumber = (value) => Number.parseFloat(value || 0);
   const normalizePhone = (raw) => String(raw || "").replace(/[^0-9]/g, "");
   const escapeHtml = (str) => String(str ?? "").replace(/[&<>'"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c]));
   const dayLabel = (id, variant = "short") => DAYS.find(d => d.id === Number(id))?.[variant] || id;
+
+  function parseCoordinatesInput(raw) {
+    const text = String(raw || "").trim().replace(/[()\[\]]/g, "");
+    const match = text.match(/^(-?\d+(?:\.\d+)?)\s*[,;]\s*(-?\d+(?:\.\d+)?)$/);
+    if (!match) throw new Error("Ingresá las coordenadas en formato latitud, longitud. Ej.: -34.5849798751733, -58.43825497202207");
+    const lat = Number(match[1]);
+    const lng = Number(match[2]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      throw new Error("Las coordenadas ingresadas no son válidas. Revisá latitud (-90 a 90) y longitud (-180 a 180).");
+    }
+    return { lat, lng };
+  }
+
+  function scrollElementIntoWorkingView(target, flash = false) {
+    const element = typeof target === "string" ? $(target) : target;
+    if (!element) return;
+    const rect = element.getBoundingClientRect();
+    const stickyOffset = typeof managedStickyTop === "function" ? managedStickyTop() : 8;
+    const top = Math.max(0, window.scrollY + rect.top - stickyOffset - 12);
+    window.scrollTo({ top, behavior: "smooth" });
+    if (flash) {
+      element.classList.remove("search-target-flash");
+      requestAnimationFrame(() => element.classList.add("search-target-flash"));
+      window.setTimeout(() => element.classList.remove("search-target-flash"), 1200);
+    }
+  }
+
+  function scrollToActiveEditor(selector) {
+    requestAnimationFrame(() => requestAnimationFrame(() => scrollElementIntoWorkingView(selector, true)));
+  }
+
+  const TAB_SEARCH_META = {
+    live: { label: "En vivo", placeholder: "Buscar operario o servicio...", noun: "coberturas", target: "#liveTable" },
+    opsmap: { label: "Mapa operativo", placeholder: "Buscar servicio, operario o estado...", noun: "servicios", target: "#operationalStatusMap" },
+    analytics: { label: "Análisis", placeholder: "Buscar operario o servicio...", noun: "coberturas", target: "#analyticsSummaryTable" },
+    fichaje: { label: "Fichaje", placeholder: "Buscar operario o servicio...", noun: "fichajes", target: "#fichajeTable" },
+    coverage: { label: "Cobertura", placeholder: "Buscar servicio, zona u operario...", noun: "servicios", target: "#coverageGrid" },
+    assignments: { label: "Asignaciones", placeholder: "Buscar operario, servicio o tipo de asignación...", noun: "asignaciones", target: "#assignmentsList" },
+    leaves: { label: "Novedades", placeholder: "Buscar operario, licencia, vacaciones o certificado...", noun: "novedades", target: "#leavesList" },
+    sites: { label: "Servicios", placeholder: "Buscar servicio, dirección o zona...", noun: "servicios", target: "#sitesList" },
+    users: { label: "Usuarios", placeholder: "Buscar nombre, usuario, teléfono o rol...", noun: "usuarios", target: "#usersList" },
+    errors: { label: "Errores", placeholder: "Buscar operario, servicio, error o acción...", noun: "incidencias", target: "#errorLogsTable" },
+    records: { label: "Registros", placeholder: "Buscar operario, servicio o estado...", noun: "marcaciones", target: "#recordsTable" }
+  };
+
+  function normalizeSearchText(value) {
+    return String(value ?? "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function sectionSearchTerm(tab = state.activeTab) {
+    return normalizeSearchText(state.sectionSearch?.[tab] || "");
+  }
+
+  function valuesMatchSearch(term, ...values) {
+    const q = normalizeSearchText(term);
+    if (!q) return true;
+    const words = q.split(" ").filter(Boolean);
+    const haystack = normalizeSearchText(values.flat(Infinity).filter(value => value != null).join(" "));
+    return words.every(word => haystack.includes(word));
+  }
+
+  function objectMatchesSearch(term, object) {
+    return valuesMatchSearch(term, ...Object.values(object || {}));
+  }
+
+  function updateSectionSearchCount(tab, visible, total) {
+    state.searchCounts[tab] = { visible: Number(visible || 0), total: Number(total || 0) };
+    if (state.activeTab !== tab) return;
+    const label = $("#contextSearchResultLabel");
+    if (!label) return;
+    const meta = TAB_SEARCH_META[tab] || { noun: "resultados" };
+    const hasSearch = Boolean(sectionSearchTerm(tab));
+    label.textContent = hasSearch ? `${visible} de ${total} ${meta.noun}` : `${total} ${meta.noun}`;
+  }
+
+  function syncContextSearchUI(tab = state.activeTab) {
+    const input = $("#contextSearchInput");
+    const sectionLabel = $("#contextSearchSectionLabel");
+    const clear = $("#clearContextSearchBtn");
+    if (!input || !sectionLabel || !clear) return;
+    const meta = TAB_SEARCH_META[tab] || TAB_SEARCH_META.live;
+    sectionLabel.textContent = meta.label;
+    input.placeholder = meta.placeholder;
+    input.value = state.sectionSearch?.[tab] || "";
+    clear.classList.toggle("hidden", !String(input.value || "").trim());
+    const counts = state.searchCounts[tab];
+    if (counts) updateSectionSearchCount(tab, counts.visible, counts.total);
+    else $("#contextSearchResultLabel").textContent = "";
+  }
+
+  function renderSectionForContextSearch(tab = state.activeTab) {
+    if (tab === "live") return renderDashboard();
+    if (tab === "opsmap") return renderOperationalMapFromState();
+    if (tab === "analytics") return renderAnalyticsFromState();
+    if (tab === "fichaje") {
+      if (state.fichajeLoaded) return renderFichaje(state.fichajeEvents, state.fichajeProfiles, state.fichajeSites);
+      return renderFichaje();
+    }
+    if (tab === "coverage") return renderCoverage();
+    if (tab === "assignments") return renderAssignments();
+    if (tab === "leaves") return renderLeaves();
+    if (tab === "sites") return renderSites();
+    if (tab === "users") return renderUsers();
+    if (tab === "errors") return renderErrorLogs();
+    if (tab === "records") return renderRecords();
+  }
+
+  function focusCurrentSearchResults() {
+    const tab = state.activeTab;
+    const meta = TAB_SEARCH_META[tab];
+    const target = meta?.target ? $(meta.target) : null;
+    if (!target) return;
+    const preferred = target.querySelector(".search-match-card")
+      || target.querySelector(".search-match-row")
+      || target.querySelector("tbody tr")
+      || target;
+    scrollElementIntoWorkingView(preferred, true);
+  }
+
+  function scheduleContextSearchAutoScroll() {
+    window.clearTimeout(contextSearchAutoScrollTimer);
+    const raw = String(state.sectionSearch?.[state.activeTab] || "").trim();
+    if (raw.length < 2) return;
+    contextSearchAutoScrollTimer = window.setTimeout(() => {
+      if (String(state.sectionSearch?.[state.activeTab] || "").trim() !== raw) return;
+      focusCurrentSearchResults();
+    }, 320);
+  }
+
+  function dateToISO(date) {
+    const y = date.getUTCFullYear();
+    const m = String(date.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(date.getUTCDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+
+  function parseISODate(dateString) {
+    return new Date(`${dateString}T12:00:00Z`);
+  }
+
+  function isoDayId(dateString) {
+    const d = parseISODate(dateString).getUTCDay();
+    return d === 0 ? 7 : d;
+  }
+
+  function formatISODate(dateString, options = {}) {
+    if (!dateString) return "";
+    return parseISODate(dateString).toLocaleDateString("es-AR", { ...options, timeZone: "UTC" });
+  }
+
+  function addDaysISO(dateString, days) {
+    const d = parseISODate(dateString);
+    d.setUTCDate(d.getUTCDate() + Number(days || 0));
+    return dateToISO(d);
+  }
+
+  function monthStartISO(dateString) {
+    const d = parseISODate(dateString);
+    d.setUTCDate(1);
+    return dateToISO(d);
+  }
+
+  function monthEndISO(dateString) {
+    const d = parseISODate(dateString);
+    d.setUTCMonth(d.getUTCMonth() + 1, 0);
+    return dateToISO(d);
+  }
+
+  function minISO(values) {
+    return values.filter(Boolean).sort()[0] || null;
+  }
+
+  function maxISO(values) {
+    const filtered = values.filter(Boolean).sort();
+    return filtered[filtered.length - 1] || null;
+  }
+
+  function periodElements(kind) {
+    if (kind === "live") {
+      return { period: $("#liveExportPeriod"), from: $("#liveExportFrom"), to: $("#liveExportTo") };
+    }
+    if (kind === "analytics") {
+      return { period: $("#analyticsPeriod"), from: $("#analyticsFrom"), to: $("#analyticsTo") };
+    }
+    return { period: $("#recordsPeriod"), from: $("#recordsFrom"), to: $("#recordsTo") };
+  }
+
+  function periodAnchor(kind) {
+    return kind === "live" ? ($("#dashboardDate")?.value || todayISO()) : todayISO();
+  }
+
+  function syncPeriodControls(kind, preserveCustom = true) {
+    const { period, from, to } = periodElements(kind);
+    if (!period || !from || !to) return;
+    const value = period.value;
+    const anchorDate = periodAnchor(kind);
+    const custom = value === "custom";
+    const all = value === "all";
+
+    if (all) {
+      from.value = "";
+      to.value = "";
+    } else if (!custom || !preserveCustom || !from.value || !to.value) {
+      let rangeFrom = anchorDate;
+      let rangeTo = anchorDate;
+      if (value === "yesterday") rangeFrom = rangeTo = addDaysISO(anchorDate, -1);
+      if (value === "last7") rangeFrom = addDaysISO(anchorDate, -6);
+      if (value === "month") {
+        rangeFrom = monthStartISO(anchorDate);
+        rangeTo = kind === "live" ? minISO([monthEndISO(anchorDate), todayISO()]) || anchorDate : todayISO();
+      }
+      if (value === "lastmonth") {
+        const previousMonthEnd = addDaysISO(monthStartISO(anchorDate), -1);
+        rangeFrom = monthStartISO(previousMonthEnd);
+        rangeTo = monthEndISO(previousMonthEnd);
+      }
+      if (value === "today") rangeFrom = rangeTo = todayISO();
+      if (value === "shown") rangeFrom = rangeTo = anchorDate;
+      from.value = rangeFrom;
+      to.value = rangeTo;
+    }
+
+    from.disabled = all || !custom;
+    to.disabled = all || !custom;
+  }
+
+  function resolvePeriod(kind) {
+    const { period, from, to } = periodElements(kind);
+    const value = period?.value || (kind === "live" ? "shown" : "month");
+    syncPeriodControls(kind, true);
+    if (value === "all") return { mode: value, from: null, to: null, isAll: true, label: "historial-completo" };
+    const rangeFrom = from?.value || periodAnchor(kind);
+    const rangeTo = to?.value || rangeFrom;
+    if (rangeFrom > rangeTo) throw new Error("La fecha Desde no puede ser posterior a Hasta.");
+    return { mode: value, from: rangeFrom, to: rangeTo, isAll: false, label: rangeFrom === rangeTo ? rangeFrom : `${rangeFrom}-al-${rangeTo}` };
+  }
+
+  function formatClock(value) {
+    if (!value) return "";
+    try {
+      return new Date(value).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: APP_TIME_ZONE });
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function formatDurationSeconds(totalSeconds) {
+    if (totalSeconds == null || !Number.isFinite(Number(totalSeconds)) || Number(totalSeconds) < 0) return "";
+    const seconds = Math.floor(Number(totalSeconds));
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  }
+
+  function workedDuration(entry, exit) {
+    if (!entry || !exit) return { seconds: null, minutes: null, decimalHours: null, label: "" };
+    const start = new Date(eventTimestamp(entry));
+    const end = new Date(eventTimestamp(exit));
+    const ms = end.getTime() - start.getTime();
+    if (!Number.isFinite(ms) || ms < 0) return { seconds: null, minutes: null, decimalHours: null, label: "" };
+    const seconds = Math.floor(ms / 1000);
+    return {
+      seconds,
+      minutes: Math.round((seconds / 60) * 100) / 100,
+      decimalHours: Math.round((seconds / 3600) * 10000) / 10000,
+      label: formatDurationSeconds(seconds)
+    };
+  }
+
+  function minutesToHoursLabel(minutes) {
+    const value = Number(minutes || 0);
+    if (!Number.isFinite(value) || value < 0) return "00:00";
+    const totalMinutes = Math.round(value);
+    const hours = Math.floor(totalMinutes / 60);
+    const mins = totalMinutes % 60;
+    return `${hours} h ${String(mins).padStart(2, "0")} min`;
+  }
+
+  function csvEscape(value) {
+    return `"${String(value ?? "").replace(/"/g, '""')}"`;
+  }
+
+  function downloadCsvObjects(rows, headers, filename) {
+    const lines = [headers.map(h => csvEscape(h)).join(",")];
+    rows.forEach(row => lines.push(headers.map(header => csvEscape(row[header])).join(",")));
+    const blob = new Blob(["\ufeff" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function applyWorksheetUsability(ws, widths = []) {
+    if (!ws) return;
+    if (widths.length) ws["!cols"] = widths.map(wch => ({ wch }));
+    if (ws["!ref"]) ws["!autofilter"] = { ref: ws["!ref"] };
+  }
+
+  async function withExportButton(button, busyText, callback) {
+    if (!button) return callback();
+    const previous = button.textContent;
+    button.disabled = true;
+    button.textContent = busyText;
+    button.closest(".export-panel, .data-card")?.classList.add("export-loading");
+    try {
+      return await callback();
+    } finally {
+      button.disabled = false;
+      button.textContent = previous;
+      button.closest(".export-panel, .data-card")?.classList.remove("export-loading");
+    }
+  }
 
   function toast(message, type = "default") {
     const el = $("#toast");
@@ -43,14 +519,138 @@
     toast._timer = window.setTimeout(() => el.classList.remove("show"), 3600);
   }
 
+  const APP_BUILD_VERSION = "20260911-error-monitor1";
+
+  function errorValue(value) {
+    if (value === undefined || value === null || value === "") return null;
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+    try { return JSON.parse(JSON.stringify(value)); } catch (_) { return String(value); }
+  }
+
+  function classifyOperatorIssue(message, error = null, preferred = "") {
+    if (preferred) return preferred;
+    const text = `${message || ""} ${error?.message || ""} ${error?.name || ""}`.toLowerCase();
+    if (/gps|geolocal|ubicaci[oó]n|position|permission|permiso|denied|timeout/.test(text)) return "gps";
+    if (/network|failed to fetch|fetch|sin conexi[oó]n|offline|internet/.test(text)) return "connectivity";
+    if (/checkbox|confirm[aá]|primero ten[eé]s|ya fue registrada|ya ten[eé]s|salida accidental|turno est[aá] abierto|seleccion[aá]/.test(text)) return "usage";
+    if (/configurad|no se encontr[oó] el servicio|sin servicio|coordenad/.test(text)) return "configuration";
+    if (error?.code || /supabase|postgres|row-level|rls|database|base de datos/.test(text)) return "database";
+    return "technical";
+  }
+
+  function inferIssueSiteId({ siteId = null, shiftId = null } = {}) {
+    if (siteId) return siteId;
+    if (shiftId) {
+      const event = (state.events || []).find(item => item.shift_id === shiftId && item.site_id);
+      if (event?.site_id) return event.site_id;
+      const assignmentId = String(shiftId).split("__")[0];
+      const assignment = (state.assignments || []).find(item => item.id === assignmentId);
+      if (assignment?.site_id) return assignment.site_id;
+    }
+    const openEntry = (state.events || []).find(entry => entry.operator_id === state.currentProfile?.id && entry.event_type === "present" && !(state.events || []).some(exit => exit.shift_id === entry.shift_id && exit.event_type === "checkout"));
+    return openEntry?.site_id || null;
+  }
+
+  async function reportOperatorIssue({ message, error = null, action = "unknown", category = "", severity = "error", siteId = null, shiftId = null, extra = null } = {}) {
+    if (state.currentProfile?.role !== "operator" || !state.currentProfile?.id || !message) return;
+    const resolvedSiteId = inferIssueSiteId({ siteId, shiftId });
+    const site = resolvedSiteId ? byId(state.sites, resolvedSiteId) : null;
+    const details = {
+      online: typeof navigator === "undefined" ? null : navigator.onLine,
+      shift_id: shiftId || null,
+      error_message: error?.message || null,
+      error_stack: error?.stack || null,
+      error_details: errorValue(error?.details),
+      error_hint: errorValue(error?.hint),
+      extra: errorValue(extra)
+    };
+    try {
+      await store.createAppErrorLog?.({
+        occurred_at: new Date().toISOString(),
+        operator_id: state.currentProfile.id,
+        operator_name_snapshot: state.currentProfile.full_name || state.currentProfile.username || "Operario",
+        site_id: resolvedSiteId,
+        site_name_snapshot: site?.name || null,
+        shift_id: shiftId || null,
+        action: action || "unknown",
+        category: classifyOperatorIssue(message, error, category),
+        severity,
+        message: String(message),
+        error_name: error?.name || null,
+        error_code: error?.code != null ? String(error.code) : null,
+        technical_details: details,
+        user_agent: window.navigator?.userAgent || null,
+        app_url: `${window.location.origin}${window.location.pathname}`,
+        app_version: APP_BUILD_VERSION
+      });
+    } catch (logError) {
+      console.warn("No se pudo registrar la incidencia del operario", logError);
+    }
+  }
+
+  function operatorProblem(message, options = {}) {
+    toast(message, options.toastType || "error");
+    reportOperatorIssue({ message, ...options }).catch(() => {});
+  }
+
+  function operatorException(error, fallback, options = {}) {
+    const message = error?.message || fallback || "Se produjo un error inesperado.";
+    toast(message, "error");
+    reportOperatorIssue({ message, error, ...options }).catch(() => {});
+  }
+
   function setView(viewId) {
     $$(".view").forEach(view => view.classList.remove("active"));
     $(viewId).classList.add("active");
   }
 
   function getScheduledDateTime(shift, field = "scheduled_start") {
-    const time = shift[field] || "00:00";
-    return new Date(`${shift.shift_date}T${time.length === 5 ? `${time}:00` : time}`);
+    const range = scheduledRangeForShift(shift.shift_date, shift.scheduled_start, shift.scheduled_end);
+    return field === "scheduled_end" ? range.end : range.start;
+  }
+
+  function overtimeAuthorizationForShift(shiftId) {
+    return state.overtimeAuthorizations.find(item => item.shift_id === shiftId && !item.revoked_at) || null;
+  }
+
+  function overtimeRequestForShift(shiftId) {
+    return state.overtimeRequests.find(item => item.shift_id === shiftId) || null;
+  }
+
+  function isPendingOvertimeRequest(request) {
+    return Boolean(request && String(request.status || "pending").toLowerCase() === "pending");
+  }
+
+  function formatTimeInBusinessZone(value) {
+    if (!value) return "—";
+    const date = value instanceof Date ? value : new Date(value);
+    if (!Number.isFinite(date.getTime())) return "—";
+    return date.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: APP_TIME_ZONE });
+  }
+
+  function formatDateTimeLocalInput(value) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (!Number.isFinite(date.getTime())) return "";
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: APP_TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.filter(part => part.type !== "literal").map(part => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}`;
+  }
+
+  function parseBusinessDateTimeLocal(value) {
+    const [datePart, timePart] = String(value || "").split("T");
+    if (!datePart || !timePart) return new Date(NaN);
+    return zonedDateTimeToDate(datePart, timePart, APP_TIME_ZONE);
+  }
+
+  function overtimeMinutesForShift(shift, exitEvent) {
+    if (!shift?.scheduled_end || !exitEvent) return 0;
+    const scheduledEnd = getScheduledDateTime(shift, "scheduled_end");
+    const actualExit = new Date(exitEvent.client_time || exitEvent.created_at);
+    if (!Number.isFinite(scheduledEnd.getTime()) || !Number.isFinite(actualExit.getTime())) return 0;
+    return Math.max(0, Math.round((actualExit.getTime() - scheduledEnd.getTime()) / 60000));
   }
 
   function diffMinutes(dateA, dateB) {
@@ -88,7 +688,118 @@
   }
 
   function getManualEvent(shift) {
-    return latestEventForShift(shift.id, ["late", "absent"]);
+    return latestEventForShift(shift.id, ["late", "absent", "day_off"]);
+  }
+
+  function getDayOffEvent(shift) {
+    return latestEventForShift(shift.id, "day_off");
+  }
+
+  function getAutomaticAbsenceEvent(shift) {
+    if (!shift?.id) return null;
+    return shiftEvents(shift.id).find(event => event.event_type === "absent" && event.recorded_via === "system_auto") || null;
+  }
+
+  const QUICK_ABSENCE_REASON_LABELS = {
+    medical: "Médico / certificado",
+    leave: "Licencia",
+    vacation: "Vacaciones",
+    personal: "Motivo personal",
+    family: "Motivo familiar",
+    transport: "Problema de traslado",
+    other: "Otro motivo"
+  };
+
+  function quickAbsenceReasonLabel(code) {
+    return QUICK_ABSENCE_REASON_LABELS[String(code || "").trim()] || "";
+  }
+
+  function parseQuickAbsenceReason(event) {
+    const notes = String(event?.notes || "");
+    const match = notes.match(/Motivo de ausencia:\s*([^|\n]+)/i);
+    const storedLabel = match ? String(match[1] || "").trim() : "";
+    const code = Object.entries(QUICK_ABSENCE_REASON_LABELS).find(([, label]) => label.toLowerCase() === storedLabel.toLowerCase())?.[0] || "";
+    const detailMatch = notes.match(/\|\s*Detalle:\s*([^|\n]+)/i);
+    const detail = detailMatch ? String(detailMatch[1] || "").trim() : "";
+    return { code, label: quickAbsenceReasonLabel(code) || storedLabel, detail };
+  }
+
+  function stripQuickAbsenceMetadata(notes) {
+    return String(notes || "")
+      .replace(/\s*Motivo de ausencia:[\s\S]*$/i, "")
+      .trim();
+  }
+
+  function buildQuickAbsenceNotes(existingNotes, reasonCode, detail, actor) {
+    const base = stripQuickAbsenceMetadata(existingNotes);
+    const reasonLabel = quickAbsenceReasonLabel(reasonCode) || "Otro motivo";
+    const quick = `Motivo de ausencia: ${reasonLabel}${detail ? ` | Detalle: ${detail}` : ""} | Registrado por ${actor || "supervisor/admin"}.`;
+    return [base, quick].filter(Boolean).join("\n");
+  }
+
+  function getAbsenceEvent(shift) {
+    return latestEventForShift(shift?.id, "absent");
+  }
+
+  function findOtherServiceEntryDuringShift(shift) {
+    if (!shift?.operator_id || !shift?.shift_date || !shift?.scheduled_start || !shift?.scheduled_end) return null;
+    const range = scheduledRangeForShift(shift.shift_date, shift.scheduled_start, shift.scheduled_end);
+    return state.events
+      .filter(event => event.operator_id === shift.operator_id
+        && event.shift_date === shift.shift_date
+        && event.shift_id !== shift.id
+        && event.event_type === "present")
+      .filter(event => {
+        const moment = new Date(event.client_time || event.created_at);
+        return Number.isFinite(moment.getTime())
+          && moment.getTime() >= range.start.getTime()
+          && moment.getTime() <= range.end.getTime();
+      })
+      .sort((a, b) => new Date(a.client_time || a.created_at) - new Date(b.client_time || b.created_at))[0] || null;
+  }
+
+  function recordedViaLabel(event) {
+    if (!event) return "";
+    if (event.recorded_via === "supervisor_manual") return "Carga manual supervisor/admin · sin GPS";
+    if (event.recorded_via === "system_auto" && event.event_type === "checkout") return "Cierre automático del sistema · sin GPS";
+    if (event.recorded_via === "system_auto") return "Generado automáticamente por el sistema";
+    if (event.recorded_via === "operator") return "Registrado por el operario";
+    if (event.event_type === "absent") return "Generado por el sistema";
+    return "Registrado por el operario";
+  }
+
+  function getEntryTimingInfo(shift, entryEvent) {
+    const empty = {
+      isLate: false,
+      isAfterAbsenceThreshold: false,
+      lateMinutes: null,
+      graceMinutes: Number(shift?.grace_minutes ?? 10),
+      absenceAfterMinutes: Number(shift?.absence_after_minutes ?? 30),
+      entryMoment: null,
+      start: null
+    };
+    if (!shift || !entryEvent || !shift.scheduled_start) return empty;
+
+    const start = getScheduledDateTime(shift, "scheduled_start");
+    const entryMoment = new Date(entryEvent.client_time || entryEvent.created_at);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(entryMoment.getTime())) return { ...empty, start, entryMoment };
+
+    const graceMinutes = Number(shift.grace_minutes ?? 10);
+    const absenceAfterMinutes = Number(shift.absence_after_minutes ?? 30);
+    const rawMinutes = Math.max(0, Math.round((entryMoment.getTime() - start.getTime()) / 60000));
+    const isLateByTime = entryMoment.getTime() > start.getTime() + graceMinutes * 60000;
+    const isLate = isLateByTime || entryEvent.observed_status === "late";
+    const isAfterAbsenceThreshold = entryMoment.getTime() >= start.getTime() + absenceAfterMinutes * 60000;
+
+    return {
+      isLate,
+      isAfterAbsenceThreshold: isLate && isAfterAbsenceThreshold,
+      lateMinutes: isLate ? rawMinutes : 0,
+      graceMinutes,
+      absenceAfterMinutes,
+      entryMoment,
+      start
+    };
   }
 
   function getEntryStatus(shift, entryEvent = getEntryEvent(shift), manualEvent = getManualEvent(shift), at = new Date()) {
@@ -97,17 +808,53 @@
     const absentAfter = Number(shift.absence_after_minutes ?? 30);
 
     if (entryEvent) {
-      if (entryEvent.is_inside_site === false) return { key: "outside", label: "Entrada fuera de radio", className: "status-outside" };
-      if (entryEvent.observed_status === "late") return { key: "late", label: "Entrada tarde", className: "status-late" };
-      return { key: "present", label: "Entrada registrada", className: "status-present" };
+      const manual = entryEvent.recorded_via === "supervisor_manual";
+      const timing = getEntryTimingInfo(shift, entryEvent);
+      if (entryEvent.is_inside_site === false) {
+        const timingSuffix = timing.isAfterAbsenceThreshold ? " · fuera de horario" : timing.isLate ? " · tarde" : "";
+        return {
+          key: "outside",
+          label: `${manual ? "Entrada manual · fuera de radio" : "Entrada fuera de radio"}${timingSuffix}`,
+          className: "status-outside",
+          ...timing
+        };
+      }
+      if (timing.isAfterAbsenceThreshold) {
+        return {
+          key: "late",
+          label: manual ? "Entrada manual · tarde · fuera de horario" : "Entrada tarde · fuera de horario",
+          className: "status-late-critical",
+          ...timing
+        };
+      }
+      if (timing.isLate) {
+        return {
+          key: "late",
+          label: manual ? "Entrada manual · tarde" : "Entrada tarde",
+          className: "status-late",
+          ...timing
+        };
+      }
+      return { key: "present", label: manual ? "Entrada manual" : "Entrada registrada", className: "status-present", ...timing };
     }
 
-    if (manualEvent?.event_type === "absent") return { key: "absent", label: "Ausente registrado", className: "status-absent" };
+    const leave = leaveForShift(shift);
+    if (leave) return { key: "leave", label: leaveTypeLabel(leave.leave_type), className: "status-leave", leaveRecord: leave };
+    if (manualEvent?.event_type === "day_off") return { key: "day_off", label: "Franco", className: "status-dayoff" };
+    if (manualEvent?.event_type === "absent") {
+      const absenceReason = parseQuickAbsenceReason(manualEvent);
+      return {
+        key: "absent",
+        label: absenceReason.label ? `Ausente · ${absenceReason.label}` : "Ausente registrado",
+        className: "status-absent",
+        absenceReason
+      };
+    }
 
     const elapsed = diffMinutes(at, start);
     if (elapsed < 0) return { key: "scheduled", label: "Pendiente", className: "status-ok" };
     if (elapsed <= grace) return { key: "on_window", label: "En ventana horaria", className: "status-ok" };
-    if (elapsed > absentAfter) {
+    if (elapsed >= absentAfter) {
       return {
         key: "absent",
         label: manualEvent?.event_type === "late" ? "Ausente tras demora" : "Ausente",
@@ -125,24 +872,65 @@
 
   function shouldCreateAutomaticAbsence(shift, at = new Date()) {
     if (getEntryEvent(shift)) return false;
+    if (leaveForShift(shift)) return false;
+    if (latestEventForShift(shift.id, "day_off")) return false;
     if (latestEventForShift(shift.id, "absent")) return false;
-    return at.getTime() > getAutomaticAbsenceTime(shift).getTime();
+    return at.getTime() >= getAutomaticAbsenceTime(shift).getTime();
   }
 
   function getExitStatus(shift, entryEvent = getEntryEvent(shift), exitEvent = getExitEvent(shift), at = new Date()) {
-    const end = getScheduledDateTime(shift, "scheduled_end");
+    const scheduledEnd = getScheduledDateTime(shift, "scheduled_end");
+    const overtimeAuthorization = overtimeAuthorizationForShift(shift.id);
+    const overtimeRequest = overtimeRequestForShift(shift.id);
+    const overtimeEnd = overtimeAuthorization?.authorized_until ? new Date(overtimeAuthorization.authorized_until) : null;
+    const pendingRequestEnd = isPendingOvertimeRequest(overtimeRequest) && overtimeRequest?.requested_until ? new Date(overtimeRequest.requested_until) : null;
+    const candidateEnds = [scheduledEnd, overtimeEnd, pendingRequestEnd].filter(date => date && Number.isFinite(date.getTime()));
+    const end = candidateEnds.reduce((latest, date) => date > latest ? date : latest, scheduledEnd);
     const grace = Number(shift.grace_minutes ?? 10);
 
     if (exitEvent) {
-      if (exitEvent.is_inside_site === false) return { key: "exit_outside", label: "Salida fuera de radio", className: "status-outside" };
-      if (exitEvent.observed_status === "early_exit") return { key: "early_exit", label: "Salida anticipada", className: "status-late" };
-      return { key: "completed", label: "Salida registrada", className: "status-present" };
+      const manual = exitEvent.recorded_via === "supervisor_manual";
+      if (exitEvent.recorded_via === "system_auto") return { key: "auto_checkout", label: "Cierre automático", className: "status-auto" };
+      if (exitEvent.is_inside_site === false) return { key: "exit_outside", label: manual ? "Salida manual · fuera de radio" : "Salida fuera de radio", className: "status-outside" };
+      if (exitEvent.observed_status === "early_exit") return { key: "early_exit", label: manual ? "Salida manual · anticipada" : "Salida anticipada", className: "status-late" };
+      return { key: "completed", label: manual ? "Salida manual" : "Salida registrada", className: "status-present" };
     }
 
+    const leave = leaveForShift(shift);
+    if (leave && !entryEvent) return { key: "leave", label: "No corresponde", className: "status-leave", leaveRecord: leave };
+    if (getDayOffEvent(shift) && !entryEvent) return { key: "day_off", label: "Franco", className: "status-dayoff" };
     if (!entryEvent) return { key: "not_started", label: "Sin entrada", className: "status-pending" };
 
     const minutesAfterEnd = diffMinutes(at, end);
-    if (minutesAfterEnd < 0) return { key: "in_service", label: "En servicio", className: "status-ok" };
+    if (minutesAfterEnd < 0) {
+      // Mientras el operario sigue trabajando, la columna Salida también conserva
+      // visualmente una anomalía de ingreso para evitar que un azul "normal" la oculte.
+      const entryTiming = getEntryTimingInfo(shift, entryEvent);
+      if (entryEvent.is_inside_site === false) {
+        const timingSuffix = entryTiming.isAfterAbsenceThreshold ? " · fuera de horario" : entryTiming.isLate ? " · tarde" : "";
+        return { key: "in_service_outside", label: `En servicio · entrada fuera de radio${timingSuffix}`, className: "status-outside" };
+      }
+      if (entryTiming.isAfterAbsenceThreshold) return { key: "in_service_late", label: "En servicio · ingreso fuera de horario", className: "status-late-critical" };
+      if (entryTiming.isLate) return { key: "in_service_late", label: "En servicio · entrada tarde", className: "status-late" };
+      if (overtimeAuthorization && at > scheduledEnd) return { key: "in_service_overtime", label: "En servicio · hora extra autorizada", className: "status-overtime" };
+      if (isPendingOvertimeRequest(overtimeRequest) && at > scheduledEnd) return { key: "in_service_overtime_pending", label: "En servicio · hora extra pendiente", className: "status-overtime-pending" };
+      return { key: "in_service", label: "En servicio", className: "status-ok" };
+    }
+
+    // Pasarse algunos minutos del horario de salida NO convierte el turno en horas extra.
+    // Si no existe una solicitud/autorización de hora extra, se muestra como salida demorada
+    // y solo pasa a ser una incidencia de salida cuando alcanza el límite del cierre automático.
+    if (!overtimeAuthorization && !pendingRequestEnd) {
+      const delayMinutes = Math.max(0, diffMinutes(at, scheduledEnd));
+      const entryMoment = entryEvent ? new Date(entryEvent.client_time || entryEvent.created_at) : scheduledEnd;
+      const autoCloseReference = entryMoment && Number.isFinite(entryMoment.getTime()) && entryMoment > scheduledEnd ? entryMoment : scheduledEnd;
+      const autoCloseDeadline = new Date(autoCloseReference.getTime() + AUTO_CHECKOUT_DELAY_MINUTES * 60000);
+      if (at < autoCloseDeadline) {
+        return { key: "exit_delayed", label: `Salida demorada · +${delayMinutes} min`, className: "status-late", delayMinutes };
+      }
+      return { key: "missing_exit", label: `Salida no registrada · +${delayMinutes} min`, className: "status-absent", delayMinutes };
+    }
+
     if (minutesAfterEnd <= grace) return { key: "exit_due", label: "Debe registrar salida", className: "status-late" };
     return { key: "missing_exit", label: "Salida no registrada", className: "status-absent" };
   }
@@ -154,8 +942,17 @@
     const entryStatus = getEntryStatus(shift, entryEvent, manualEvent, at);
     const exitStatus = getExitStatus(shift, entryEvent, exitEvent, at);
 
-    if (["completed", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(exitStatus.key)) return exitStatus;
-    if (entryEvent && exitStatus.key === "in_service") return { key: "in_service", label: "En servicio", className: "status-present" };
+    if (["completed", "auto_checkout", "early_exit", "exit_outside", "missing_exit", "exit_due", "exit_delayed"].includes(exitStatus.key)) return exitStatus;
+    if (entryEvent && ["in_service", "in_service_outside", "in_service_late", "in_service_overtime", "in_service_overtime_pending"].includes(exitStatus.key)) {
+      if (entryStatus.key === "outside") return { key: "in_service_outside", label: exitStatus.label || "En servicio · entrada fuera de radio", className: "status-outside" };
+      if (entryStatus.key === "late") return {
+        key: "in_service_late",
+        label: entryStatus.isAfterAbsenceThreshold ? "En servicio · ingreso fuera de horario" : "En servicio · entrada tarde",
+        className: entryStatus.className || "status-late"
+      };
+      if (["in_service_overtime", "in_service_overtime_pending"].includes(exitStatus.key)) return exitStatus;
+      return { key: "in_service", label: "En servicio", className: "status-present" };
+    }
     return entryStatus;
   }
 
@@ -164,7 +961,8 @@
       present: "Entrada",
       checkout: "Salida",
       late: "Demora",
-      absent: "Ausencia"
+      absent: "Ausencia",
+      day_off: "Franco"
     };
     return labels[type] || type || "—";
   }
@@ -174,6 +972,7 @@
       present: "En horario",
       late: "Tarde",
       absent: "Ausente",
+      day_off: "Franco",
       on_time_exit: "Salida correcta",
       early_exit: "Salida anticipada"
     };
@@ -200,6 +999,9 @@
     if (status.key === "completed") {
       return `${base}\n\nEl operario ${name} registró la salida del servicio correspondiente al horario de ${formatTime(shift.scheduled_start)} a ${formatTime(shift.scheduled_end)}.\n\nQuedamos atentos ante cualquier novedad.`;
     }
+    if (status.key === "auto_checkout") {
+      return `${base}\n\nEl sistema cerró automáticamente el turno del operario ${name} porque no registró la salida. El horario previsto de finalización era ${formatTime(shift.scheduled_end)}. Estamos revisando la novedad operativa.\n\nQuedamos atentos.`;
+    }
     if (status.key === "early_exit") {
       return `${base}\n\nDetectamos una salida anticipada del operario ${name} respecto del horario previsto de finalización (${formatTime(shift.scheduled_end)}). Estamos revisando la situación operativa.\n\nDisculpen las molestias.`;
     }
@@ -222,33 +1024,221 @@
   }
 
   async function refreshBaseData(date = $("#dashboardDate")?.value || todayISO()) {
-    const [profiles, sites, assignments, shifts, events] = await Promise.all([
+    const [profiles, sites, assignments, shifts, events, overtimeAuthorizations, overtimeRequests, leaveRecords, flexibleModes] = await Promise.all([
       store.listProfiles(),
       store.listSites(),
       store.listAssignments(),
       store.listShifts(date),
-      store.listEvents()
+      store.listEvents(),
+      store.listOvertimeAuthorizations?.(date, date) || Promise.resolve([]),
+      store.listOvertimeRequests?.(date, date) || Promise.resolve([]),
+      store.listLeaveEvents?.() || Promise.resolve([]),
+      store.listFlexibleAttendanceModes?.() || Promise.resolve([])
     ]);
     state.profiles = profiles;
     state.sites = sites;
     state.assignments = assignments;
-    state.shifts = shifts;
+    state.flexibleModes = flexibleModeRows || [];
+    state.shifts = (shifts || []).filter(shift => !flexibleModeForOperatorDate(shift.operator_id, date));
     state.events = events;
+    state.overtimeAuthorizations = overtimeAuthorizations || [];
+    state.overtimeRequests = overtimeRequests || [];
+    state.leaveRecords = leaveRecords || [];
+  }
+
+  async function renderOperatorConnectivity() {
+    const banner = $("#operatorConnectivity");
+    if (!banner) return;
+    let pending = 0;
+    try { pending = await store.getOfflineQueueCount(); } catch (_) { /* noop */ }
+    const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+    if (!offline && !pending) {
+      banner.className = "connectivity-banner hidden";
+      banner.innerHTML = "";
+      return;
+    }
+    banner.className = `connectivity-banner ${offline ? "offline" : "pending"}`;
+    banner.innerHTML = offline
+      ? `<strong>Sin conexión a internet</strong><span>Podés registrar entrada y salida igual. La hora, fecha y GPS quedan guardados en este teléfono y se sincronizan cuando vuelva la conexión.</span>${pending ? `<small>${pending} fichaje${pending === 1 ? "" : "s"} pendiente${pending === 1 ? "" : "s"} de sincronizar.</small>` : ""}`
+      : `<strong>${pending} fichaje${pending === 1 ? "" : "s"} pendiente${pending === 1 ? "" : "s"}</strong><span>Se enviará${pending === 1 ? "" : "n"} automáticamente a Presentismo.</span>`;
+  }
+
+  async function syncOfflineAttendance({ notify = true } = {}) {
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      await renderOperatorConnectivity();
+      return { synced: 0, pending: await store.getOfflineQueueCount() };
+    }
+    try {
+      const result = await store.flushOfflineQueue();
+      if (notify && result?.synced) toast(`${result.synced} fichaje${result.synced === 1 ? "" : "s"} sin conexión sincronizado${result.synced === 1 ? "" : "s"}.`, "success");
+      await renderOperatorConnectivity();
+      return result;
+    } catch (_) {
+      await renderOperatorConnectivity();
+      return { synced: 0, pending: await store.getOfflineQueueCount() };
+    }
+  }
+
+  function openShiftObservations(shiftId) {
+    const row = state.dashboardRows.find(item => item?.shift?.id === shiftId);
+    if (!row) return toast("No se encontró el registro para mostrar sus observaciones.");
+    const operator = byId(state.profiles, row.shift.operator_id);
+    const site = byId(state.sites, row.shift.site_id);
+    const entryNote = String(row.entryEvent?.notes || "").trim();
+    const exitNote = String(row.exitEvent?.notes || "").trim();
+    const dayOffNote = String(getDayOffEvent(row.shift)?.notes || "").trim();
+    const absenceEvent = getAbsenceEvent(row.shift);
+    const absenceNote = String(absenceEvent?.notes || "").trim();
+    const absenceReason = parseQuickAbsenceReason(absenceEvent);
+    const assignmentNote = String(row.shift?.notes || "").trim();
+    $("#observationModalTitle").textContent = operator?.full_name || "Observaciones del operario";
+    $("#observationModalSubtitle").textContent = `${site?.name || "Servicio"} · ${row.shift.shift_date || $("#dashboardDate")?.value || todayISO()}`;
+    $("#observationModalBody").innerHTML = `
+      <div class="observation-summary-row">
+        <span class="extra-duty-badge ${escapeHtml(row.shift.assignment_type || row.extraWorkType || "fixed")}">${escapeHtml(assignmentTypeLabel(row.shift.assignment_type || row.extraWorkType || "fixed"))}</span>
+        ${row.isSelfReportedExtra ? `<span class="status-pill status-extra">${escapeHtml(validationLabel(row.extraValidationStatus || "pending"))}</span>` : ""}
+      </div>
+      <div class="observation-note-card"><span>Observación al registrar entrada</span><p>${entryNote ? escapeHtml(entryNote) : "Sin observación."}</p></div>
+      <div class="observation-note-card"><span>Observación al registrar salida</span><p>${exitNote ? escapeHtml(exitNote) : "Sin observación."}</p></div>
+      ${dayOffNote ? `<div class="observation-note-card secondary"><span>Nota de franco</span><p>${escapeHtml(dayOffNote)}</p></div>` : ""}
+      ${absenceNote ? `<div class="observation-note-card secondary"><span>${absenceReason.label ? `Motivo de ausencia · ${escapeHtml(absenceReason.label)}` : "Registro de ausencia"}</span><p>${escapeHtml(absenceNote)}</p></div>` : ""}
+      ${assignmentNote && assignmentNote !== entryNote ? `<div class="observation-note-card secondary"><span>Nota de la cobertura / asignación</span><p>${escapeHtml(assignmentNote)}</p></div>` : ""}
+    `;
+    openModal("observationModal");
   }
 
   function renderConnectionMode() {
     // Connection pill removed — no technical UI exposed to users
   }
 
+  function isManagementProfile(profile = state.currentProfile) {
+    const role = String(profile?.role || "").toLowerCase();
+    return role === "supervisor" || role === "admin";
+  }
+
   function profileMatchesLoginType(profile, expectedRole) {
     const role = String(profile?.role || "").toLowerCase();
     if (expectedRole === "operator") return role === "operator";
-    if (expectedRole === "supervisor") return role === "supervisor";
+    if (expectedRole === "supervisor") return role === "supervisor" || role === "admin";
     return true;
   }
 
   function roleLabel(role) {
-    return role === "operator" ? "operario" : "supervisor";
+    const normalized = String(role || "").toLowerCase();
+    if (normalized === "operator") return "operario";
+    if (normalized === "admin") return "administrador";
+    return "supervisor";
+  }
+
+  function assignmentTypeLabel(type) {
+    const normalized = String(type || "fixed").toLowerCase();
+    if (normalized === "coverage") return "Cobertura por ausencia";
+    if (normalized === "reinforcement") return "Refuerzo";
+    if (normalized === "special") return "Asignación especial";
+    if (normalized === "flexible") return "Jornada flexible";
+    return "Asignación fija";
+  }
+
+  function flexibleModeAppliesOnDate(mode, dateString) {
+    if (!mode || mode.is_active === false || !dateString) return false;
+    if (mode.valid_from && mode.valid_from > dateString) return false;
+    if (mode.valid_to && mode.valid_to < dateString) return false;
+    return true;
+  }
+
+  function flexibleModesForOperatorDate(operatorId, dateString) {
+    if (!operatorId || !dateString) return [];
+    return (state.flexibleModes || [])
+      .filter(mode => mode.operator_id === operatorId && flexibleModeAppliesOnDate(mode, dateString))
+      .sort((a, b) => {
+        const validCompare = String(b.valid_from || "").localeCompare(String(a.valid_from || ""));
+        if (validCompare !== 0) return validCompare;
+        return String(byId(state.sites, a.site_id)?.name || "").localeCompare(String(byId(state.sites, b.site_id)?.name || ""));
+      });
+  }
+
+  function flexibleModeForOperatorDate(operatorId, dateString) {
+    return flexibleModesForOperatorDate(operatorId, dateString)[0] || null;
+  }
+
+  function flexibleSiteNamesForModes(modes) {
+    return (modes || []).map(mode => byId(state.sites, mode.site_id)?.name).filter(Boolean);
+  }
+
+  function isFlexibleShiftId(shiftId) {
+    return String(shiftId || "").startsWith("flex__");
+  }
+
+  function workTypeLabel(type) {
+    const normalized = String(type || "regular").toLowerCase();
+    if (normalized === "coverage") return "Cobertura por ausencia";
+    if (normalized === "reinforcement") return "Refuerzo";
+    return "Trabajo regular";
+  }
+
+  function validationLabel(status) {
+    const normalized = String(status || "confirmed").toLowerCase();
+    if (normalized === "pending") return "Pendiente de validar";
+    if (normalized === "rejected") return "Rechazado";
+    return "Validado";
+  }
+
+  function leaveTypeLabel(type) {
+    const normalized = String(type || "other_leave").toLowerCase();
+    if (normalized === "medical_certificate") return "Certificado médico";
+    if (normalized === "medical_leave") return "Licencia médica";
+    if (normalized === "vacation") return "Vacaciones";
+    return "Otra licencia";
+  }
+
+  function leaveTypeShortLabel(type) {
+    const normalized = String(type || "other_leave").toLowerCase();
+    if (normalized === "medical_certificate") return "Certificado";
+    if (normalized === "medical_leave") return "Lic. médica";
+    if (normalized === "vacation") return "Vacaciones";
+    return "Licencia";
+  }
+
+  function isActiveLeave(leave) {
+    return Boolean(leave) && String(leave.status || "active") === "active";
+  }
+
+  function leaveForOperatorDate(operatorId, dateString) {
+    if (!operatorId || !dateString) return null;
+    return (state.leaveRecords || []).find(leave =>
+      leave.operator_id === operatorId
+      && isActiveLeave(leave)
+      && leave.start_date <= dateString
+      && leave.end_date >= dateString
+    ) || null;
+  }
+
+  function leaveForShift(shift) {
+    if (!shift?.operator_id || !shift?.shift_date) return null;
+    return leaveForOperatorDate(shift.operator_id, shift.shift_date);
+  }
+
+  function leavePeriodLabel(leave) {
+    if (!leave?.start_date) return "";
+    if (leave.start_date === leave.end_date) return formatISODate(leave.start_date, { day: "2-digit", month: "2-digit", year: "numeric" });
+    return `${formatISODate(leave.start_date, { day: "2-digit", month: "2-digit" })} al ${formatISODate(leave.end_date, { day: "2-digit", month: "2-digit", year: "numeric" })}`;
+  }
+
+  function assignmentAppliesOnDate(assignment, dateString) {
+    if (!assignment || assignment.is_active === false) return false;
+    const day = isoDayId(dateString);
+    if (!(assignment.days_of_week || []).map(Number).includes(day)) return false;
+    if (assignment.valid_from && assignment.valid_from > dateString) return false;
+    if (assignment.valid_to && assignment.valid_to < dateString) return false;
+    return true;
+  }
+
+  function assignmentsOverlap(a, b) {
+    const aStart = String(a?.scheduled_start || "00:00").slice(0, 5);
+    const aEnd = String(a?.scheduled_end || "23:59").slice(0, 5);
+    const bStart = String(b?.scheduled_start || "00:00").slice(0, 5);
+    const bEnd = String(b?.scheduled_end || "23:59").slice(0, 5);
+    return aStart < bEnd && bStart < aEnd;
   }
 
   function renderLoginMode() {
@@ -261,10 +1251,10 @@
     if (!copy || !emailLabel || !email || !submit) return;
 
     copy.innerHTML = isSupervisor
-      ? `<p class="eyebrow">Acceso supervisor</p><h3>Panel de control</h3><p class="muted small no-margin">Permite ver estado en vivo y administrar servicios, usuarios y asignaciones.</p>`
-      : `<p class="eyebrow">Acceso operario</p><h3>Marcar presencia</h3><p class="muted small no-margin">Ingresá tu nombre de usuario y DNI para registrar entrada o salida con GPS.</p>`;
-    emailLabel.textContent = isSupervisor ? "Email del supervisor" : "Nombre de usuario";
-    email.placeholder = isSupervisor ? "supervisor@cleanit.com" : "ej: arielacevedo";
+      ? `<p class="eyebrow">Acceso supervisor</p><h3>Panel de control</h3><p class="muted small no-margin">Ingresá con tu nombre de usuario o email y tu contraseña.</p>`
+      : `<p class="eyebrow">Acceso operario</p><h3>Marcar presencia</h3><p class="muted small no-margin">Ingresá con tu nombre de usuario o email para registrar entrada o salida con GPS.</p>`;
+    emailLabel.textContent = "Usuario o email";
+    email.placeholder = isSupervisor ? "ej: supervisor1" : "ej: arielacevedo";
     submit.textContent = isSupervisor ? "Ingresar como supervisor" : "Ingresar como operario";
     submit.className = isSupervisor ? "secondary-btn" : "primary-btn";
   }
@@ -277,12 +1267,9 @@
 
     try {
       submitButton.disabled = true;
-      const rawInput = emailInput.value.trim().toLowerCase().replace(/\s+/g, '');
-      const email = state.loginMode === "operator" && !rawInput.includes("@")
-        ? `${rawInput}@cleanit.ar`
-        : rawInput;
+      const identifier = emailInput.value.trim();
       const password = passwordInput.value;
-      const { user, profile } = await store.loginWithPassword(email, password);
+      const { user, profile } = await store.loginWithIdentifier(identifier, password);
 
       if (!profileMatchesLoginType(profile, state.loginMode)) {
         await store.signOut();
@@ -295,9 +1282,78 @@
       await afterLogin();
     } catch (error) {
       passwordInput.value = "";
-      toast(error.message || "No se pudo ingresar.");
+      if (state.currentProfile?.role === "operator") operatorException(error, "No se pudo cargar tu jornada.", { action: "carga_jornada" });
+      else toast(error.message || "No se pudo ingresar.");
     } finally {
       submitButton.disabled = false;
+    }
+  }
+
+  function looksLikePasswordRecoveryUrl() {
+    const source = String(INITIAL_AUTH_URL || "");
+    return /(?:[?#&])type=recovery(?:[&#]|$)/i.test(source);
+  }
+
+  function showPasswordResetView(ready = false) {
+    passwordRecoveryActive = true;
+    setView("#resetPasswordView");
+    const status = $("#resetPasswordStatus");
+    if (status) status.textContent = ready
+      ? "Enlace validado. Elegí una contraseña nueva."
+      : "Validando el enlace de recuperación…";
+  }
+
+  async function handleForgotPassword(event) {
+    event.preventDefault();
+    const identifier = $("#forgotIdentifier").value.trim();
+    const recoveryEmail = $("#forgotRecoveryEmail")?.value.trim().toLowerCase() || "";
+    const button = $("#forgotPasswordSubmitBtn");
+    try {
+      button.disabled = true;
+      const result = await store.requestPasswordReset(identifier, recoveryEmail);
+      if (result?.needs_real_email) {
+        toast(result.message || "Esta cuenta todavía no tiene email de recuperación. Completalo en este formulario.");
+        $("#forgotRecoveryEmail")?.focus();
+        return;
+      }
+      if (result?.pending_approval) {
+        toast(result.message || "Email informado. Un supervisor o administrador debe aprobarlo antes de enviar el enlace.", "success");
+        return;
+      }
+      toast(result?.sent === false
+        ? "Si la cuenta existe y tiene email configurado, recibirá un enlace de recuperación."
+        : "Email de recuperación enviado. Revisá también la carpeta de spam.", "success");
+    } catch (error) {
+      toast(error.message || "No se pudo enviar el email de recuperación.");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function handleResetPassword(event) {
+    event.preventDefault();
+    const password = $("#newPassword").value;
+    const confirmation = $("#newPasswordConfirm").value;
+    const button = $("#resetPasswordSubmitBtn");
+    try {
+      if (password.length < 6) throw new Error("La contraseña debe tener al menos 6 caracteres.");
+      if (password !== confirmation) throw new Error("Las contraseñas no coinciden.");
+      button.disabled = true;
+      const session = await store.getSession();
+      if (!session?.user) throw new Error("El enlace de recuperación venció o no es válido. Solicitá uno nuevo.");
+      await store.updateCurrentPassword(password);
+      await store.signOut();
+      passwordRecoveryActive = false;
+      $("#newPassword").value = "";
+      $("#newPasswordConfirm").value = "";
+      const cleanUrl = `${window.location.origin}${window.location.pathname}`;
+      window.history.replaceState({}, document.title, cleanUrl);
+      setView("#loginView");
+      toast("Contraseña actualizada. Ya podés ingresar con la nueva contraseña.", "success");
+    } catch (error) {
+      toast(error.message || "No se pudo actualizar la contraseña.");
+    } finally {
+      button.disabled = false;
     }
   }
 
@@ -307,66 +1363,455 @@
       await renderOperatorView();
     } else {
       setView("#supervisorView");
+      const managementRoleLabel = $("#managementRoleLabel");
+      if (managementRoleLabel) {
+        managementRoleLabel.textContent = String(state.currentProfile?.role || "").toLowerCase() === "admin"
+          ? "Vista administrador"
+          : "Vista supervisor";
+      }
       $("#dashboardDate").value = todayISO();
       $("#assignmentValidFrom").value = todayISO();
+      if ($("#extraAssignmentDate")) $("#extraAssignmentDate").value = todayISO();
+      if ($("#specialAssignmentDate")) $("#specialAssignmentDate").value = todayISO();
+      if ($("#leaveStartDate")) $("#leaveStartDate").value = todayISO();
+      if ($("#leaveEndDate")) $("#leaveEndDate").value = todayISO();
+      syncPeriodControls("live", false);
       await renderSupervisorView();
     }
   }
 
   async function logout() {
+    if (operatorExitProtectionTimer) {
+      clearTimeout(operatorExitProtectionTimer);
+      operatorExitProtectionTimer = null;
+    }
     await store.signOut();
     state.currentUser = null;
     state.currentProfile = null;
+    state.recordsEvents = [];
+    state.recordsProfiles = [];
+    state.recordsSites = [];
+    state.recordsLoaded = false;
     setView("#loginView");
   }
 
   async function renderOperatorView() {
+    // Respaldo del cron: si quedó un turno vencido abierto, se cierra antes de mostrar la jornada siguiente.
+    await store.runAutomaticCheckouts?.();
+    if (typeof navigator === "undefined" || navigator.onLine !== false) {
+      try { await store.flushOfflineErrorQueue?.(); } catch (_) { /* no bloquear el fichaje por el monitor */ }
+    }
+    if (operatorExitProtectionTimer) {
+      clearTimeout(operatorExitProtectionTimer);
+      operatorExitProtectionTimer = null;
+    }
     const today = todayISO();
-    const [sites, events] = await Promise.all([store.listSites(), store.listEvents()]);
+    const [sites, events, assignments, overtimeAuthorizations, overtimeRequests, leaveRecords, flexibleModeRows] = await Promise.all([
+      store.listSites(),
+      store.listEvents(),
+      store.listAssignments(),
+      store.listOvertimeAuthorizations?.(addDaysISO(today, -1), today) || Promise.resolve([]),
+      store.listOvertimeRequests?.(addDaysISO(today, -1), today) || Promise.resolve([]),
+      store.listLeaveEvents?.() || Promise.resolve([]),
+      store.listFlexibleAttendanceModes?.() || Promise.resolve([])
+    ]);
     state.sites = sites;
     state.events = events;
+    state.assignments = assignments;
+    state.overtimeAuthorizations = overtimeAuthorizations || [];
+    state.overtimeRequests = overtimeRequests || [];
+    state.leaveRecords = leaveRecords || [];
+    state.flexibleModes = flexibleModes || [];
 
     $("#operatorTitle").textContent = `Hola, ${state.currentProfile.full_name}`;
 
-    const shiftId = `${state.currentProfile.id}__${today}`;
-    const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
-    const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
+    const leaveToday = leaveForOperatorDate(state.currentProfile.id, today);
+    const flexibleModes = flexibleModesForOperatorDate(state.currentProfile.id, today);
+    const hasFlexibleMode = flexibleModes.length > 0;
+    const activeToday = hasFlexibleMode ? [] : state.assignments.filter(a => a.operator_id === state.currentProfile.id && assignmentAppliesOnDate(a, today));
+    const suppressors = activeToday.filter(a => (a.assignment_type || "fixed") !== "fixed" && a.suppress_regular_assignments === true);
+    const todaysAssignments = leaveToday ? [] : activeToday
+      .filter(a => {
+        if ((a.assignment_type || "fixed") !== "fixed") return true;
+        return !suppressors.some(extra => extra.id !== a.id && (
+          String(extra.assignment_type || "") === "special" || assignmentsOverlap(extra, a)
+        ));
+      })
+      .sort((a, b) => String(a.scheduled_start).localeCompare(String(b.scheduled_start)));
+
+    // Un turno nocturno pertenece a la fecha en la que comenzó. Después de medianoche
+    // el operario debe seguir viendo ese mismo turno (shift_id con fecha de ayer) para
+    // poder registrar la salida. Antes solo se renderizaban asignaciones de "hoy", por
+    // lo que un 22:00-06:00 desaparecía a las 00:00 aunque la entrada estuviera abierta.
+    const yesterday = addDaysISO(today, -1);
+    const overnightCarryovers = state.assignments
+      .filter(a => a.operator_id === state.currentProfile.id
+        && assignmentAppliesOnDate(a, yesterday)
+        && String(a.scheduled_end || "") <= String(a.scheduled_start || ""))
+      .filter(a => {
+        const shiftId = `${a.id}__${yesterday}`;
+        const hasEntry = state.events.some(e => e.shift_id === shiftId && e.event_type === "present");
+        const hasExit = state.events.some(e => e.shift_id === shiftId && e.event_type === "checkout");
+        return hasEntry && !hasExit;
+      })
+      .sort((a, b) => String(a.scheduled_start).localeCompare(String(b.scheduled_start)));
+
+    const extraEvents = state.events.filter(e => {
+      if (e.operator_id !== state.currentProfile.id || e.assignment_id != null || e.entry_source !== "operator_extra") return false;
+      if (!["coverage", "reinforcement"].includes(String(e.work_type || ""))) return false;
+      if (e.shift_date === today) return true;
+      const yesterday = addDaysISO(today, -1);
+      if (e.shift_date !== yesterday) return false;
+      if (e.event_type !== "present") return state.events.some(x => x.shift_id === e.shift_id && x.event_type === "present" && !state.events.some(y => y.shift_id === e.shift_id && y.event_type === "checkout"));
+      return !state.events.some(x => x.shift_id === e.shift_id && x.event_type === "checkout");
+    });
+    const extraGroups = new Map();
+    extraEvents.forEach(event => {
+      if (!extraGroups.has(event.shift_id)) extraGroups.set(event.shift_id, []);
+      extraGroups.get(event.shift_id).push(event);
+    });
 
     const container = $("#operatorShiftContainer");
-    container.innerHTML = renderGpsOnlyCard(shiftId, entryEvent, exitEvent);
-    container.querySelector("[data-gps-checkin]")?.addEventListener("click", () => handleGpsCheckin(shiftId));
-    container.querySelector("[data-gps-checkout]")?.addEventListener("click", () => handleGpsCheckout(shiftId));
+    const cards = [];
+
+    if (leaveToday) {
+      cards.push(renderOperatorLeaveCard(leaveToday));
+    } else if (hasFlexibleMode) {
+      cards.push(renderFlexibleAttendanceCard(flexibleModes));
+    } else if (!todaysAssignments.length && !overnightCarryovers.length && !extraGroups.size) {
+      cards.push(`
+        <article class="operator-card operator-empty-card">
+          <p class="eyebrow">Sin asignación fija para hoy</p>
+          <h3>No tenés un servicio programado.</h3>
+          <p class="muted no-margin">Si te enviaron a cubrir una ausencia o a reforzar otro servicio, usá la opción extraordinaria de abajo para que el fichaje quede asociado al lugar correcto.</p>
+        </article>`);
+    }
+
+    overnightCarryovers.forEach(assignment => {
+      const shiftId = `${assignment.id}__${yesterday}`;
+      const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
+      const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
+      const assignedSite = byId(state.sites, assignment.site_id);
+      cards.push(renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite, assignment));
+    });
+
+    todaysAssignments.forEach(assignment => {
+      const shiftId = `${assignment.id}__${today}`;
+      const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
+      const exitEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
+      const dayOffEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "day_off");
+      const automaticAbsenceEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "absent" && e.recorded_via === "system_auto");
+      const assignedSite = byId(state.sites, assignment.site_id);
+      cards.push(renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite, assignment, dayOffEvent, automaticAbsenceEvent));
+    });
+
+    extraGroups.forEach((eventsForShift, shiftId) => {
+      const entryEvent = eventsForShift.find(e => e.event_type === "present");
+      const exitEvent = eventsForShift.find(e => e.event_type === "checkout");
+      if (!entryEvent) return;
+      const site = byId(state.sites, entryEvent.site_id);
+      cards.push(renderSelfReportedExtraCard(shiftId, entryEvent, exitEvent, site));
+    });
+
+    const hasOpenExtra = Array.from(extraGroups.values()).some(group => group.some(e => e.event_type === "present") && !group.some(e => e.event_type === "checkout"));
+    if (!leaveToday && !hasFlexibleMode) cards.push(renderExtraDutyStartCard(hasOpenExtra));
+    container.innerHTML = cards.join("");
+
+    overnightCarryovers.forEach(assignment => {
+      const shiftId = `${assignment.id}__${yesterday}`;
+      container.querySelector(`[data-gps-checkout="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckout(shiftId));
+      container.querySelector(`[data-request-overtime="${shiftId}"]`)?.addEventListener("click", () => openOperatorOvertimeRequestModal(shiftId, assignment));
+    });
+    todaysAssignments.forEach(assignment => {
+      const shiftId = `${assignment.id}__${today}`;
+      container.querySelector(`[data-gps-checkin="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckin(shiftId, assignment));
+      container.querySelector(`[data-gps-checkout="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckout(shiftId));
+      container.querySelector(`[data-request-overtime="${shiftId}"]`)?.addEventListener("click", () => openOperatorOvertimeRequestModal(shiftId, assignment));
+    });
+    extraGroups.forEach((eventsForShift, shiftId) => {
+      if (!eventsForShift.some(e => e.event_type === "present")) return;
+      container.querySelector(`[data-gps-checkout="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckout(shiftId));
+    });
+    container.querySelector("[data-extra-checkin]")?.addEventListener("click", handleExtraDutyCheckin);
+    container.querySelector("[data-flexible-checkin]")?.addEventListener("click", () => handleFlexibleCheckin(flexibleModes));
+    container.querySelectorAll("[data-flexible-checkout]").forEach(btn => btn.addEventListener("click", () => handleGpsCheckout(btn.dataset.flexibleCheckout)));
+    await renderOperatorConnectivity();
+    scheduleOperatorExitProtectionRefresh(container);
   }
 
-  function renderGpsOnlyCard(shiftId, entryEvent, exitEvent) {
+  function flexibleAttendanceGroupsForOperator(operatorId) {
+    const groups = new Map();
+    (state.events || []).filter(event => event.operator_id === operatorId && isFlexibleShiftId(event.shift_id)).forEach(event => {
+      if (!groups.has(event.shift_id)) groups.set(event.shift_id, []);
+      groups.get(event.shift_id).push(event);
+    });
+    return groups;
+  }
+
+  function renderFlexibleAttendanceCard(modes) {
+    const modeList = Array.isArray(modes) ? modes : (modes ? [modes] : []);
+    const sites = modeList.map(mode => ({ mode, site: byId(state.sites, mode?.site_id) })).filter(item => item.mode);
+    const today = todayISO();
+    const groups = flexibleAttendanceGroupsForOperator(state.currentProfile.id);
+    const groupRows = [...groups.entries()].map(([shiftId, events]) => {
+      const entry = latestEventFromList(events, "present");
+      const exit = latestEventFromList(events, "checkout");
+      return { shiftId, events, entry, exit, shiftDate: entry?.shift_date || exit?.shift_date || shiftDateFromId(shiftId) };
+    }).filter(row => row.entry);
+    const open = groupRows
+      .filter(row => !row.exit)
+      .sort((a, b) => new Date(eventTimestamp(b.entry) || 0) - new Date(eventTimestamp(a.entry) || 0))[0] || null;
+    const todays = groupRows
+      .filter(row => row.shiftDate === today)
+      .sort((a, b) => new Date(eventTimestamp(a.entry) || 0) - new Date(eventTimestamp(b.entry) || 0));
+    const openSite = open?.entry?.site_id ? byId(state.sites, open.entry.site_id) : null;
+    const defaultSite = sites[0]?.site || null;
+    const currentSite = openSite || defaultSite;
+    const hasConfiguredSites = sites.some(item => item.site);
+    const entryInfo = open?.entry ? `${formatDateTime(eventTimestamp(open.entry))} · ${gpsSummary(open.entry)}` : "Sin turno abierto";
+    const currentStatus = open ? "En servicio" : "Disponible para fichar";
+    const currentClass = open ? "status-ok" : "status-pending";
+    const siteOptions = sites.length > 1
+      ? `<label><span>Servicio a cubrir en este tramo</span><select id="flexibleSiteSelect">${sites.map(item => `<option value="${item.site?.id || item.mode.site_id}">${escapeHtml(item.site?.name || "Servicio sin configurar")}</option>`).join("")}</select></label>`
+      : ``;
+    const currentSiteMeta = openSite
+      ? `${escapeHtml(openSite.name)}${openSite.address ? ` · ${escapeHtml(openSite.address)}` : ""}`
+      : currentSite
+        ? `${escapeHtml(currentSite.name)}${currentSite.address ? ` · ${escapeHtml(currentSite.address)}` : ""}`
+        : "Sin servicio configurado";
+    const history = todays.length ? todays.map((row, index) => {
+      const rowSite = byId(state.sites, row.entry?.site_id || row.exit?.site_id);
+      return `
+      <div class="flexible-cycle-row">
+        <strong>Tramo ${index + 1}</strong>
+        <span>${escapeHtml(rowSite?.name || "Servicio flexible")}</span>
+        <span>Entrada ${escapeHtml(formatClock(eventTimestamp(row.entry)))}</span>
+        <span>${row.exit ? `Salida ${escapeHtml(formatClock(eventTimestamp(row.exit)))}` : "En curso"}</span>
+      </div>`;
+    }).join("") : `<p class="muted small no-margin">Todavía no hay tramos registrados hoy.</p>`;
+    const action = open ? `
+      <div class="checkin-box exit-box">
+        <div class="checkpoint-title-row"><strong>Registrar salida real</strong><span class="status-pill status-pending">Pendiente</span></div>
+        <label class="checkbox-row"><input type="checkbox" id="confirm-out-${escapeHtml(open.shiftId)}" /><span><strong>Confirmo que estoy saliendo del servicio</strong><br><span class="muted small">Se registra la hora y la ubicación GPS reales. Luego podés volver a fichar una nueva entrada si retomás la jornada.</span></span></label>
+        <div class="meta-item compact"><strong>Servicio actual</strong><span class="meta-subline">${currentSiteMeta}</span></div>
+        <label><span>Observación opcional</span><textarea id="notes-out-${escapeHtml(open.shiftId)}" placeholder="Ej. Finalizo este tramo / retomo más tarde..."></textarea></label>
+        <button class="secondary-btn big-action" data-flexible-checkout="${escapeHtml(open.shiftId)}" type="button">Registrar salida con GPS</button>
+      </div>` : `
+      <div class="checkin-box">
+        <div class="checkpoint-title-row"><strong>Registrar entrada real</strong><span class="status-pill status-pending">Sin horario fijo</span></div>
+        ${siteOptions}
+        <label class="checkbox-row"><input type="checkbox" id="confirm-flex-in" ${hasConfiguredSites ? "" : "disabled"} /><span><strong>Confirmo que estoy en el servicio</strong><br><span class="muted small">No se aplica horario programado, tardanza ni ausencia automática. Se guarda la hora y ubicación GPS reales.</span></span></label>
+        <label><span>Observación opcional</span><textarea id="notes-flex-in" placeholder="Ej. Inicio primer tramo / regreso al servicio..." ${hasConfiguredSites ? "" : "disabled"}></textarea></label>
+        <button class="primary-btn big-action" data-flexible-checkin type="button" ${hasConfiguredSites ? "" : "disabled"}>Registrar entrada con GPS</button>
+      </div>`;
+
+    const servicesSummary = sites.length
+      ? sites.map(item => escapeHtml(item.site?.name || "Servicio sin configurar")).join(" · ")
+      : "Sin servicio flexible configurado";
+
+    return `
+      <article class="operator-card main-checkin flexible-attendance-card">
+        <div class="card-title-row">
+          <div>
+            <p class="eyebrow">Modalidad excepcional</p>
+            <div class="extra-duty-meta"><span class="extra-duty-badge flexible">Jornada flexible</span></div>
+            <h3 class="service-title">${escapeHtml(openSite?.name || defaultSite?.name || "Servicios flexibles")}</h3>
+            <p class="muted">${escapeHtml(openSite?.address || defaultSite?.address || "Pedile al supervisor que configure al menos un servicio para tu jornada flexible.")}</p>
+          </div>
+          <span class="status-pill ${currentClass}">${currentStatus}</span>
+        </div>
+        <div class="flexible-attendance-notice">
+          <strong>Tu jornada no tiene un horario fijo de entrada o salida.</strong>
+          <span>Fichá cada entrada y salida real. Si fraccionás la jornada, podés repetir el ciclo todas las veces que corresponda durante el día.</span>
+        </div>
+        <div class="meta-grid">
+          <div class="meta-item"><strong>Estado actual</strong><span class="meta-subline">${escapeHtml(entryInfo)}</span></div>
+          <div class="meta-item"><strong>Servicios habilitados</strong><span class="meta-subline">${servicesSummary}</span></div>
+          <div class="meta-item"><strong>Control</strong><span class="meta-subline">GPS y hora real · sin control de tardanza</span></div>
+        </div>
+        ${action}
+        <div class="flexible-cycles-box"><strong>Marcaciones de hoy</strong>${history}</div>
+      </article>`;
+  }
+
+  async function handleFlexibleCheckin(modes) {
+    const modeList = Array.isArray(modes) ? modes : (modes ? [modes] : []);
+    const select = $("#flexibleSiteSelect");
+    const selectedSiteId = select?.value || modeList[0]?.site_id || null;
+    const selectedMode = modeList.find(mode => mode.site_id === selectedSiteId) || modeList[0] || null;
+    if (!selectedMode?.site_id) return operatorProblem("No hay un servicio configurado para tu jornada flexible.", { action: "entrada_flexible", category: "configuration", severity: "warning" });
+    const confirm = $("#confirm-flex-in");
+    if (!confirm?.checked) return operatorProblem("Confirmá que estás en el servicio antes de registrar la entrada.", { action: "entrada_flexible", category: "usage", severity: "warning", siteId: selectedMode?.site_id });
+    const groups = flexibleAttendanceGroupsForOperator(state.currentProfile.id);
+    const hasOpen = [...groups.values()].some(events => latestEventFromList(events, "present") && !latestEventFromList(events, "checkout"));
+    if (hasOpen) return operatorProblem("Ya tenés una entrada abierta. Registrá la salida antes de iniciar otro tramo.", { action: "entrada_flexible", category: "usage", severity: "warning", siteId: selectedMode?.site_id });
+    try {
+      const site = byId(state.sites, selectedMode.site_id);
+      if (!site) throw new Error("No se encontró el servicio configurado para tu jornada flexible.");
+      toast("Solicitando GPS de alta precisión...");
+      const position = await getPosition();
+      const { latitude, longitude, accuracy } = position.coords;
+      const gpsMoment = new Date(position.timestamp || Date.now());
+      const distance = haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng));
+      const isInside = distance <= Number(site.gps_radius_m || 120);
+      const shiftDate = dateISOInTimeZone(gpsMoment);
+      const shiftId = `flex__${state.currentProfile.id}__${shiftDate}__${Date.now()}`;
+      const notes = $("#notes-flex-in")?.value.trim() || "";
+      await store.createEvent({
+        shift_id: shiftId,
+        assignment_id: null,
+        shift_date: shiftDate,
+        operator_id: state.currentProfile.id,
+        site_id: site.id,
+        event_type: "present",
+        observed_status: "present",
+        work_type: "regular",
+        entry_source: "assignment",
+        validation_status: "confirmed",
+        notes: `Jornada flexible · entrada real en ${site.name}.${notes ? ` ${notes}` : ""}${isInside ? "" : " · Entrada fuera de radio."}`,
+        lat: latitude,
+        lng: longitude,
+        gps_accuracy_m: accuracy,
+        distance_m: Math.round(distance),
+        is_inside_site: isInside,
+        client_time: gpsMoment.toISOString(),
+        recorded_via: "operator",
+        recorded_by: state.currentProfile.id
+      });
+      toast(isInside ? "Entrada de jornada flexible registrada." : "Entrada registrada fuera del radio del servicio.", isInside ? "success" : undefined);
+      await renderOperatorView();
+    } catch (error) {
+      operatorException(error, "No se pudo registrar la entrada.", { action: "entrada_flexible", siteId: selectedMode?.site_id });
+    }
+  }
+
+  function renderOperatorLeaveCard(leave) {
+    const dateLabel = formatISODate(todayISO(), { weekday: "long", day: "numeric", month: "long" });
+    return `
+      <article class="operator-card operator-leave-card">
+        <div class="card-title-row">
+          <div>
+            <p class="eyebrow">Hoy · ${escapeHtml(dateLabel)}</p>
+            <h3>${escapeHtml(leaveTypeLabel(leave.leave_type))}</h3>
+            <p class="muted no-margin">Período: ${escapeHtml(leavePeriodLabel(leave))}</p>
+          </div>
+          <span class="status-pill status-leave">${escapeHtml(leaveTypeShortLabel(leave.leave_type))}</span>
+        </div>
+        <div class="leave-operator-message">
+          <strong>No tenés que registrar entrada ni salida durante esta novedad.</strong>
+          <span>La ausencia está registrada como justificada y no se genera una ausencia automática.</span>
+          ${leave.reference ? `<small>Referencia: ${escapeHtml(leave.reference)}</small>` : ""}
+          ${leave.notes ? `<small>${escapeHtml(leave.notes)}</small>` : ""}
+        </div>
+      </article>`;
+  }
+
+  function renderGpsOnlyCard(shiftId, entryEvent, exitEvent, assignedSite = null, assignment = null, dayOffEvent = null, automaticAbsenceEvent = null) {
+    if (dayOffEvent && !entryEvent && !exitEvent) {
+      const dateLabel = formatISODate(todayISO(), { weekday: "long", day: "numeric", month: "long" });
+      return `
+        <article class="operator-card operator-dayoff-card">
+          <div class="card-title-row">
+            <div>
+              <p class="eyebrow">Hoy · ${escapeHtml(dateLabel)}</p>
+              <h3 class="service-title">${escapeHtml(assignedSite?.name || "Servicio")}</h3>
+              <p class="muted">${escapeHtml(assignedSite?.address || "")}</p>
+            </div>
+            <span class="status-pill status-dayoff">Franco</span>
+          </div>
+          <div class="dayoff-operator-message">
+            <strong>Hoy figurás de franco.</strong>
+            <span>No tenés que registrar entrada ni salida para esta asignación.</span>
+            ${dayOffEvent.notes ? `<small>${escapeHtml(dayOffEvent.notes)}</small>` : ""}
+          </div>
+        </article>`;
+    }
     const checkedIn = Boolean(entryEvent);
     const checkedOut = Boolean(exitEvent);
     const detectedSite = entryEvent ? byId(state.sites, entryEvent.site_id) : null;
+    const displaySite = detectedSite || assignedSite;
+    const overtimeAuthorization = overtimeAuthorizationForShift(shiftId);
+    const overtimeRequest = overtimeRequestForShift(shiftId);
+    const overtimeRequestPending = isPendingOvertimeRequest(overtimeRequest);
+    const shiftDate = entryEvent?.shift_date || shiftDateFromId(shiftId, todayISO());
+    const scheduleShift = assignment?.scheduled_end ? {
+      shift_date: shiftDate,
+      scheduled_start: assignment.scheduled_start,
+      scheduled_end: assignment.scheduled_end
+    } : null;
+    const scheduledEnd = scheduleShift ? getScheduledDateTime(scheduleShift, "scheduled_end") : null;
+    const overtimeMinutes = checkedOut && scheduleShift ? overtimeMinutesForShift(scheduleShift, exitEvent) : 0;
+    const overtimeNotice = checkedIn && !checkedOut && scheduleShift
+      ? overtimeAuthorization
+        ? `<div class="overtime-approved-notice"><strong>Horas extra autorizadas.</strong><br>Tu supervisor autorizó continuar hasta las <strong>${escapeHtml(formatTimeInBusinessZone(overtimeAuthorization.authorized_until))}</strong>${overtimeAuthorization.approved_by_name ? ` · aprobado por ${escapeHtml(overtimeAuthorization.approved_by_name)}` : ""}. Podés registrar la salida normalmente cuando termines. El cierre automático queda postergado hasta 45 minutos después del horario autorizado.</div>`
+        : overtimeRequestPending
+          ? `<div class="overtime-pending-notice"><strong>Hora extra solicitada · pendiente de aprobación.</strong><br>Solicitaste continuar hasta las <strong>${escapeHtml(formatTimeInBusinessZone(overtimeRequest.requested_until))}</strong>. Podés seguir trabajando y fichar tu salida real. <strong>Esto no significa que la hora extra esté aprobada:</strong> el supervisor o administrador debe revisarla. Mientras esté pendiente, el cierre automático se posterga hasta 45 minutos después del horario solicitado.</div>`
+          : overtimeRequest?.status === "rejected"
+            ? `<div class="inline-warning overtime-warning"><strong>La solicitud de hora extra fue rechazada.</strong><br>Si realmente necesitás extender la jornada por una cobertura o una necesidad especial, avisá al supervisor y volvé a solicitarla. Una demora normal de algunos minutos al terminar no requiere pedir hora extra.</div>`
+            : `<div class="overtime-guidance-notice"><strong>Hora extra solo para extensiones excepcionales.</strong><br>Solicitala si te pidieron quedarte por una ausencia, una cobertura o una necesidad especial del cliente. <strong>Si simplemente terminás unos minutos después de tu horario, registrá la salida normalmente: no hace falta solicitar hora extra.</strong></div>`
+      : checkedOut && overtimeMinutes > 0
+        ? overtimeAuthorization
+          ? `<div class="overtime-approved-notice overtime-finished-notice"><strong>Salida registrada con ${escapeHtml(String(overtimeMinutes))} min posteriores al horario programado.</strong> La extensión fue autorizada hasta las ${escapeHtml(formatTimeInBusinessZone(overtimeAuthorization.authorized_until))}.</div>`
+          : overtimeRequestPending
+            ? `<div class="overtime-pending-notice overtime-finished-notice"><strong>Salida registrada con ${escapeHtml(String(overtimeMinutes))} min posteriores al horario programado.</strong> La solicitud de hora extra sigue pendiente de aprobación del supervisor.</div>`
+            : `<div class="exit-delay-notice overtime-finished-notice"><strong>Salida registrada ${escapeHtml(String(overtimeMinutes))} min después del horario programado.</strong><br>Se registra la diferencia horaria, pero no se considera una solicitud de horas extra.</div>`
+        : "";
 
     const entryDisabled = checkedIn ? "disabled" : "";
-    const exitDisabled = !checkedIn || checkedOut ? "disabled" : "";
+    const exitProtection = checkedIn && !checkedOut ? exitProtectionState(entryEvent) : { active: false, remainingMs: 0, unlockAt: null };
+    const exitProtected = exitProtection.active;
+    const exitDisabled = !checkedIn || checkedOut || exitProtected ? "disabled" : "";
+    const exitUnlockAtMs = exitProtection.unlockAt?.getTime?.() || null;
+    const exitProtectionNotice = exitProtected
+      ? `<div class="inline-warning" data-exit-unlock-at="${exitUnlockAtMs}"><strong>Protección contra salida accidental activa.</strong><br>La salida se habilita a las ${escapeHtml(exitProtection.unlockAt.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: APP_TIME_ZONE }))} (faltan ${escapeHtml(formatExitProtectionRemaining(exitProtection.remainingMs))}). Si realmente necesitás cerrar el turno antes, avisá al supervisor para una salida manual.</div>`
+      : "";
 
     const entryInfo = entryEvent
-      ? `${formatDateTime(entryEvent.created_at)} · ${gpsSummary(entryEvent)}`
+      ? `${formatDateTime(entryEvent.client_time || entryEvent.created_at)} · ${["supervisor_manual", "system_auto"].includes(entryEvent.recorded_via) ? recordedViaLabel(entryEvent) : gpsSummary(entryEvent)}`
       : "Sin entrada registrada";
+    const autoClosed = exitEvent?.recorded_via === "system_auto";
     const exitInfo = exitEvent
-      ? `${formatDateTime(exitEvent.created_at)} · ${gpsSummary(exitEvent)}`
+      ? `${formatDateTime(exitEvent.client_time || exitEvent.created_at)} · ${["supervisor_manual", "system_auto"].includes(exitEvent.recorded_via) ? recordedViaLabel(exitEvent) : gpsSummary(exitEvent)}${autoClosed && exitEvent.created_at ? ` · procesado ${formatDateTime(exitEvent.created_at)}` : ""}`
       : "Sin salida registrada";
+    const autoCheckoutNotice = autoClosed
+      ? `<div class="inline-warning auto-checkout-notice"><strong>Este turno fue cerrado automáticamente.</strong><br>El operario no registró la salida. Para no dejar el turno abierto, el sistema imputó la salida ${overtimeAuthorization ? `al último horario de horas extra autorizado (${escapeHtml(formatTimeInBusinessZone(overtimeAuthorization.authorized_until))})` : overtimeRequestPending ? `al horario solicitado como hora extra pendiente (${escapeHtml(formatTimeInBusinessZone(overtimeRequest.requested_until))})` : "al horario programado"} y dejó registrada la hora real en que ejecutó el cierre.</div>`
+      : "";
+
+    const canCheckInAfterAutomaticAbsence = Boolean(automaticAbsenceEvent && !checkedIn && !checkedOut);
+    const automaticAbsenceNotice = canCheckInAfterAutomaticAbsence
+      ? `<div class="inline-warning late-after-absence-notice"><strong>Ausencia automática registrada.</strong><br>Igualmente podés registrar la entrada con GPS. Si fichás ahora, el supervisor verá <strong>Entrada tarde · fuera de horario</strong> con la hora real de llegada. La ausencia automática queda en Registros como antecedente de auditoría.</div>`
+      : "";
 
     let statusLabel, statusClass;
-    if (checkedOut) { statusLabel = "Jornada completada"; statusClass = "status-present"; }
+    if (autoClosed) { statusLabel = "Cerrado automáticamente"; statusClass = "status-auto"; }
+    else if (checkedOut) { statusLabel = "Servicio completado"; statusClass = "status-present"; }
     else if (checkedIn) { statusLabel = "En servicio"; statusClass = "status-ok"; }
+    else if (canCheckInAfterAutomaticAbsence) { statusLabel = "Ausencia automática · podés fichar"; statusClass = "status-absent"; }
     else { statusLabel = "Sin marcar"; statusClass = "status-pending"; }
 
-    const dateLabel = new Date().toLocaleDateString("es-AR", { weekday: "long", day: "numeric", month: "long" });
+    const dateLabel = formatISODate(shiftDate, { weekday: "long", day: "numeric", month: "long" });
+    const isOvernightCarryover = shiftDate !== todayISO()
+      && assignment?.scheduled_start
+      && assignment?.scheduled_end
+      && String(assignment.scheduled_end) <= String(assignment.scheduled_start)
+      && checkedIn
+      && !checkedOut;
+    const dayContextLabel = isOvernightCarryover ? "Turno nocturno iniciado ayer" : "Hoy";
+    const assignmentType = assignment?.assignment_type || "fixed";
+    const isExtraAssignment = assignmentType !== "fixed";
+    const coveredOperator = assignment?.covered_operator_id ? byId(state.profiles, assignment.covered_operator_id) : null;
+    const assignmentMeta = isExtraAssignment
+      ? `<div class="extra-duty-meta"><span class="extra-duty-badge ${assignmentType}">${escapeHtml(assignmentTypeLabel(assignmentType))}</span>${coveredOperator ? `<span class="muted small">Cubre a ${escapeHtml(coveredOperator.full_name || "operario")}</span>` : ""}</div>`
+      : "";
 
     return `
       <article class="operator-card main-checkin">
         <div class="card-title-row">
           <div>
-            <p class="eyebrow">Hoy · ${escapeHtml(dateLabel)}</p>
-            <h3 class="service-title">${detectedSite ? escapeHtml(detectedSite.name) : "Detectando servicio por GPS..."}</h3>
-            <p class="muted">${detectedSite ? escapeHtml(detectedSite.address || "") : "El servicio se detecta automáticamente al registrar entrada."}</p>
+            <p class="eyebrow">${escapeHtml(dayContextLabel)} · ${escapeHtml(dateLabel)}</p>
+            ${assignmentMeta}
+            <h3 class="service-title">${displaySite ? escapeHtml(displaySite.name) : "Sin servicio asignado para hoy"}</h3>
+            <p class="muted">${displaySite ? escapeHtml(displaySite.address || "") : "Contactá al supervisor si creés que hay un error."}</p>
           </div>
           <span class="status-pill ${statusClass}">${statusLabel}</span>
         </div>
@@ -379,13 +1824,14 @@
         <div class="checkin-box">
           <div class="checkpoint-title-row">
             <strong>Entrada al servicio</strong>
-            <span class="status-pill ${checkedIn ? "status-present" : "status-pending"}">${checkedIn ? "Registrada" : "Pendiente"}</span>
+            <span class="status-pill ${checkedIn ? "status-present" : canCheckInAfterAutomaticAbsence ? "status-absent" : "status-pending"}">${checkedIn ? "Registrada" : canCheckInAfterAutomaticAbsence ? "Ausente automático · fichaje habilitado" : "Pendiente"}</span>
           </div>
+          ${automaticAbsenceNotice}
           <label class="checkbox-row">
             <input type="checkbox" id="confirm-in-${escapeHtml(shiftId)}" ${entryDisabled} />
             <span>
               <strong>Confirmo que estoy en el servicio</strong><br />
-              <span class="muted small">El GPS detecta automáticamente en qué servicio estás al registrar entrada.</span>
+              <span class="muted small">El GPS valida tu ubicación respecto de este servicio. Si tenés más de un servicio hoy, registrá la entrada desde la tarjeta correspondiente.</span>
             </span>
           </label>
           <label>
@@ -398,13 +1844,17 @@
         <div class="checkin-box exit-box">
           <div class="checkpoint-title-row">
             <strong>Salida del servicio</strong>
-            <span class="status-pill ${checkedOut ? "status-present" : "status-pending"}">${checkedOut ? "Registrada" : "Pendiente"}</span>
+            <span class="status-pill ${autoClosed ? "status-auto" : checkedOut ? "status-present" : exitProtected ? "status-pending" : "status-pending"}">${autoClosed ? "Cierre automático" : checkedOut ? "Registrada" : exitProtected ? "Bloqueada temporalmente" : "Pendiente"}</span>
           </div>
+          ${autoCheckoutNotice}
+          ${overtimeNotice}
+          ${checkedIn && !checkedOut && scheduleShift && !overtimeAuthorization ? `<button class="overtime-request-btn" data-request-overtime="${escapeHtml(shiftId)}" type="button">${overtimeRequestPending ? "Editar solicitud de hora extra" : "Solicitar hora extra"}</button>` : ""}
+          ${exitProtectionNotice}
           <label class="checkbox-row">
             <input type="checkbox" id="confirm-out-${escapeHtml(shiftId)}" ${exitDisabled} />
             <span>
               <strong>Confirmo que estoy saliendo del servicio</strong><br />
-              <span class="muted small">${checkedOut ? "La salida ya fue registrada." : !checkedIn ? "Primero registrá la entrada." : "Se registra hora y ubicación GPS de salida."}</span>
+              <span class="muted small">${checkedOut ? "La salida ya fue registrada." : !checkedIn ? "Primero registrá la entrada." : exitProtected ? `La salida se habilita ${EXIT_PROTECTION_MINUTES} minutos después de registrar la entrada para evitar una doble marcación accidental.` : "Se registra hora y ubicación GPS de salida."}</span>
             </span>
           </label>
           <label>
@@ -416,6 +1866,123 @@
       </article>`;
   }
 
+  function renderSelfReportedExtraCard(shiftId, entryEvent, exitEvent, site) {
+    const checkedOut = Boolean(exitEvent);
+    const type = entryEvent.work_type || "coverage";
+    const validation = entryEvent.validation_status || "pending";
+    const validationClass = validation === "confirmed" ? "status-present" : validation === "rejected" ? "status-rejected" : "status-extra";
+    const exitDisabled = checkedOut ? "disabled" : "";
+    return `
+      <article class="operator-card main-checkin extra-self-card">
+        <div class="card-title-row">
+          <div>
+            <p class="eyebrow">Trabajo extraordinario declarado por vos</p>
+            <div class="extra-duty-meta">
+              <span class="extra-duty-badge ${escapeHtml(type)}">${escapeHtml(workTypeLabel(type))}</span>
+              <span class="status-pill ${validationClass}">${escapeHtml(validationLabel(validation))}</span>
+            </div>
+            <h3 class="service-title">${escapeHtml(site?.name || "Servicio")}</h3>
+            <p class="muted">${escapeHtml(site?.address || "")}</p>
+          </div>
+          <span class="status-pill ${checkedOut ? "status-present" : "status-ok"}">${checkedOut ? "Servicio completado" : "En servicio"}</span>
+        </div>
+        <div class="meta-grid">
+          <div class="meta-item"><strong>Entrada</strong><span class="meta-subline">${formatDateTime(entryEvent.client_time || entryEvent.created_at)} · ${gpsSummary(entryEvent)}</span></div>
+          <div class="meta-item"><strong>Salida</strong><span class="meta-subline">${exitEvent ? `${formatDateTime(exitEvent.client_time || exitEvent.created_at)} · ${gpsSummary(exitEvent)}` : "Sin salida registrada"}</span></div>
+        </div>
+        <div class="checkin-box exit-box">
+          <div class="checkpoint-title-row">
+            <strong>Salida del servicio</strong>
+            <span class="status-pill ${checkedOut ? "status-present" : "status-pending"}">${checkedOut ? "Registrada" : "Pendiente"}</span>
+          </div>
+          <label class="checkbox-row">
+            <input type="checkbox" id="confirm-out-${escapeHtml(shiftId)}" ${exitDisabled} />
+            <span><strong>Confirmo que estoy saliendo del servicio</strong><br><span class="muted small">La salida queda vinculada a esta cobertura/refuerzo.</span></span>
+          </label>
+          <label><span>Observación opcional</span><textarea id="notes-out-${escapeHtml(shiftId)}" ${exitDisabled} placeholder="Ej. Finalizó normal..."></textarea></label>
+          <button class="secondary-btn big-action" data-gps-checkout="${escapeHtml(shiftId)}" type="button" ${exitDisabled}>Registrar salida con GPS</button>
+        </div>
+      </article>`;
+  }
+
+  function renderExtraDutyStartCard(hasOpenExtra = false) {
+    const options = state.sites.map(site => `<option value="${site.id}">${escapeHtml(site.name)}${site.address ? ` · ${escapeHtml(site.address)}` : ""}</option>`).join("");
+    return `
+      <article class="operator-card extra-duty-start-card">
+        <div class="card-title-row">
+          <div>
+            <p class="eyebrow">Situación excepcional</p>
+            <h3>¿Te enviaron a cubrir o reforzar otro servicio?</h3>
+            <p class="muted small no-margin">Usá esta opción solo si el supervisor todavía no cargó la tarea extraordinaria. El registro queda identificado como declarado por el operario y pendiente de validación.</p>
+          </div>
+          <span class="status-pill status-extra">Extraordinario</span>
+        </div>
+        ${hasOpenExtra ? `<div class="inline-warning">Ya tenés una cobertura/refuerzo extraordinario abierto. Registrá su salida antes de iniciar otro.</div>` : ""}
+        <div class="extra-duty-operator-grid">
+          <label><span>Tipo</span><select id="operatorExtraType" ${hasOpenExtra ? "disabled" : ""}><option value="coverage">Cobertura por ausencia</option><option value="reinforcement">Refuerzo</option></select></label>
+          <label><span>Servicio</span><select id="operatorExtraSite" ${hasOpenExtra ? "disabled" : ""}>${options}</select></label>
+          <label class="extra-notes-field"><span>Motivo / observación</span><input id="operatorExtraNotes" ${hasOpenExtra ? "disabled" : ""} placeholder="Ej. Me envió supervisor Juan para cubrir una ausencia" /></label>
+        </div>
+        <label class="checkbox-row">
+          <input type="checkbox" id="operatorExtraConfirm" ${hasOpenExtra ? "disabled" : ""} />
+          <span><strong>Confirmo que fui enviado a este servicio</strong><br><span class="muted small">Se registrarán hora, GPS, servicio y tipo de trabajo.</span></span>
+        </label>
+        <button class="primary-btn big-action" data-extra-checkin type="button" ${hasOpenExtra || !state.sites.length ? "disabled" : ""}>Registrar entrada extraordinaria</button>
+      </article>`;
+  }
+
+  async function handleExtraDutyCheckin() {
+    const siteId = $("#operatorExtraSite")?.value;
+    const type = $("#operatorExtraType")?.value || "coverage";
+    const notes = $("#operatorExtraNotes")?.value || "";
+    const confirm = $("#operatorExtraConfirm");
+    if (!confirm?.checked) return operatorProblem("Confirmá que fuiste enviado a ese servicio.", { action: "entrada_extraordinaria", category: "usage", severity: "warning", siteId });
+    const site = byId(state.sites, siteId);
+    if (!site) return operatorProblem("Seleccioná el servicio al que fuiste enviado.", { action: "entrada_extraordinaria", category: "usage", severity: "warning" });
+
+    const earliestOpenExtraDate = addDaysISO(todayISO(), -1);
+    const existingOpen = state.events.some(e => e.operator_id === state.currentProfile.id && e.shift_date >= earliestOpenExtraDate && e.assignment_id == null && e.entry_source === "operator_extra" && e.event_type === "present" && !state.events.some(x => x.shift_id === e.shift_id && x.event_type === "checkout"));
+    if (existingOpen) return operatorProblem("Ya tenés una cobertura/refuerzo extraordinario abierto. Registrá primero la salida.", { action: "entrada_extraordinaria", category: "usage", severity: "warning", siteId });
+
+    try {
+      toast("Solicitando GPS de alta precisión...");
+      const position = await getPosition();
+      const { latitude, longitude, accuracy } = position.coords;
+      const gpsMoment = new Date(position.timestamp || Date.now());
+      const shiftDate = dateISOInTimeZone(gpsMoment);
+      const distance = haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng));
+      const isInside = distance <= Number(site.gps_radius_m || 120);
+      const shiftId = `extra__${state.currentProfile.id}__${shiftDate}__${Date.now()}`;
+      const savedEvent = await store.createEvent({
+        shift_id: shiftId,
+        assignment_id: null,
+        shift_date: shiftDate,
+        operator_id: state.currentProfile.id,
+        site_id: site.id,
+        event_type: "present",
+        observed_status: "present",
+        work_type: type,
+        entry_source: "operator_extra",
+        validation_status: "pending",
+        notes: `Trabajo extraordinario declarado por operario. ${notes}${isInside ? "" : " · Entrada fuera de radio."}`.trim(),
+        lat: latitude,
+        lng: longitude,
+        gps_accuracy_m: accuracy,
+        distance_m: distance,
+        is_inside_site: isInside,
+        client_time: gpsMoment.toISOString(),
+        recorded_via: "operator",
+        recorded_by: state.currentProfile?.id || null
+      });
+      toast(savedEvent?.__offline_pending
+        ? `${workTypeLabel(type)} guardada sin internet. Quedó registrada en este teléfono y se enviará cuando vuelva la conexión.`
+        : `${workTypeLabel(type)} registrada en ${site.name}. Quedó pendiente de validación del supervisor.`, "success");
+      await renderOperatorView();
+    } catch (error) {
+      operatorException(error, "No se pudo registrar el trabajo extraordinario.", { action: "entrada_extraordinaria", siteId });
+    }
+  }
+
   function getPosition() {
     return new Promise((resolve, reject) => {
       if (!navigator.geolocation) {
@@ -424,124 +1991,195 @@
       }
       navigator.geolocation.getCurrentPosition(resolve, reject, {
         enableHighAccuracy: true,
-        timeout: 15000,
+        timeout: 30000,
         maximumAge: 0
       });
     });
   }
 
-  async function handleGpsCheckin(shiftId) {
-    const today = todayISO();
+  async function handleGpsCheckin(shiftId, assignment = null) {
+    const shiftDate = shiftDateFromId(shiftId, todayISO());
     const existingEntry = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
     const checkbox = document.getElementById(`confirm-in-${shiftId}`);
     const notes = document.getElementById(`notes-in-${shiftId}`)?.value || "";
 
-    if (existingEntry) return toast("La entrada ya fue registrada para hoy.");
-    if (!checkbox?.checked) return toast("Primero marcá el checkbox de entrada.");
+    if (existingEntry) return operatorProblem("La entrada ya fue registrada para hoy.", { action: "entrada", category: "usage", severity: "warning", shiftId, siteId: assignment?.site_id });
+    if (!checkbox?.checked) return operatorProblem("Primero marcá el checkbox de entrada.", { action: "entrada", category: "usage", severity: "warning", shiftId, siteId: assignment?.site_id });
 
     try {
       toast("Solicitando GPS de alta precisión...");
       const position = await getPosition();
       const { latitude, longitude, accuracy } = position.coords;
+      const gpsMoment = new Date(position.timestamp || Date.now());
 
-      // Find nearest site (within radius) and absolute nearest (for outside-radius recording)
-      let nearestInside = null;
-      let nearestInsideDist = Infinity;
-      let absoluteNearest = null;
-      let absoluteNearestDist = Infinity;
+      const assignedSite = assignment ? byId(state.sites, assignment.site_id) : null;
 
-      for (const site of state.sites) {
-        const dist = haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng));
-        if (dist < absoluteNearestDist) {
-          absoluteNearest = site;
-          absoluteNearestDist = dist;
-        }
-        if (dist <= Number(site.gps_radius_m || 120) && dist < nearestInsideDist) {
-          nearestInside = site;
-          nearestInsideDist = dist;
-        }
+      if (!assignedSite) {
+        const savedEvent = await store.createEvent({
+          shift_id: shiftId,
+          assignment_id: null,
+          shift_date: shiftDate,
+          operator_id: state.currentProfile.id,
+          site_id: null,
+          event_type: "present",
+          observed_status: "present",
+          work_type: "regular",
+          entry_source: "operator_extra",
+          validation_status: "pending",
+          notes: `Sin asignación para hoy. ${notes}`.trim(),
+          lat: latitude,
+          lng: longitude,
+          gps_accuracy_m: accuracy,
+          distance_m: null,
+          is_inside_site: null,
+          client_time: gpsMoment.toISOString(),
+          recorded_via: "operator",
+          recorded_by: state.currentProfile?.id || null
+        });
+        toast(savedEvent?.__offline_pending
+          ? "Entrada guardada sin internet. Se sincronizará cuando vuelva la conexión. Avisá al supervisor por otro medio si corresponde."
+          : "Entrada registrada. No tenés servicio asignado para hoy. Avisá al supervisor.", "success");
+        await renderOperatorView();
+        return;
       }
 
-      const isInside = Boolean(nearestInside);
-      const usedSite = nearestInside || absoluteNearest;
-      const usedDistance = nearestInside ? nearestInsideDist : absoluteNearestDist;
+      const distance = haversineMeters(latitude, longitude, Number(assignedSite.lat), Number(assignedSite.lng));
+      const isInside = distance <= Number(assignedSite.gps_radius_m || 120);
+      const entryShift = {
+        shift_date: shiftDate,
+        scheduled_start: assignment.scheduled_start,
+        scheduled_end: assignment.scheduled_end,
+        grace_minutes: assignment.grace_minutes ?? 10,
+        absence_after_minutes: assignment.absence_after_minutes ?? 30
+      };
+      const entryTiming = getEntryTimingInfo(entryShift, { client_time: gpsMoment.toISOString(), observed_status: "present" });
+      const timingNote = entryTiming.isAfterAbsenceThreshold
+        ? `Ingreso fuera de horario: +${entryTiming.lateMinutes} min sobre el horario previsto; umbral de ausencia +${entryTiming.absenceAfterMinutes} min.`
+        : entryTiming.isLate ? `Ingreso tarde: +${entryTiming.lateMinutes} min sobre el horario previsto.` : "";
+      const entryNotes = [isInside ? notes : `Fuera de radio. ${notes}`.trim(), timingNote].filter(Boolean).join(" · ");
 
-      await store.createEvent({
+      const savedEvent = await store.createEvent({
         shift_id: shiftId,
-        assignment_id: null,
-        shift_date: today,
+        assignment_id: assignment.id,
+        shift_date: shiftDate,
         operator_id: state.currentProfile.id,
-        site_id: usedSite?.id || null,
+        site_id: assignedSite.id,
         event_type: "present",
-        observed_status: isInside ? "present" : "present",
-        notes: isInside ? notes : `Fuera de radio. ${notes}`.trim(),
-        lat: latitude,
-        lng: longitude,
-        gps_accuracy_m: accuracy,
-        distance_m: usedDistance,
-        is_inside_site: isInside,
-        client_time: new Date().toISOString()
-      });
-
-      if (isInside) {
-        toast(`Entrada registrada en ${usedSite.name} (${Math.round(usedDistance)} m).`);
-      } else {
-        toast(`Entrada registrada fuera de radio. Servicio más cercano: ${usedSite?.name || "—"} (${Math.round(usedDistance)} m). Avisá al supervisor.`);
-      }
-      await renderOperatorView();
-    } catch (error) {
-      toast(error.message || "No se pudo obtener ubicación GPS.");
-    }
-  }
-
-  async function handleGpsCheckout(shiftId) {
-    const today = todayISO();
-    const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
-    const existingExit = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
-    const checkbox = document.getElementById(`confirm-out-${shiftId}`);
-    const notes = document.getElementById(`notes-out-${shiftId}`)?.value || "";
-
-    if (!entryEvent) return toast("Primero tenés que registrar la entrada.");
-    if (existingExit) return toast("La salida ya fue registrada para hoy.");
-    if (!checkbox?.checked) return toast("Primero marcá el checkbox de salida.");
-
-    try {
-      toast("Solicitando GPS de alta precisión...");
-      const position = await getPosition();
-      const { latitude, longitude, accuracy } = position.coords;
-
-      // Use same site from entry event
-      const site = byId(state.sites, entryEvent.site_id);
-      const distance = site ? haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng)) : null;
-      const isInside = site ? distance <= Number(site.gps_radius_m || 120) : null;
-
-      await store.createEvent({
-        shift_id: shiftId,
-        assignment_id: null,
-        shift_date: today,
-        operator_id: state.currentProfile.id,
-        site_id: entryEvent.site_id,
-        event_type: "checkout",
-        observed_status: "on_time_exit",
-        notes,
+        observed_status: entryTiming.isLate ? "late" : "present",
+        work_type: assignment.assignment_type === "coverage" ? "coverage" : assignment.assignment_type === "reinforcement" ? "reinforcement" : "regular",
+        entry_source: "assignment",
+        validation_status: "confirmed",
+        notes: entryNotes,
         lat: latitude,
         lng: longitude,
         gps_accuracy_m: accuracy,
         distance_m: distance,
         is_inside_site: isInside,
-        client_time: new Date().toISOString()
+        client_time: gpsMoment.toISOString(),
+        recorded_via: "operator",
+        recorded_by: state.currentProfile?.id || null
       });
 
-      toast(isInside ? "Salida registrada correctamente." : "Salida registrada, pero fuera del radio del servicio.");
+      if (savedEvent?.__offline_pending) {
+        toast(`Entrada guardada sin internet a ${Math.round(distance)} m de ${assignedSite.name}. Se sincronizará cuando vuelva la conexión.`, "success");
+      } else if (isInside) {
+        toast(`Entrada registrada en ${assignedSite.name} (${Math.round(distance)} m del punto de ingreso).`);
+      } else {
+        toast(`Entrada registrada. Estás a ${Math.round(distance)} m de ${assignedSite.name} (fuera del radio). Avisá al supervisor.`);
+      }
       await renderOperatorView();
     } catch (error) {
-      toast(error.message || "No se pudo obtener ubicación GPS.");
+      operatorException(error, "No se pudo obtener ubicación GPS.", { action: "entrada", shiftId, siteId: assignment?.site_id });
+    }
+  }
+
+  async function handleGpsCheckout(shiftId) {
+    const entryEvent = state.events.find(e => e.shift_id === shiftId && e.event_type === "present");
+    const existingExit = state.events.find(e => e.shift_id === shiftId && e.event_type === "checkout");
+    const checkbox = document.getElementById(`confirm-out-${shiftId}`);
+    const notes = document.getElementById(`notes-out-${shiftId}`)?.value || "";
+
+    if (!entryEvent) return operatorProblem("Primero tenés que registrar la entrada.", { action: "salida", category: "usage", severity: "warning", shiftId });
+    if (existingExit) return operatorProblem("La salida ya fue registrada para hoy.", { action: "salida", category: "usage", severity: "warning", shiftId, siteId: entryEvent?.site_id });
+
+    const protection = exitProtectionState(entryEvent);
+    if (protection.active) {
+      const unlockTime = protection.unlockAt.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: APP_TIME_ZONE });
+      return operatorProblem(`Para evitar una salida accidental, la salida se habilita a las ${unlockTime}. Faltan ${formatExitProtectionRemaining(protection.remainingMs)}.`, { action: "salida", category: "usage", severity: "warning", shiftId, siteId: entryEvent?.site_id });
+    }
+
+    if (!checkbox?.checked) return operatorProblem("Primero marcá el checkbox de salida.", { action: "salida", category: "usage", severity: "warning", shiftId, siteId: entryEvent?.site_id });
+
+    const exitSite = byId(state.sites, entryEvent.site_id);
+    const confirmed = window.confirm(`Vas a registrar la SALIDA${exitSite?.name ? ` de ${exitSite.name}` : ""}. Esta acción cierra el turno y no podrás volver a registrar otra salida. ¿Confirmás que realmente estás finalizando el servicio?`);
+    if (!confirmed) return;
+
+    try {
+      toast("Solicitando GPS de alta precisión...");
+      const position = await getPosition();
+      const { latitude, longitude, accuracy } = position.coords;
+      const gpsMoment = new Date(position.timestamp || Date.now());
+      const shiftDate = entryEvent.shift_date || shiftDateFromId(shiftId, dateISOInTimeZone(gpsMoment));
+
+      // Use same site from entry event
+      const site = byId(state.sites, entryEvent.site_id);
+      const distance = site ? haversineMeters(latitude, longitude, Number(site.lat), Number(site.lng)) : null;
+      const isInside = site ? distance <= Number(site.gps_radius_m || 120) : null;
+      const assignment = entryEvent.assignment_id ? byId(state.assignments, entryEvent.assignment_id) : null;
+      const overtimeAuthorization = overtimeAuthorizationForShift(shiftId);
+      let overtimeNote = "";
+      if (assignment?.scheduled_end) {
+        const shiftForOvertime = {
+          shift_date: shiftDate,
+          scheduled_start: assignment.scheduled_start,
+          scheduled_end: assignment.scheduled_end
+        };
+        const overtimeMinutes = overtimeMinutesForShift(shiftForOvertime, { client_time: gpsMoment.toISOString() });
+        if (overtimeMinutes > 0) {
+          const overtimeRequest = overtimeRequestForShift(shiftId);
+          overtimeNote = overtimeAuthorization
+            ? `Salida con ${overtimeMinutes} min posteriores al horario programado. Horas extra autorizadas hasta ${formatTimeInBusinessZone(overtimeAuthorization.authorized_until)}${overtimeAuthorization.approved_by_name ? ` por ${overtimeAuthorization.approved_by_name}` : ""}.`
+            : isPendingOvertimeRequest(overtimeRequest)
+              ? `Salida con ${overtimeMinutes} min posteriores al horario programado. Solicitud de hora extra pendiente de aprobación hasta ${formatTimeInBusinessZone(overtimeRequest.requested_until)}.`
+              : `Salida registrada ${overtimeMinutes} min después del horario programado.`;
+        }
+      }
+      const checkoutNotes = [notes, overtimeNote].filter(Boolean).join(" · ");
+
+      const savedEvent = await store.createEvent({
+        shift_id: shiftId,
+        assignment_id: entryEvent.assignment_id || null,
+        shift_date: shiftDate,
+        operator_id: state.currentProfile.id,
+        site_id: entryEvent.site_id,
+        event_type: "checkout",
+        observed_status: "on_time_exit",
+        work_type: entryEvent.work_type || "regular",
+        entry_source: entryEvent.entry_source || (entryEvent.assignment_id ? "assignment" : "operator_extra"),
+        validation_status: entryEvent.validation_status || (entryEvent.assignment_id ? "confirmed" : "pending"),
+        notes: checkoutNotes,
+        lat: latitude,
+        lng: longitude,
+        gps_accuracy_m: accuracy,
+        distance_m: distance,
+        is_inside_site: isInside,
+        client_time: gpsMoment.toISOString(),
+        recorded_via: "operator",
+        recorded_by: state.currentProfile?.id || null
+      });
+
+      toast(savedEvent?.__offline_pending
+        ? "Salida guardada sin internet. Se sincronizará cuando vuelva la conexión."
+        : (isInside ? "Salida registrada correctamente." : "Salida registrada, pero fuera del radio del servicio."), "success");
+      await renderOperatorView();
+    } catch (error) {
+      operatorException(error, "No se pudo obtener ubicación GPS.", { action: "salida", shiftId, siteId: entryEvent?.site_id });
     }
   }
 
   async function handleManualStatus(shiftId, eventType) {
     const shift = state.shifts.find(s => s.id === shiftId);
-    if (!shift) return toast("No se encontró el servicio asignado.");
+    if (!shift) return operatorProblem("No se encontró el servicio asignado.", { action: `informar_${eventType}`, category: "configuration", severity: "warning", shiftId });
     const notes = document.getElementById(`notes-in-${shiftId}`)?.value || "";
     const label = eventType === "late" ? "demora" : "ausencia";
     try {
@@ -554,17 +2192,19 @@
         event_type: eventType,
         observed_status: eventType,
         notes,
-        client_time: new Date().toISOString()
+        client_time: new Date().toISOString(),
+        recorded_via: "operator",
+        recorded_by: state.currentProfile?.id || null
       });
       toast(`Se informó ${label}.`);
       await renderOperatorView();
     } catch (error) {
-      toast(error.message || `No se pudo informar ${label}.`);
+      operatorException(error, `No se pudo informar ${label}.`, { action: `informar_${eventType}`, shiftId, siteId: shift?.site_id });
     }
   }
 
   async function syncAutomaticAbsenceEvents(date) {
-    if (state.currentProfile?.role !== "supervisor") return 0;
+    if (!isManagementProfile()) return 0;
 
     const now = new Date();
     const dueShifts = state.shifts.filter(shift => shouldCreateAutomaticAbsence(shift, now));
@@ -582,8 +2222,10 @@
         site_id: shift.site_id,
         event_type: "absent",
         observed_status: "absent",
-        notes: `Ausencia automática: ${operator?.full_name || "el operario"} no registró entrada en ${site?.name || "el servicio"} antes de las ${formatTime(`${autoTime.getHours().toString().padStart(2, "0")}:${autoTime.getMinutes().toString().padStart(2, "0")}`)}.`,
-        client_time: autoTime.toISOString()
+        notes: `Ausencia automática: ${operator?.full_name || "el operario"} no registró entrada en ${site?.name || "el servicio"} antes de las ${formatClock(autoTime)}.`,
+        client_time: autoTime.toISOString(),
+        recorded_via: "system_auto",
+        recorded_by: state.currentProfile?.id || null
       };
 
       try {
@@ -598,46 +2240,60 @@
     return created;
   }
 
-  function buildFichajeRows(dateFrom, dateTo, operatorFilter) {
-    const events = state.events.filter(e => e.shift_date >= dateFrom && e.shift_date <= dateTo);
+  function buildFichajeRows(dateFrom, dateTo, operatorFilter, sourceEvents = state.events, sourceProfiles = state.profiles, sourceSites = state.sites) {
+    const events = sourceEvents.filter(e => e.shift_date >= dateFrom && e.shift_date <= dateTo);
 
     const shiftMap = new Map();
     for (const event of events) {
       if (!shiftMap.has(event.shift_id)) {
-        shiftMap.set(event.shift_id, { shift_id: event.shift_id, shift_date: event.shift_date, operator_id: event.operator_id, site_id: null });
+        shiftMap.set(event.shift_id, { shift_id: event.shift_id, shift_date: event.shift_date, operator_id: event.operator_id, site_id: null, is_flexible: isFlexibleShiftId(event.shift_id) });
       }
       const s = shiftMap.get(event.shift_id);
-      if (event.event_type === "present") s.entry = event;
+      if (event.event_type === "present") {
+        s.entry = event;
+        s.work_type = event.work_type || "regular";
+        s.entry_source = event.entry_source || "assignment";
+        s.validation_status = event.validation_status || "confirmed";
+      }
       if (event.event_type === "checkout") s.exit = event;
+      if (event.event_type === "day_off") s.day_off = event;
       if (event.site_id) s.site_id = event.site_id;
     }
 
     let rows = Array.from(shiftMap.values()).map(s => {
-      const operator = byId(state.profiles, s.operator_id);
-      const site = byId(state.sites, s.site_id);
-      const entryTime = s.entry?.client_time;
-      const exitTime = s.exit?.client_time;
-
-      let minutes = null;
-      let horasLabel = "—";
-      if (entryTime && exitTime) {
-        minutes = Math.round((new Date(exitTime) - new Date(entryTime)) / 60000);
-        horasLabel = `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
-      }
+      const operator = byId(sourceProfiles, s.operator_id);
+      const site = byId(sourceSites, s.site_id);
+      const entryTime = s.entry?.client_time || s.entry?.created_at;
+      const exitTime = s.exit?.client_time || s.exit?.created_at;
+      const duration = workedDuration(s.entry, s.exit);
+      const minutes = duration.minutes;
+      const horasLabel = duration.label || "—";
 
       let estado, estadoClass;
       if (s.entry && s.exit) { estado = "Completo"; estadoClass = "status-present"; }
       else if (s.entry) { estado = "Sin salida"; estadoClass = "status-late"; }
+      else if (s.day_off) { estado = "Franco"; estadoClass = "status-dayoff"; }
       else { estado = "Sin marcación"; estadoClass = "status-absent"; }
 
       return {
+        shift_id: s.shift_id,
         shift_date: s.shift_date,
         operator_id: s.operator_id,
         operator_name: operator?.full_name || "—",
         site_name: site?.name || "—",
+        work_type: s.work_type || "regular",
+        work_type_label: s.is_flexible ? "Jornada flexible" : workTypeLabel(s.work_type || "regular"),
+        entry_source: s.entry_source || "assignment",
+        validation_status: s.validation_status || "confirmed",
+        validation_label: validationLabel(s.validation_status || "confirmed"),
         entry_time: entryTime,
         exit_time: exitTime,
+        entry_recorded_via: s.entry ? recordedViaLabel(s.entry) : (s.day_off ? recordedViaLabel(s.day_off) : ""),
+        exit_recorded_via: s.exit ? recordedViaLabel(s.exit) : "",
+        is_day_off: Boolean(s.day_off && !s.entry),
         minutes,
+        seconds: duration.seconds,
+        decimalHours: duration.decimalHours,
         horasLabel,
         estado,
         estadoClass
@@ -649,7 +2305,7 @@
     return rows;
   }
 
-  function renderFichaje() {
+  function renderFichaje(sourceEvents = state.events, sourceProfiles = state.profiles, sourceSites = state.sites) {
     const dateFrom = $("#fichajeFrom").value || todayISO();
     const dateTo = $("#fichajeTo").value || todayISO();
     const operatorFilter = $("#fichajeOperator").value || "";
@@ -657,10 +2313,13 @@
     // Populate operator selector
     const select = $("#fichajeOperator");
     const currentVal = select.value;
-    const operators = state.profiles.filter(p => p.role === "operator").sort((a, b) => a.full_name.localeCompare(b.full_name));
+    const operators = sourceProfiles.filter(p => p.role === "operator").sort((a, b) => a.full_name.localeCompare(b.full_name));
     select.innerHTML = `<option value="">Todos</option>` + operators.map(op => `<option value="${op.id}" ${op.id === currentVal ? "selected" : ""}>${escapeHtml(op.full_name)}</option>`).join("");
 
-    const rows = buildFichajeRows(dateFrom, dateTo, operatorFilter);
+    const allRows = buildFichajeRows(dateFrom, dateTo, operatorFilter, sourceEvents, sourceProfiles, sourceSites);
+    const searchTerm = sectionSearchTerm("fichaje");
+    const rows = searchTerm ? allRows.filter(row => valuesMatchSearch(searchTerm, row.operator_name, row.site_name, row.work_type_label, row.estado, row.shift_date, row.validation_label)) : allRows;
+    updateSectionSearchCount("fichaje", rows.length, allRows.length);
 
     // Summary totals per operator
     const totals = new Map();
@@ -668,26 +2327,29 @@
       if (!totals.has(row.operator_id)) totals.set(row.operator_id, { name: row.operator_name, minutes: 0, days: 0, incomplete: 0 });
       const t = totals.get(row.operator_id);
       if (row.minutes !== null) { t.minutes += row.minutes; t.days++; }
-      if (row.estado !== "Completo") t.incomplete++;
+      if (!["Completo", "Franco"].includes(row.estado)) t.incomplete++;
     }
 
     const totalMinutes = Array.from(totals.values()).reduce((acc, t) => acc + t.minutes, 0);
     const totalDays = rows.filter(r => r.estado === "Completo").length;
-    const totalIncomplete = rows.filter(r => r.estado !== "Completo").length;
+    const totalIncomplete = rows.filter(r => !["Completo", "Franco"].includes(r.estado)).length;
+    const totalDayOff = rows.filter(r => r.estado === "Franco").length;
 
     $("#fichajeSummary").innerHTML = `
       ${kpi("Jornadas completas", totalDays, "status-present")}
+      ${kpi("Francos", totalDayOff, "status-dayoff")}
       ${kpi("Sin salida / sin marcar", totalIncomplete, totalIncomplete ? "status-late" : "status-present")}
-      ${kpi("Horas totales período", `${Math.floor(totalMinutes / 60)} h ${String(totalMinutes % 60).padStart(2, "0")} min`)}
+      ${kpi("Horas totales período", minutesToHoursLabel(totalMinutes))}
     `;
 
     const tableRows = rows.map(row => `
-      <tr>
+      <tr class="${searchTerm ? "search-match-row" : ""}">
         <td>${escapeHtml(row.shift_date)}</td>
         <td><strong>${escapeHtml(row.operator_name)}</strong></td>
         <td>${escapeHtml(row.site_name)}</td>
-        <td>${row.entry_time ? formatDateTime(row.entry_time) : "—"}</td>
-        <td>${row.exit_time ? formatDateTime(row.exit_time) : "—"}</td>
+        <td>${escapeHtml(row.work_type_label)}${row.shift_id?.startsWith?.("flex__") ? `<br><span class="muted small">Sin horario fijo · hora real</span>` : row.entry_source === "operator_extra" ? `<br><span class="muted small">Declarado por operario · ${escapeHtml(row.validation_label)}</span>` : ""}</td>
+        <td>${row.entry_time ? formatDateTime(row.entry_time) : "—"}${row.entry_recorded_via ? `<br><span class="muted small">${escapeHtml(row.entry_recorded_via)}</span>` : ""}</td>
+        <td>${row.exit_time ? formatDateTime(row.exit_time) : "—"}${row.exit_recorded_via ? `<br><span class="muted small">${escapeHtml(row.exit_recorded_via)}</span>` : ""}</td>
         <td><strong>${escapeHtml(row.horasLabel)}</strong></td>
         <td><span class="status-pill ${row.estadoClass}">${escapeHtml(row.estado)}</span></td>
       </tr>`).join("");
@@ -695,49 +2357,339 @@
     $("#fichajeTable").innerHTML = `
       <table>
         <thead>
-          <tr><th>Fecha</th><th>Operario</th><th>Servicio</th><th>Entrada</th><th>Salida</th><th>Horas trabajadas</th><th>Estado</th></tr>
+          <tr><th>Fecha</th><th>Operario</th><th>Servicio</th><th>Tipo de trabajo</th><th>Entrada</th><th>Salida</th><th>Horas trabajadas</th><th>Estado</th></tr>
         </thead>
-        <tbody>${tableRows || `<tr><td colspan="7">No hay registros en el período seleccionado.</td></tr>`}</tbody>
+        <tbody>${tableRows || `<tr><td colspan="8">No hay registros en el período seleccionado.</td></tr>`}</tbody>
       </table>`;
   }
 
-  function exportFichajeExcel() {
+  async function loadFichajePeriod() {
+    const dateFrom = $("#fichajeFrom").value || todayISO();
+    const dateTo = $("#fichajeTo").value || todayISO();
+    if (dateFrom > dateTo) throw new Error("La fecha Desde no puede ser posterior a Hasta.");
+    const [events, profiles, sites] = await Promise.all([
+      store.listEventsRange(dateFrom, dateTo),
+      store.listAllProfiles(),
+      store.listAllSites()
+    ]);
+    state.fichajeEvents = events;
+    state.fichajeProfiles = profiles;
+    state.fichajeSites = sites;
+    state.fichajeLoaded = true;
+    renderFichaje(events, profiles, sites);
+    return { events, profiles, sites, dateFrom, dateTo };
+  }
+
+  async function exportFichajeExcel() {
     const dateFrom = $("#fichajeFrom").value || todayISO();
     const dateTo = $("#fichajeTo").value || todayISO();
     const operatorFilter = $("#fichajeOperator").value || "";
-    const rows = buildFichajeRows(dateFrom, dateTo, operatorFilter);
+    const [events, profiles, sites] = await Promise.all([
+      store.listEventsRange(dateFrom, dateTo),
+      store.listAllProfiles(),
+      store.listAllSites()
+    ]);
+    const rows = buildFichajeRows(dateFrom, dateTo, operatorFilter, events, profiles, sites);
 
     // Sheet 1: detalle
     const detalle = rows.map(r => ({
       "Fecha": r.shift_date,
       "Operario": r.operator_name,
       "Servicio": r.site_name,
-      "Hora entrada": r.entry_time ? new Date(r.entry_time).toLocaleString("es-AR") : "",
-      "Hora salida": r.exit_time ? new Date(r.exit_time).toLocaleString("es-AR") : "",
-      "Horas trabajadas": r.horasLabel,
+      "Tipo de trabajo": r.work_type_label,
+      "Origen": isFlexibleShiftId(r.shift_id) ? "Jornada flexible" : r.entry_source === "operator_extra" ? "Declarado por operario" : "Asignación",
+      "Validación": r.validation_label,
+      "Franco": r.is_day_off ? "Sí" : "No",
+      "Registro entrada": r.entry_recorded_via,
+      "Hora entrada": r.entry_time ? new Date(r.entry_time).toLocaleString("es-AR", { timeZone: APP_TIME_ZONE }) : "",
+      "Hora salida": r.exit_time ? new Date(r.exit_time).toLocaleString("es-AR", { timeZone: APP_TIME_ZONE }) : "",
+      "Registro salida": r.exit_recorded_via,
+      "Duración exacta (hh:mm:ss)": r.horasLabel === "—" ? "" : r.horasLabel,
       "Minutos trabajados": r.minutes ?? "",
+      "Horas trabajadas (decimal)": r.decimalHours ?? "",
       "Estado": r.estado
     }));
 
     // Sheet 2: resumen por operario
     const totals = new Map();
+    const dailyTotals = new Map();
     for (const row of rows) {
-      if (!totals.has(row.operator_id)) totals.set(row.operator_id, { Operario: row.operator_name, "Jornadas completas": 0, "Total minutos": 0, "Total horas": "" });
+      if (!totals.has(row.operator_id)) totals.set(row.operator_id, { Operario: row.operator_name, "Jornadas completas": 0, "Total segundos": 0 });
       const t = totals.get(row.operator_id);
-      if (row.minutes !== null) { t["Jornadas completas"]++; t["Total minutos"] += row.minutes; }
+      if (row.seconds !== null) { t["Jornadas completas"]++; t["Total segundos"] += row.seconds; }
+      const dailyKey = `${row.shift_date}__${row.operator_id}`;
+      if (!dailyTotals.has(dailyKey)) dailyTotals.set(dailyKey, { Fecha: row.shift_date, Operario: row.operator_name, "Turnos completos": 0, "Total segundos": 0 });
+      const d = dailyTotals.get(dailyKey);
+      if (row.seconds !== null) { d["Turnos completos"]++; d["Total segundos"] += row.seconds; }
     }
-    const resumen = Array.from(totals.values()).map(t => {
-      t["Total horas"] = `${Math.floor(t["Total minutos"] / 60)} h ${String(t["Total minutos"] % 60).padStart(2, "0")} min`;
-      return t;
-    }).sort((a, b) => a.Operario.localeCompare(b.Operario));
+    const resumen = Array.from(totals.values()).map(t => ({
+      Operario: t.Operario,
+      "Jornadas completas": t["Jornadas completas"],
+      "Total exacto (hh:mm:ss)": formatDurationSeconds(t["Total segundos"]),
+      "Total minutos": Math.round((t["Total segundos"] / 60) * 100) / 100,
+      "Total horas (decimal)": Math.round((t["Total segundos"] / 3600) * 10000) / 10000
+    })).sort((a, b) => a.Operario.localeCompare(b.Operario));
+    const diario = Array.from(dailyTotals.values()).map(d => ({
+      Fecha: d.Fecha,
+      Operario: d.Operario,
+      "Turnos completos": d["Turnos completos"],
+      "Total exacto (hh:mm:ss)": formatDurationSeconds(d["Total segundos"]),
+      "Total minutos": Math.round((d["Total segundos"] / 60) * 100) / 100,
+      "Total horas (decimal)": Math.round((d["Total segundos"] / 3600) * 10000) / 10000
+    })).sort((a, b) => `${a.Fecha}|${a.Operario}`.localeCompare(`${b.Fecha}|${b.Operario}`));
 
     const wb = window.XLSX.utils.book_new();
-    window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.json_to_sheet(detalle), "Detalle");
-    window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.json_to_sheet(resumen), "Resumen por operario");
+    const wsDetail = window.XLSX.utils.json_to_sheet(detalle.length ? detalle : [{ "Sin datos": "No hay fichajes en el período." }]);
+    applyWorksheetUsability(wsDetail, [14, 30, 30, 24, 22, 18, 24, 24, 24, 20, 22, 18]);
+    window.XLSX.utils.book_append_sheet(wb, wsDetail, "Detalle");
+    const wsResumen = window.XLSX.utils.json_to_sheet(resumen.length ? resumen : [{ Operario: "Sin datos" }]);
+    applyWorksheetUsability(wsResumen, [30, 20, 24, 20, 22]);
+    window.XLSX.utils.book_append_sheet(wb, wsResumen, "Resumen por operario");
+    const wsDiario = window.XLSX.utils.json_to_sheet(diario.length ? diario : [{ Fecha: "Sin datos" }]);
+    applyWorksheetUsability(wsDiario, [14, 30, 20, 24, 20, 22]);
+    window.XLSX.utils.book_append_sheet(wb, wsDiario, "Horas por día");
     window.XLSX.writeFile(wb, `fichaje-cleanit-${dateFrom}-al-${dateTo}.xlsx`);
   }
 
+  const OPERATIONAL_MAP_STATUS = {
+    good: { label: "Correcto", longLabel: "Cubierto correctamente", tone: "good", priority: 60 },
+    pending: { label: "Pendiente", longLabel: "Pendiente / programado", tone: "pending", priority: 50 },
+    late: { label: "Demora", longLabel: "Demora / alerta horaria", tone: "late", priority: 30 },
+    outside: { label: "Fuera de radio", longLabel: "Fichaje fuera de radio", tone: "outside", priority: 20 },
+    critical: { label: "Ausente / crítico", longLabel: "Ausencia / alerta crítica", tone: "critical", priority: 10 },
+    inactive: { label: "Sin cobertura", longLabel: "Franco / sin cobertura programada", tone: "inactive", priority: 70 }
+  };
+
+  function classifyOperationalMapRow(row) {
+    const alerts = normalizeSearchText(row?.["Alertas RRHH"] || "");
+    const entry = normalizeSearchText(row?.["Estado entrada"] || "");
+    const exit = normalizeSearchText(row?.["Estado salida"] || "");
+    const operational = normalizeSearchText(row?.["Estado operativo"] || "");
+    if (row?.Franco === "Sí" || entry === "franco") return "inactive";
+    if (alerts.includes("ausencia / sin entrada") || entry.includes("ausente") || entry.includes("ausencia")) return "critical";
+    if (alerts.includes("salida no registrada") || exit.includes("salida no registrada")) return "critical";
+    if (alerts.includes("fuera de radio") || entry.includes("fuera de radio") || exit.includes("fuera de radio") || operational.includes("fuera de radio")) return "outside";
+    if (alerts.includes("cierre automatico") || operational.includes("cerrada automaticamente")) return "late";
+    if (alerts.includes("llegada tarde") || alerts.includes("salida anticipada") || entry.includes("tarde") || entry.includes("demora") || exit.includes("anticipada")) return "late";
+    if (operational.includes("pendiente") || operational.includes("programado") || entry === "pendiente") return "pending";
+    if (row?.["Hora entrada"] || operational.includes("jornada") || operational.includes("en servicio")) return "good";
+    return "pending";
+  }
+
+  function operationalMapAggregateStatus(rows) {
+    if (!rows?.length) return { key: "inactive", label: "Sin cobertura programada", counts: {} };
+    const activeRows = rows.filter(row => classifyOperationalMapRow(row) !== "inactive");
+    if (!activeRows.length) return { key: "inactive", label: "Franco / sin cobertura activa", counts: { inactive: rows.length } };
+    const counts = {};
+    activeRows.forEach(row => {
+      const key = classifyOperationalMapRow(row);
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    const priorityOrder = ["critical", "outside", "late", "pending", "good"];
+    const key = priorityOrder.find(item => counts[item]) || "good";
+    let label = OPERATIONAL_MAP_STATUS[key].longLabel;
+    if (key === "critical") {
+      const absenceCount = activeRows.filter(row => normalizeSearchText(row?.["Alertas RRHH"] || "").includes("ausencia / sin entrada") || normalizeSearchText(row?.["Estado entrada"] || "").includes("ausen")).length;
+      const missingExitCount = activeRows.filter(row => normalizeSearchText(row?.["Alertas RRHH"] || "").includes("salida no registrada")).length;
+      if (absenceCount) label = `Con ausencia${absenceCount > 1 ? "s" : ""} (${absenceCount})`;
+      else if (missingExitCount) label = `Salida no registrada (${missingExitCount})`;
+    } else if (key === "outside") label = `Fuera de radio (${counts.outside})`;
+    else if (key === "late") label = `Demora / alerta horaria (${counts.late})`;
+    else if (key === "pending") label = `Pendiente (${counts.pending})`;
+    else if (key === "good") label = "Cubierto correctamente";
+    return { key, label, counts };
+  }
+
+  function buildOperationalMapServices(rows, sites) {
+    const rowsBySite = new Map();
+    (rows || []).forEach(row => {
+      const siteId = row?.["Site ID"];
+      if (!siteId) return;
+      if (!rowsBySite.has(siteId)) rowsBySite.set(siteId, []);
+      rowsBySite.get(siteId).push(row);
+    });
+    return (sites || [])
+      .filter(site => site?.is_active !== false)
+      .map(site => {
+        const siteRows = rowsBySite.get(site.id) || [];
+        return { site, rows: siteRows, aggregate: operationalMapAggregateStatus(siteRows) };
+      });
+  }
+
+  function operationalMapFilterDefinitions(items) {
+    const count = key => items.filter(item => item.aggregate.key === key).length;
+    const alerts = items.filter(item => ["critical", "outside", "late"].includes(item.aggregate.key)).length;
+    return [
+      { key: "all", label: "Todos", count: items.length, tone: "all" },
+      { key: "alerts", label: "Con alerta", count: alerts, tone: "alert" },
+      { key: "good", label: "Correctos", count: count("good"), tone: "good" },
+      { key: "late", label: "Demora", count: count("late"), tone: "late" },
+      { key: "outside", label: "Fuera de radio", count: count("outside"), tone: "outside" },
+      { key: "critical", label: "Ausentes / críticos", count: count("critical"), tone: "critical" },
+      { key: "pending", label: "Pendientes", count: count("pending"), tone: "pending" },
+      { key: "inactive", label: "Sin cobertura / franco", count: count("inactive"), tone: "inactive" }
+    ];
+  }
+
+  function renderOperationalMapFilters(items) {
+    const container = $("#operationalMapFilters");
+    if (!container) return;
+    const defs = operationalMapFilterDefinitions(items);
+    if (!defs.some(def => def.key === state.operationalMapFilter)) state.operationalMapFilter = "all";
+    container.innerHTML = `<span class="live-filter-label">Filtrar:</span>` + defs.map(def => `
+      <button class="status-filter-btn ops-filter-${def.tone} ${state.operationalMapFilter === def.key ? "active" : ""}" type="button" data-ops-map-filter="${def.key}" aria-pressed="${state.operationalMapFilter === def.key ? "true" : "false"}">
+        <span class="filter-dot" aria-hidden="true"></span>${escapeHtml(def.label)} <strong class="filter-count">${def.count}</strong>
+      </button>`).join("");
+  }
+
+  function operationalMapItemMatchesSearch(item, term) {
+    if (!term) return true;
+    return valuesMatchSearch(term,
+      item.site?.name, item.site?.address, item.site?.zone, item.site?.supervisor_name,
+      item.aggregate?.label,
+      ...item.rows.map(row => [row.Operario, row["Estado operativo"], row["Estado entrada"], row["Estado salida"], row["Alertas RRHH"]])
+    );
+  }
+
+  function operationalMapPopupHtml(item) {
+    const site = item.site;
+    const rows = item.rows || [];
+    const rowHtml = rows.length ? rows.map(row => {
+      const rowKey = classifyOperationalMapRow(row);
+      const status = OPERATIONAL_MAP_STATUS[rowKey] || OPERATIONAL_MAP_STATUS.pending;
+      return `<div class="ops-popup-row">
+        <div><strong>${escapeHtml(row.Operario || "Operario")}</strong><span>${escapeHtml(row["Horario programado"] || "Sin horario")}</span></div>
+        <span class="ops-popup-status ops-tone-${status.tone}">${escapeHtml(row["Estado operativo"] || row["Estado entrada"] || status.longLabel)}</span>
+      </div>`;
+    }).join("") : `<div class="ops-popup-empty">No hay cobertura programada para esta fecha.</div>`;
+    return `<div class="ops-map-popup">
+      <div class="ops-popup-head"><strong>${escapeHtml(site?.name || "Servicio")}</strong><span class="ops-popup-main-status ops-tone-${escapeHtml(OPERATIONAL_MAP_STATUS[item.aggregate.key]?.tone || "inactive")}">${escapeHtml(item.aggregate.label)}</span></div>
+      <div class="ops-popup-address">${escapeHtml(site?.address || "Sin dirección cargada")}</div>
+      <div class="ops-popup-rows">${rowHtml}</div>
+    </div>`;
+  }
+
+  function operationalMapMarkerIcon(statusKey) {
+    const tone = OPERATIONAL_MAP_STATUS[statusKey]?.tone || "inactive";
+    return window.L.divIcon({
+      className: "ops-map-marker-shell",
+      html: `<span class="ops-map-pin ops-tone-${tone}"></span>`,
+      iconSize: [28, 28],
+      iconAnchor: [14, 14],
+      popupAnchor: [0, -14]
+    });
+  }
+
+  function renderOperationalMapFromState() {
+    const mapEl = $("#operationalStatusMap");
+    if (!mapEl || state.activeTab !== "opsmap") return;
+    const date = $("#operationalMapDate")?.value || state.operationalMapDate || todayISO();
+    const isToday = date === todayISO();
+    const liveBadge = $("#operationalMapLiveBadge");
+    if (liveBadge) liveBadge.classList.toggle("hidden", !isToday);
+    const dateLabel = $("#operationalMapDateLabel");
+    if (dateLabel) dateLabel.textContent = isToday ? "Hoy · estado en vivo" : formatOperationalDate(date);
+
+    const items = buildOperationalMapServices(state.operationalMapRows, state.operationalMapSites);
+    renderOperationalMapFilters(items);
+    const searchTerm = sectionSearchTerm("opsmap");
+    const filtered = items.filter(item => {
+      if (state.operationalMapFilter === "alerts" && !["critical", "outside", "late"].includes(item.aggregate.key)) return false;
+      if (!["all", "alerts"].includes(state.operationalMapFilter) && item.aggregate.key !== state.operationalMapFilter) return false;
+      return operationalMapItemMatchesSearch(item, searchTerm);
+    });
+    updateSectionSearchCount("opsmap", filtered.length, items.length);
+
+    const counts = items.reduce((acc, item) => {
+      acc.total++;
+      acc[item.aggregate.key] = (acc[item.aggregate.key] || 0) + 1;
+      if (["critical", "outside", "late"].includes(item.aggregate.key)) acc.alerts++;
+      return acc;
+    }, { total: 0, alerts: 0 });
+    const kpis = $("#operationalMapKpis");
+    if (kpis) kpis.innerHTML = `
+      ${kpi("Servicios activos", counts.total || 0)}
+      ${kpi("Cubiertos correctamente", counts.good || 0, "status-present")}
+      ${kpi("Con alerta", counts.alerts || 0, counts.alerts ? "status-late" : "status-present")}
+      ${kpi("Ausentes / críticos", counts.critical || 0, counts.critical ? "status-absent" : "")}`;
+
+    if (!window.L) {
+      mapEl.innerHTML = `<div class="empty-state">No se pudo cargar el mapa. Revisá la conexión a internet.</div>`;
+      return;
+    }
+    if (operationalStatusMapInstance) {
+      operationalStatusMapInstance.remove();
+      operationalStatusMapInstance = null;
+    }
+    mapEl.innerHTML = "";
+    operationalStatusMapInstance = window.L.map("operationalStatusMap", { zoomControl: true });
+    window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>'
+    }).addTo(operationalStatusMapInstance);
+
+    const mapped = filtered.filter(item => Number.isFinite(Number(item.site?.lat)) && Number.isFinite(Number(item.site?.lng)));
+    const bounds = [];
+    mapped.forEach(item => {
+      const lat = Number(item.site.lat);
+      const lng = Number(item.site.lng);
+      const marker = window.L.marker([lat, lng], { icon: operationalMapMarkerIcon(item.aggregate.key), title: `${item.site.name} · ${item.aggregate.label}` })
+        .addTo(operationalStatusMapInstance)
+        .bindTooltip(`<strong>${escapeHtml(item.site.name)}</strong><br>${escapeHtml(item.aggregate.label)}`, { direction: "top", offset: [0, -10] })
+        .bindPopup(operationalMapPopupHtml(item), { maxWidth: 390 });
+      bounds.push(marker.getLatLng());
+    });
+    if (bounds.length === 1) operationalStatusMapInstance.setView(bounds[0], 15);
+    else if (bounds.length > 1) operationalStatusMapInstance.fitBounds(window.L.latLngBounds(bounds), { padding: [28, 28], maxZoom: 15 });
+    else operationalStatusMapInstance.setView([-34.6037, -58.3816], 11);
+
+    const noCoords = filtered.filter(item => !Number.isFinite(Number(item.site?.lat)) || !Number.isFinite(Number(item.site?.lng))).length;
+    const foot = $("#operationalMapFootnote");
+    if (foot) foot.textContent = `${mapped.length} servicio${mapped.length === 1 ? "" : "s"} visible${mapped.length === 1 ? "" : "s"} en el mapa${noCoords ? ` · ${noCoords} sin coordenadas GPS cargadas` : ""}. Un servicio con varios operarios toma el estado de mayor prioridad operativa.`;
+    window.setTimeout(() => operationalStatusMapInstance?.invalidateSize(), 80);
+  }
+
+  async function loadOperationalMapData({ quiet = false } = {}) {
+    if (!isManagementProfile()) return;
+    const date = $("#operationalMapDate")?.value || state.operationalMapDate || todayISO();
+    state.operationalMapDate = date;
+    const refreshLabel = $("#operationalMapRefreshLabel");
+    if (refreshLabel && !quiet) refreshLabel.textContent = "Actualizando estado de servicios…";
+    try {
+      const period = { from: date, to: date, isAll: false, label: date };
+      const context = await fetchReportContext(period);
+      const built = buildOperationalExportRows(period, context);
+      state.operationalMapRows = built.rows || [];
+      state.operationalMapSites = (context.sites || []).filter(site => site?.is_active !== false);
+      state.operationalMapLoaded = true;
+      renderOperationalMapFromState();
+      if (refreshLabel) {
+        const isToday = date === todayISO();
+        const nowLabel = new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: APP_TIME_ZONE });
+        refreshLabel.textContent = isToday ? `Actualizado ${nowLabel} · actualización automática cada 60 segundos.` : `Estado histórico actualizado ${nowLabel}.`;
+      }
+    } catch (error) {
+      if (refreshLabel) refreshLabel.textContent = "No se pudo actualizar el mapa.";
+      if (!quiet) toast(error.message || "No se pudo cargar el mapa operativo.");
+    }
+    scheduleOperationalMapAutoRefresh();
+  }
+
+  function scheduleOperationalMapAutoRefresh() {
+    window.clearInterval(operationalMapRefreshTimer);
+    operationalMapRefreshTimer = null;
+    const date = $("#operationalMapDate")?.value || state.operationalMapDate;
+    if (state.activeTab !== "opsmap" || date !== todayISO()) return;
+    operationalMapRefreshTimer = window.setInterval(() => {
+      if (state.activeTab === "opsmap" && ($("#operationalMapDate")?.value || state.operationalMapDate) === todayISO()) {
+        loadOperationalMapData({ quiet: true });
+      }
+    }, 60000);
+  }
+
   async function renderSupervisorView() {
+    // El cierre principal lo ejecuta Supabase Cron. Esta llamada sirve como respaldo inmediato al abrir el panel.
+    await store.runAutomaticCheckouts?.();
     const date = $("#dashboardDate").value || todayISO();
     await refreshBaseData(date);
     const createdAbsences = await syncAutomaticAbsenceEvents(date);
@@ -747,12 +2699,21 @@
     }
     renderTab(state.activeTab);
     renderDashboard();
+    if (state.activeTab === "opsmap") await loadOperationalMapData({ quiet: true });
     renderFichaje();
     renderCoverage();
     renderSites();
     renderAssignmentSelectors();
     renderAssignments();
+    if (state.activeTab === "leaves" || !state.leaveAudit.length) await refreshLeaveAudit();
+    renderLeaves();
+    if (state.assignmentAuditParsed) analyzeParsedAssignmentAudit();
+    else renderAssignmentAudit();
     renderUsers();
+    syncUserFormFields();
+    await refreshErrorBadge();
+    if (state.activeTab === "errors" && !state.errorLogsLoaded) await loadErrorLogs({ quiet: true });
+    renderErrorLogs();
     renderRecords();
   }
 
@@ -761,21 +2722,350 @@
     $$(".tab-btn").forEach(btn => btn.classList.toggle("active", btn.dataset.tab === tab));
     $$(".tab-panel").forEach(panel => panel.classList.remove("active"));
     $(`#${tab}Tab`).classList.add("active");
+    syncContextSearchUI(tab);
+  }
+
+  function errorCategoryLabel(category) {
+    const labels = {
+      gps: "GPS / permisos",
+      connectivity: "Conectividad",
+      usage: "Uso / operación",
+      configuration: "Configuración",
+      database: "Base de datos",
+      javascript: "Error JavaScript",
+      technical: "Error técnico"
+    };
+    return labels[String(category || "technical").toLowerCase()] || String(category || "Error técnico");
+  }
+
+  function errorActionLabel(action) {
+    const labels = {
+      entrada: "Registrar entrada",
+      salida: "Registrar salida",
+      entrada_flexible: "Entrada flexible",
+      entrada_extraordinaria: "Entrada extraordinaria",
+      solicitud_hora_extra: "Solicitud de hora extra",
+      carga_jornada: "Cargar jornada",
+      actualizar_jornada: "Actualizar jornada",
+      javascript_error: "Ejecución de la app",
+      promise_rejection: "Proceso interno",
+      unknown: "Acción no identificada"
+    };
+    const key = String(action || "unknown");
+    if (labels[key]) return labels[key];
+    if (key.startsWith("informar_")) return `Informar ${key.slice(9).replaceAll("_", " ")}`;
+    return key.replaceAll("_", " ");
+  }
+
+  function errorCategoryClass(category) {
+    const normalized = String(category || "technical").toLowerCase();
+    return ["gps", "connectivity", "usage", "configuration", "database", "javascript", "technical"].includes(normalized) ? normalized : "technical";
+  }
+
+  async function refreshErrorBadge() {
+    const badge = $("#errorTabBadge");
+    if (!badge || !isManagementProfile() || !store.listAppErrorLogs) return;
+    try {
+      const rows = await store.listAppErrorLogs(todayISO(), todayISO(), "new");
+      state.errorLogUnreviewedToday = rows.length;
+      badge.textContent = String(rows.length);
+      badge.classList.toggle("hidden", rows.length === 0);
+    } catch (_) {
+      state.errorLogUnreviewedToday = 0;
+      badge.classList.add("hidden");
+    }
+  }
+
+  async function loadErrorLogs({ quiet = false } = {}) {
+    if (!isManagementProfile() || !store.listAppErrorLogs) return;
+    const date = $("#errorLogDate")?.value || state.errorLogDate || todayISO();
+    const status = $("#errorLogStatus")?.value || state.errorLogStatus || "all";
+    state.errorLogDate = date;
+    state.errorLogStatus = status;
+    const table = $("#errorLogsTable");
+    if (table && !quiet) table.innerHTML = `<div class="empty-card">Cargando incidencias…</div>`;
+    try {
+      state.errorLogs = await store.listAppErrorLogs(date, date, status);
+      state.errorLogsLoaded = true;
+      renderErrorLogs();
+      await refreshErrorBadge();
+    } catch (error) {
+      state.errorLogsLoaded = false;
+      if (table) table.innerHTML = `<div class="empty-card"><strong>No se pudieron cargar los errores.</strong><br><span class="muted small">${escapeHtml(error?.message || "Revisá que el SQL del monitor de errores esté ejecutado en Supabase.")}</span></div>`;
+      if (!quiet) toast(error?.message || "No se pudieron cargar los errores.", "error");
+    }
+  }
+
+  function renderErrorLogs() {
+    const table = $("#errorLogsTable");
+    const summary = $("#errorLogsSummary");
+    if (!table) return;
+    const allRows = state.errorLogs || [];
+    const term = sectionSearchTerm("errors");
+    const rows = term ? allRows.filter(row => valuesMatchSearch(term,
+      row.operator_name_snapshot, row.site_name_snapshot, row.message, row.action, row.category, row.error_name, row.error_code, row.review_note
+    )) : allRows;
+    updateSectionSearchCount("errors", rows.length, allRows.length);
+
+    const newCount = allRows.filter(row => row.status === "new").length;
+    const gpsCount = allRows.filter(row => row.category === "gps").length;
+    const usageCount = allRows.filter(row => row.category === "usage").length;
+    if (summary) summary.innerHTML = `
+      <span><strong>${allRows.length}</strong> incidencia${allRows.length === 1 ? "" : "s"}</span>
+      <span><strong>${newCount}</strong> nueva${newCount === 1 ? "" : "s"}</span>
+      <span><strong>${gpsCount}</strong> GPS</span>
+      <span><strong>${usageCount}</strong> uso / operación</span>`;
+
+    if (!state.errorLogsLoaded) {
+      table.innerHTML = `<div class="empty-card">Elegí una fecha y tocá <strong>Actualizar</strong>.</div>`;
+      return;
+    }
+    if (!rows.length) {
+      table.innerHTML = `<div class="empty-card">No hay incidencias para los filtros seleccionados.</div>`;
+      return;
+    }
+
+    table.innerHTML = `<table class="data-table error-log-table">
+      <thead><tr><th>Fecha / hora</th><th>Operario / servicio</th><th>Tipo</th><th>Problema</th><th>Estado</th><th>Acción</th></tr></thead>
+      <tbody>${rows.map(row => {
+        const reviewer = row.reviewed_by ? byId(state.profiles, row.reviewed_by) : null;
+        const tech = row.technical_details && typeof row.technical_details === "object" ? row.technical_details : {};
+        const detailJson = JSON.stringify({
+          error_name: row.error_name || null,
+          error_code: row.error_code || null,
+          ...tech,
+          navegador: row.user_agent || null,
+          version_app: row.app_version || null
+        }, null, 2);
+        const reviewedText = row.status === "reviewed"
+          ? `${row.reviewed_at ? formatDateTime(row.reviewed_at) : "Revisado"}${reviewer?.full_name ? ` · ${reviewer.full_name}` : ""}${row.review_note ? ` · ${row.review_note}` : ""}`
+          : "Pendiente de revisar";
+        return `<tr class="${term ? "search-match-row" : ""}">
+          <td><strong>${escapeHtml(formatDateTime(row.occurred_at))}</strong><br><span class="muted small">${escapeHtml(errorActionLabel(row.action))}</span></td>
+          <td><strong>${escapeHtml(row.operator_name_snapshot || "Operario")}</strong><br><span class="muted small">${escapeHtml(row.site_name_snapshot || "Sin servicio asociado")}</span>${row.shift_id ? `<br><span class="muted tiny">Turno: ${escapeHtml(row.shift_id)}</span>` : ""}</td>
+          <td><span class="issue-type-badge ${escapeHtml(errorCategoryClass(row.category))}">${escapeHtml(errorCategoryLabel(row.category))}</span><br><span class="muted small">${escapeHtml(row.severity || "error")}</span></td>
+          <td><strong>${escapeHtml(row.message || "Error sin mensaje")}</strong>
+            <details class="technical-error-details"><summary>Ver detalle técnico</summary><pre>${escapeHtml(detailJson)}</pre></details>
+          </td>
+          <td><span class="status-pill ${row.status === "reviewed" ? "status-reviewed" : "status-error-new"}">${row.status === "reviewed" ? "Revisado" : "Nuevo"}</span><br><span class="muted small">${escapeHtml(reviewedText)}</span></td>
+          <td>${row.status === "reviewed"
+            ? `<button class="ghost-btn small-btn" type="button" data-reopen-error="${escapeHtml(row.id)}">Reabrir</button>`
+            : `<button class="primary-btn small-btn" type="button" data-review-error="${escapeHtml(row.id)}">Marcar revisado</button>`}</td>
+        </tr>`;
+      }).join("")}</tbody>
+    </table>`;
+  }
+
+  async function reviewErrorLog(id) {
+    const row = (state.errorLogs || []).find(item => item.id === id);
+    if (!row) return;
+    const note = window.prompt("Observación de revisión (opcional):", row.review_note || "");
+    if (note === null) return;
+    try {
+      await store.reviewAppErrorLog(id, note.trim());
+      await loadErrorLogs({ quiet: true });
+      toast("Incidencia marcada como revisada.", "success");
+    } catch (error) {
+      toast(error?.message || "No se pudo marcar la incidencia como revisada.", "error");
+    }
+  }
+
+  async function reopenErrorLog(id) {
+    try {
+      await store.reopenAppErrorLog(id);
+      await loadErrorLogs({ quiet: true });
+      toast("Incidencia reabierta.", "success");
+    } catch (error) {
+      toast(error?.message || "No se pudo reabrir la incidencia.", "error");
+    }
   }
 
   function statusDetailCell(status, event, emptyText) {
-    const when = event ? formatDateTime(event.created_at) : emptyText;
-    const gps = event ? `<br><span class="muted small">${escapeHtml(gpsSummary(event))}</span>` : "";
-    return `<span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${escapeHtml(when)}</span>${gps}`;
+    const when = event ? formatDateTime(event.client_time || event.created_at) : emptyText;
+    const gps = event && !["supervisor_manual", "system_auto"].includes(event.recorded_via) && event.event_type !== "day_off" ? `<br><span class="muted small">${escapeHtml(gpsSummary(event))}</span>` : "";
+    const source = event && ["supervisor_manual", "system_auto"].includes(event.recorded_via)
+      ? `<br><span class="event-source-note">${escapeHtml(recordedViaLabel(event))}${event.recorded_via === "system_auto" && event.event_type === "checkout" && event.created_at ? ` · ejecutado ${escapeHtml(formatDateTime(event.created_at))}` : ""}</span>`
+      : "";
+    return `<span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${escapeHtml(when)}</span>${gps}${source}`;
+  }
+
+  function hasCoordinates(event) {
+    return Boolean(event) && Number.isFinite(Number(event.lat)) && Number.isFinite(Number(event.lng));
   }
 
   function hasOperationalAlert(row) {
     return ["late", "absent", "outside"].includes(row.entryStatus.key)
-      || ["early_exit", "exit_outside", "missing_exit", "exit_due"].includes(row.exitStatus.key);
+      || row.entryTiming?.isLate === true
+      || ["auto_checkout", "early_exit", "exit_outside", "missing_exit", "exit_due"].includes(row.exitStatus.key)
+      || row.overtimeRequestPending === true
+      || (row.isSelfReportedExtra && ["pending", "rejected"].includes(row.extraValidationStatus));
   }
 
-  function renderDashboard() {
-    const rows = state.shifts.map(shift => {
+  function operationalAlertItems(row) {
+    const items = [];
+    const entryTiming = row.entryTiming || getEntryTimingInfo(row.shift, row.entryEvent);
+    const exitItems = {
+      auto_checkout: { label: "Cierre automático por falta de salida", className: "status-auto" },
+      early_exit: { label: "Salida anticipada", className: "status-late" },
+      exit_outside: { label: "Salida fuera de radio", className: "status-outside" },
+      missing_exit: { label: "Salida no registrada", className: "status-absent" },
+      exit_due: { label: "Salida pendiente", className: "status-late" }
+    };
+
+    if (row.entryEvent && entryTiming.isLate) {
+      items.push({
+        label: entryTiming.isAfterAbsenceThreshold
+          ? `Ingreso tarde fuera de horario · +${entryTiming.lateMinutes} min`
+          : `Entrada tarde · +${entryTiming.lateMinutes} min`,
+        className: entryTiming.isAfterAbsenceThreshold ? "status-late-critical" : "status-late"
+      });
+    } else if (row.entryStatus.key === "late") {
+      items.push({ label: "Entrada tarde / demorada", className: "status-late" });
+    }
+    if (row.entryStatus.key === "absent") items.push({ label: "Ausencia", className: "status-absent" });
+    if (row.entryStatus.key === "outside") items.push({ label: "Entrada fuera de radio", className: "status-outside" });
+
+    if (exitItems[row.exitStatus.key]) items.push(exitItems[row.exitStatus.key]);
+    if (row.overtimeRequestPending) items.push({ label: `Hora extra pendiente de aprobación${row.overtimeRequest?.requested_until ? ` · hasta ${formatTimeInBusinessZone(row.overtimeRequest.requested_until)}` : ""}`, className: "status-overtime-pending" });
+    if (row.isSelfReportedExtra && row.extraValidationStatus === "pending") items.push({ label: "Trabajo extraordinario pendiente de validar", className: "status-extra" });
+    if (row.isSelfReportedExtra && row.extraValidationStatus === "rejected") items.push({ label: "Trabajo extraordinario rechazado", className: "status-rejected" });
+    return items;
+  }
+
+  function operationalAlertLabels(row) {
+    return operationalAlertItems(row).map(item => item.label);
+  }
+
+  function operationalAlertPriority(row) {
+    const keys = [row.entryStatus.key, row.exitStatus.key];
+    if (keys.includes("absent") || keys.includes("missing_exit")) return 1;
+    if (keys.includes("outside") || keys.includes("exit_outside")) return 2;
+    if (keys.includes("auto_checkout") || keys.includes("early_exit")) return 3;
+    return 4;
+  }
+
+  function getSelfReportedExtraDashboardRows() {
+    const date = $("#dashboardDate")?.value || todayISO();
+    const events = state.events.filter(event => event.shift_date === date && event.assignment_id == null && event.entry_source === "operator_extra" && ["coverage", "reinforcement"].includes(String(event.work_type || "")));
+    const groups = new Map();
+    events.forEach(event => {
+      if (!groups.has(event.shift_id)) groups.set(event.shift_id, []);
+      groups.get(event.shift_id).push(event);
+    });
+    const rows = [];
+    groups.forEach((group, shiftId) => {
+      const entryEvent = group.filter(e => e.event_type === "present").sort((a, b) => new Date(b.client_time || b.created_at) - new Date(a.client_time || a.created_at))[0];
+      if (!entryEvent) return;
+      const exitEvent = group.filter(e => e.event_type === "checkout").sort((a, b) => new Date(b.client_time || b.created_at) - new Date(a.client_time || a.created_at))[0] || null;
+      const validation = entryEvent.validation_status || "pending";
+      const entryStatus = entryEvent.is_inside_site === false
+        ? { key: "outside", label: "Entrada fuera de radio", className: "status-outside" }
+        : { key: "present", label: "Entrada registrada", className: "status-present" };
+      let exitStatus;
+      if (exitEvent) {
+        exitStatus = exitEvent.is_inside_site === false
+          ? { key: "exit_outside", label: "Salida fuera de radio", className: "status-outside" }
+          : { key: "completed", label: "Salida registrada", className: "status-present" };
+      } else {
+        exitStatus = { key: "in_service_extra", label: "En servicio extraordinario", className: "status-extra" };
+      }
+      let status = exitEvent ? { ...exitStatus } : { key: "extra", label: `${workTypeLabel(entryEvent.work_type)} · ${validationLabel(validation)}`, className: validation === "rejected" ? "status-rejected" : "status-extra" };
+      if (validation === "pending") status = { key: "extra_pending", label: `${workTypeLabel(entryEvent.work_type)} · pendiente de validar`, className: "status-extra" };
+      if (validation === "rejected") status = { key: "extra_rejected", label: `${workTypeLabel(entryEvent.work_type)} · rechazado`, className: "status-rejected" };
+      const shift = {
+        id: shiftId,
+        assignment_id: null,
+        shift_date: date,
+        operator_id: entryEvent.operator_id,
+        site_id: entryEvent.site_id,
+        scheduled_start: null,
+        scheduled_end: null,
+        grace_minutes: 0,
+        absence_after_minutes: 0,
+        assignment_type: entryEvent.work_type || "coverage",
+        notes: entryEvent.notes || ""
+      };
+      const lastEvent = [...group].sort((a, b) => new Date(b.client_time || b.created_at) - new Date(a.client_time || a.created_at))[0];
+      rows.push({ shift, entryEvent, exitEvent, manualEvent: null, entryStatus, exitStatus, status, lastEvent, isSelfReportedExtra: true, extraValidationStatus: validation, extraWorkType: entryEvent.work_type || "coverage" });
+    });
+    return rows;
+  }
+
+  function getFlexibleDashboardRows() {
+    const date = $("#dashboardDate")?.value || todayISO();
+    const groups = new Map();
+    (state.events || []).filter(event => isFlexibleShiftId(event.shift_id)).forEach(event => {
+      if (!groups.has(event.shift_id)) groups.set(event.shift_id, []);
+      groups.get(event.shift_id).push(event);
+    });
+    const rows = [];
+    groups.forEach((group, shiftId) => {
+      const entryEvent = latestEventFromList(group, "present");
+      if (!entryEvent) return;
+      const exitEvent = latestEventFromList(group, "checkout");
+      const belongsToDate = entryEvent.shift_date === date;
+      const openCarryover = date === todayISO() && !exitEvent && entryEvent.shift_date < date;
+      if (!belongsToDate && !openCarryover) return;
+      const entryStatus = entryEvent.is_inside_site === false
+        ? { key: "outside", label: "Entrada fuera de radio", className: "status-outside" }
+        : { key: "present", label: "Entrada registrada", className: "status-present" };
+      const exitStatus = exitEvent
+        ? (exitEvent.is_inside_site === false
+          ? { key: "exit_outside", label: "Salida fuera de radio", className: "status-outside" }
+          : { key: "completed", label: "Salida registrada", className: "status-present" })
+        : { key: "in_service_flexible", label: "En servicio · jornada flexible", className: "status-ok" };
+      const status = exitEvent ? { ...exitStatus } : { key: "flexible", label: "Jornada flexible · en servicio", className: "status-ok" };
+      const shift = {
+        id: shiftId,
+        assignment_id: null,
+        shift_date: entryEvent.shift_date,
+        operator_id: entryEvent.operator_id,
+        site_id: entryEvent.site_id,
+        scheduled_start: null,
+        scheduled_end: null,
+        grace_minutes: 0,
+        absence_after_minutes: 0,
+        assignment_type: "flexible",
+        notes: entryEvent.notes || ""
+      };
+      const lastEvent = [...group].sort((a, b) => new Date(eventTimestamp(b) || 0) - new Date(eventTimestamp(a) || 0))[0];
+      rows.push({ shift, entryEvent, exitEvent, manualEvent: null, entryStatus, exitStatus, status, lastEvent, entryTiming: { isLate: false, isAfterAbsenceThreshold: false, lateMinutes: 0 }, automaticAbsenceEvent: null, otherServiceEntry: null, isSelfReportedExtra: false, isFlexible: true, overtimeAuthorization: null, overtimeRequest: null, overtimeRequestPending: false, overtimeMinutes: 0, leaveRecord: null });
+    });
+    const operatorsWithRows = new Set(rows.map(row => row.shift.operator_id));
+    (state.flexibleModes || []).forEach(mode => {
+      if (!flexibleModeAppliesOnDate(mode, date) || operatorsWithRows.has(mode.operator_id)) return;
+      const flexLeave = leaveForOperatorDate(mode.operator_id, date);
+      rows.push({
+        shift: {
+          id: `flex__${mode.operator_id}__${date}__placeholder`,
+          assignment_id: null,
+          shift_date: date,
+          operator_id: mode.operator_id,
+          site_id: mode.site_id,
+          scheduled_start: null,
+          scheduled_end: null,
+          grace_minutes: 0,
+          absence_after_minutes: 0,
+          assignment_type: "flexible",
+          notes: "Jornada flexible asignada"
+        },
+        entryEvent: null,
+        exitEvent: null,
+        manualEvent: null,
+        entryStatus: flexLeave ? { key: "leave", label: leaveTypeLabel(flexLeave.leave_type), className: "status-leave" } : { key: "flexible_pending", label: "Sin ingreso registrado", className: "status-pending" },
+        exitStatus: flexLeave ? { key: "leave", label: "No corresponde", className: "status-leave" } : { key: "not_started", label: "Sin salida", className: "status-pending" },
+        status: flexLeave ? { key: "leave", label: leaveTypeLabel(flexLeave.leave_type), className: "status-leave" } : { key: "flexible_idle", label: "Jornada flexible · sin fichaje", className: "status-pending" },
+        lastEvent: null,
+        entryTiming: { isLate: false, isAfterAbsenceThreshold: false, lateMinutes: 0 },
+        automaticAbsenceEvent: null, otherServiceEntry: null, isSelfReportedExtra: false, isFlexible: true,
+        overtimeAuthorization: null, overtimeRequest: null, overtimeRequestPending: false, overtimeMinutes: 0, leaveRecord: flexLeave || null
+      });
+    });
+    return rows;
+  }
+
+  function getDashboardRows() {
+    const regularRows = state.shifts.map(shift => {
       const entryEvent = getEntryEvent(shift);
       const exitEvent = getExitEvent(shift);
       const manualEvent = getManualEvent(shift);
@@ -783,8 +3073,697 @@
       const exitStatus = getExitStatus(shift, entryEvent, exitEvent);
       const status = getShiftStatus(shift);
       const lastEvent = latestEventForShift(shift.id);
-      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent };
+      const entryTiming = getEntryTimingInfo(shift, entryEvent);
+      const automaticAbsenceEvent = getAutomaticAbsenceEvent(shift);
+      const otherServiceEntry = !entryEvent && entryStatus.key === "absent" ? findOtherServiceEntryDuringShift(shift) : null;
+      const overtimeAuthorization = overtimeAuthorizationForShift(shift.id);
+      const overtimeRequest = overtimeRequestForShift(shift.id);
+      const overtimeRequestPending = isPendingOvertimeRequest(overtimeRequest);
+      const overtimeMinutes = overtimeMinutesForShift(shift, exitEvent);
+      const leaveRecord = leaveForShift(shift);
+      return { shift, entryEvent, exitEvent, manualEvent, entryStatus, exitStatus, status, lastEvent, entryTiming, automaticAbsenceEvent, otherServiceEntry, isSelfReportedExtra: false, overtimeAuthorization, overtimeRequest, overtimeRequestPending, overtimeMinutes, leaveRecord };
     });
+    return [...regularRows, ...getFlexibleDashboardRows(), ...getSelfReportedExtraDashboardRows()].sort((a, b) => `${a.shift.scheduled_start || "99:99"}|${byId(state.sites, a.shift.site_id)?.name || ""}`.localeCompare(`${b.shift.scheduled_start || "99:99"}|${byId(state.sites, b.shift.site_id)?.name || ""}`));
+  }
+
+  function liveStatusFilterDefinitions(rows) {
+    const exitAlertKeys = ["auto_checkout", "early_exit", "exit_outside", "missing_exit", "exit_due"];
+    const definitions = [
+      { key: "all", label: "Todos", tone: "neutral", matches: () => true },
+      { key: "alerts", label: "Con alerta", tone: "alert", matches: row => hasOperationalAlert(row) },
+      { key: "on_time", label: "Ingreso correcto", tone: "present", matches: row => !row.isFlexible && row.entryStatus.key === "present" && !row.entryTiming?.isLate },
+      { key: "late", label: "Llegada tarde", tone: "late", matches: row => row.entryStatus.key === "late" || row.entryTiming?.isLate === true || row.entryEvent?.observed_status === "late" },
+      { key: "outside", label: "Fuera de radio", tone: "outside", matches: row => row.entryStatus.key === "outside" },
+      { key: "absent", label: "Ausentes", tone: "absent", matches: row => row.entryStatus.key === "absent" },
+      { key: "day_off", label: "Francos", tone: "dayoff", matches: row => row.entryStatus.key === "day_off" },
+      { key: "leave", label: "Licencias / vacaciones", tone: "leave", matches: row => row.entryStatus.key === "leave" || Boolean(row.leaveRecord) },
+      { key: "pending", label: "Pendientes", tone: "pending", matches: row => ["scheduled", "on_window"].includes(row.entryStatus.key) },
+      { key: "extra", label: "Coberturas / refuerzos", tone: "extra", matches: row => row.isSelfReportedExtra || ["coverage", "reinforcement"].includes(String(row.shift.assignment_type || "")) },
+      { key: "flexible", label: "Jornada flexible", tone: "neutral", matches: row => row.isFlexible === true },
+      { key: "overtime", label: "Horas extra", tone: "overtime", matches: row => Boolean(row.overtimeAuthorization || row.overtimeRequest) },
+      { key: "auto_checkout", label: "Cierres automáticos", tone: "exit", matches: row => row.exitStatus.key === "auto_checkout" },
+      { key: "exit_alert", label: "Alertas de salida", tone: "exit", matches: row => exitAlertKeys.includes(row.exitStatus.key) }
+    ];
+    return definitions.map(def => ({ ...def, count: rows.filter(def.matches).length }));
+  }
+
+  function renderLiveStatusFilters(rows) {
+    const container = $("#liveStatusFilters");
+    if (!container) return;
+    const definitions = liveStatusFilterDefinitions(rows);
+    if (!definitions.some(def => def.key === state.liveStatusFilter)) state.liveStatusFilter = "all";
+    container.innerHTML = `
+      <span class="live-filter-label">Filtrar:</span>
+      ${definitions.map(def => `
+        <button class="status-filter-btn tone-${def.tone} ${state.liveStatusFilter === def.key ? "active" : ""}"
+          type="button" data-live-filter="${def.key}" aria-pressed="${state.liveStatusFilter === def.key ? "true" : "false"}">
+          <span class="filter-dot" aria-hidden="true"></span>
+          <span>${escapeHtml(def.label)}</span>
+          <strong class="filter-count">${def.count}</strong>
+        </button>`).join("")}
+    `;
+  }
+
+  function filteredDashboardRows(rows) {
+    const definition = liveStatusFilterDefinitions(rows).find(def => def.key === state.liveStatusFilter);
+    return definition ? rows.filter(definition.matches) : rows;
+  }
+
+  let managedTableScrollSyncLock = false;
+  let managedTableActiveScrollWrap = null;
+  let managedTableActiveHeaderWrap = null;
+  let managedTableObserver = null;
+  let managedTableRefreshFrame = 0;
+  let managedHeaderNeedsRebuild = true;
+
+  function ensureManagedTableHelpers() {
+    let scrollProxy = $("#globalTableScrollProxy");
+    if (!scrollProxy) {
+      scrollProxy = document.createElement("div");
+      scrollProxy.id = "globalTableScrollProxy";
+      scrollProxy.className = "floating-h-scroll hidden";
+      scrollProxy.setAttribute("aria-hidden", "true");
+      scrollProxy.innerHTML = '<div class="floating-h-scroll-inner"></div>';
+      document.body.appendChild(scrollProxy);
+    }
+
+    let headerProxy = $("#globalTableHeaderProxy");
+    if (!headerProxy) {
+      headerProxy = document.createElement("div");
+      headerProxy.id = "globalTableHeaderProxy";
+      headerProxy.className = "floating-table-header hidden";
+      headerProxy.setAttribute("aria-hidden", "true");
+      headerProxy.innerHTML = '<div class="floating-table-header-scroll"></div>';
+      document.body.appendChild(headerProxy);
+    }
+
+    if (scrollProxy.dataset.bound !== "1") {
+      scrollProxy.dataset.bound = "1";
+      scrollProxy.addEventListener("scroll", () => {
+        const target = managedTableActiveScrollWrap;
+        if (!target || managedTableScrollSyncLock) return;
+        managedTableScrollSyncLock = true;
+        target.scrollLeft = scrollProxy.scrollLeft;
+        const headerScroll = headerProxy.querySelector(".floating-table-header-scroll");
+        if (managedTableActiveHeaderWrap === target && headerScroll) headerScroll.scrollLeft = scrollProxy.scrollLeft;
+        managedTableScrollSyncLock = false;
+      }, { passive: true });
+    }
+    return { scrollProxy, headerProxy };
+  }
+
+  function visibleResponsiveTables() {
+    return $$(".responsive-table").filter(wrap => {
+      if (!wrap.querySelector("table")) return false;
+      const style = window.getComputedStyle(wrap);
+      return style.display !== "none" && style.visibility !== "hidden" && wrap.getClientRects().length > 0;
+    });
+  }
+
+  function managedStickyTop() {
+    let top = 8;
+    [$(".topbar"), $("#contextSearchBar")].filter(Boolean).forEach(element => {
+      const rect = element.getBoundingClientRect();
+      // Solo cuenta como obstrucción cuando realmente está pegado a la parte superior.
+      if (rect.bottom > 0 && rect.top <= 18) top = Math.max(top, rect.bottom + 6);
+    });
+    return Math.min(top, Math.max(8, (window.innerHeight || 0) - 120));
+  }
+
+  function bindManagedTableWrap(wrap) {
+    if (wrap.dataset.managedTableBound === "1") return;
+    wrap.dataset.managedTableBound = "1";
+    wrap.addEventListener("scroll", () => {
+      const { scrollProxy, headerProxy } = ensureManagedTableHelpers();
+      if (!managedTableScrollSyncLock && managedTableActiveScrollWrap === wrap) {
+        managedTableScrollSyncLock = true;
+        scrollProxy.scrollLeft = wrap.scrollLeft;
+        managedTableScrollSyncLock = false;
+      }
+      if (managedTableActiveHeaderWrap === wrap) {
+        const headerScroll = headerProxy.querySelector(".floating-table-header-scroll");
+        if (headerScroll) headerScroll.scrollLeft = wrap.scrollLeft;
+      }
+    }, { passive: true });
+  }
+
+  function rebuildFloatingTableHeader(wrap, headerProxy) {
+    const sourceTable = wrap?.querySelector("table");
+    const sourceHead = sourceTable?.querySelector("thead");
+    const holder = headerProxy.querySelector(".floating-table-header-scroll");
+    if (!sourceTable || !sourceHead || !holder) return false;
+
+    const clonedHead = sourceHead.cloneNode(true);
+    clonedHead.querySelectorAll("[id]").forEach(element => element.removeAttribute("id"));
+    clonedHead.querySelectorAll("input, button, select, a").forEach(element => element.setAttribute("tabindex", "-1"));
+
+    const floatingTable = document.createElement("table");
+    floatingTable.setAttribute("aria-hidden", "true");
+    const sourceWidth = Math.max(sourceTable.scrollWidth, sourceTable.getBoundingClientRect().width, wrap.scrollWidth);
+    floatingTable.style.width = `${sourceWidth}px`;
+    floatingTable.style.minWidth = `${sourceWidth}px`;
+    floatingTable.appendChild(clonedHead);
+    holder.replaceChildren(floatingTable);
+
+    const sourceCells = Array.from(sourceHead.querySelectorAll("tr:first-child > th"));
+    const cloneCells = Array.from(clonedHead.querySelectorAll("tr:first-child > th"));
+    sourceCells.forEach((cell, index) => {
+      const clone = cloneCells[index];
+      if (!clone) return;
+      const width = cell.getBoundingClientRect().width;
+      clone.style.width = `${width}px`;
+      clone.style.minWidth = `${width}px`;
+      clone.style.maxWidth = `${width}px`;
+    });
+    managedHeaderNeedsRebuild = false;
+    return true;
+  }
+
+  function refreshManagedTableUX() {
+    managedTableRefreshFrame = 0;
+    const { scrollProxy, headerProxy } = ensureManagedTableHelpers();
+    const scrollInner = scrollProxy.querySelector(".floating-h-scroll-inner");
+    const wraps = visibleResponsiveTables();
+    wraps.forEach(bindManagedTableWrap);
+
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+    const stickyTop = managedStickyTop();
+
+    // 1) Scrollbar horizontal: controla la tabla que atraviesa el borde inferior del viewport.
+    const scrollCandidates = wraps
+      .filter(wrap => wrap.scrollWidth > wrap.clientWidth + 2)
+      .map(wrap => ({ wrap, rect: wrap.getBoundingClientRect() }))
+      .filter(item => item.rect.top < viewportHeight - 8 && item.rect.bottom > viewportHeight - 2)
+      .sort((a, b) => b.rect.top - a.rect.top);
+    const scrollTarget = scrollCandidates[0]?.wrap || null;
+
+    if (!scrollTarget || !scrollInner) {
+      managedTableActiveScrollWrap = null;
+      scrollProxy.classList.add("hidden");
+    } else {
+      const rect = scrollTarget.getBoundingClientRect();
+      const left = Math.max(8, rect.left);
+      const right = Math.min(viewportWidth - 8, rect.right);
+      if (right - left < 120) {
+        managedTableActiveScrollWrap = null;
+        scrollProxy.classList.add("hidden");
+      } else {
+        managedTableActiveScrollWrap = scrollTarget;
+        scrollInner.style.width = `${Math.max(scrollTarget.scrollWidth, scrollTarget.clientWidth)}px`;
+        scrollProxy.style.left = `${left}px`;
+        scrollProxy.style.width = `${right - left}px`;
+        scrollProxy.style.bottom = "8px";
+        scrollProxy.classList.remove("hidden");
+        if (!managedTableScrollSyncLock && Math.abs(scrollProxy.scrollLeft - scrollTarget.scrollLeft) > 1) {
+          scrollProxy.scrollLeft = scrollTarget.scrollLeft;
+        }
+      }
+    }
+
+    // 2) Encabezado flotante: conserva los títulos de columna al bajar por cualquier tabla larga.
+    const headerCandidates = wraps.map(wrap => {
+      const table = wrap.querySelector("table");
+      const thead = table?.querySelector("thead");
+      return thead ? { wrap, table, thead, rect: wrap.getBoundingClientRect(), headRect: thead.getBoundingClientRect() } : null;
+    }).filter(Boolean)
+      .filter(item => item.rect.top < stickyTop && item.rect.bottom > stickyTop + 44 && item.headRect.bottom <= stickyTop + 2)
+      .sort((a, b) => b.rect.top - a.rect.top);
+    const headerTarget = headerCandidates[0]?.wrap || null;
+
+    if (!headerTarget) {
+      managedTableActiveHeaderWrap = null;
+      headerProxy.classList.add("hidden");
+    } else {
+      const rect = headerTarget.getBoundingClientRect();
+      const left = Math.max(8, rect.left);
+      const right = Math.min(viewportWidth - 8, rect.right);
+      const targetChanged = managedTableActiveHeaderWrap !== headerTarget;
+      if (targetChanged) managedHeaderNeedsRebuild = true;
+      managedTableActiveHeaderWrap = headerTarget;
+      if (managedHeaderNeedsRebuild || targetChanged || !headerProxy.querySelector("thead")) {
+        rebuildFloatingTableHeader(headerTarget, headerProxy);
+      }
+      const headerScroll = headerProxy.querySelector(".floating-table-header-scroll");
+      headerProxy.style.left = `${left}px`;
+      headerProxy.style.width = `${Math.max(120, right - left)}px`;
+      headerProxy.style.top = `${stickyTop}px`;
+      headerProxy.classList.remove("hidden");
+      if (headerScroll) headerScroll.scrollLeft = headerTarget.scrollLeft;
+    }
+  }
+
+  function scheduleManagedTableRefresh(rebuildHeader = false) {
+    if (rebuildHeader) managedHeaderNeedsRebuild = true;
+    if (managedTableRefreshFrame) return;
+    managedTableRefreshFrame = window.requestAnimationFrame(refreshManagedTableUX);
+  }
+
+  function setupManagedTableUX() {
+    ensureManagedTableHelpers();
+    visibleResponsiveTables().forEach(bindManagedTableWrap);
+    if (!managedTableObserver) {
+      const root = $("#supervisorView") || document.body;
+      managedTableObserver = new MutationObserver(() => scheduleManagedTableRefresh(true));
+      managedTableObserver.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style"] });
+      window.addEventListener("scroll", () => scheduleManagedTableRefresh(false), { passive: true });
+      window.addEventListener("resize", () => scheduleManagedTableRefresh(true), { passive: true });
+    }
+    scheduleManagedTableRefresh(true);
+  }
+
+  // Compatibilidad con llamadas existentes de En vivo. Ahora el comportamiento es global.
+  function refreshLiveFloatingScrollbar() { scheduleManagedTableRefresh(false); }
+  function setupLiveFloatingScrollbar() { setupManagedTableUX(); }
+
+  async function updateExtraValidation(shiftId, status) {
+    if (!isManagementProfile()) return toast("No tenés permisos para validar este registro.");
+    if (!shiftId || !["confirmed", "rejected"].includes(status)) return;
+    const action = status === "confirmed" ? "validar" : "rechazar";
+    if (!window.confirm(`¿${action === "validar" ? "Validar" : "Rechazar"} este trabajo extraordinario declarado por el operario?`)) return;
+    await store.updateEventsByShift(shiftId, { validation_status: status });
+    toast(status === "confirmed" ? "Trabajo extraordinario validado." : "Trabajo extraordinario marcado como rechazado.", status === "confirmed" ? "success" : undefined);
+    await renderSupervisorView();
+  }
+
+  function dashboardRowByShiftId(shiftId) {
+    return (state.dashboardRows || []).find(row => String(row.shift?.id) === String(shiftId)) || null;
+  }
+
+  function localDateTimeInputValue(date) {
+    const d = date instanceof Date ? date : new Date(date);
+    if (Number.isNaN(d.getTime())) return "";
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: APP_TIME_ZONE,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+    }).formatToParts(d);
+    const values = Object.fromEntries(parts.filter(part => part.type !== "literal").map(part => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}`;
+  }
+
+  async function markShiftAsDayOff(shiftId) {
+    if (!isManagementProfile()) return toast("No tenés permisos para marcar francos.");
+    const row = dashboardRowByShiftId(shiftId);
+    if (!row?.shift) return toast("No se encontró el turno.");
+    if (row.entryEvent || row.exitEvent) return toast("Este turno ya tiene una marcación. No puede cambiarse a franco.");
+    const operator = byId(state.profiles, row.shift.operator_id);
+    const site = byId(state.sites, row.shift.site_id);
+    const note = window.prompt(`Marcar como FRANCO a ${operator?.full_name || "el operario"} en ${site?.name || "el servicio"}.\n\nObservación opcional:`, "Franco rotativo");
+    if (note === null) return;
+    if (!window.confirm("¿Confirmás que este turno corresponde a un franco y no debe contabilizarse como ausencia?")) return;
+    try {
+      await store.markShiftDayOff({
+        shift_id: row.shift.id,
+        assignment_id: row.shift.assignment_id || null,
+        shift_date: row.shift.shift_date,
+        operator_id: row.shift.operator_id,
+        site_id: row.shift.site_id,
+        work_type: ["coverage", "reinforcement"].includes(row.shift.assignment_type) ? row.shift.assignment_type : "regular",
+        notes: [note, `Marcado por ${state.currentProfile?.full_name || "supervisor/admin"}.`].filter(Boolean).join(" · ")
+      });
+      toast("Franco registrado. Ya no se contabiliza como ausencia.", "success");
+      await renderSupervisorView();
+    } catch (error) {
+      toast(error.message || "No se pudo marcar el franco.");
+    }
+  }
+
+  async function clearShiftDayOff(shiftId) {
+    if (!isManagementProfile()) return toast("No tenés permisos para modificar francos.");
+    if (!window.confirm("¿Quitar el estado FRANCO de este turno? Si el horario ya venció y no hay entrada, el sistema volverá a tratarlo como ausencia.")) return;
+    try {
+      await store.clearShiftDayOff(shiftId);
+      toast("Franco quitado.", "success");
+      await renderSupervisorView();
+    } catch (error) {
+      toast(error.message || "No se pudo quitar el franco.");
+    }
+  }
+
+  function openQuickAbsenceModal(shiftId) {
+    if (!isManagementProfile()) return toast("No tenés permisos para registrar motivos de ausencia.");
+    const row = dashboardRowByShiftId(shiftId);
+    if (!row?.shift) return toast("No se encontró el turno.");
+    if (row.entryEvent || row.exitEvent) return toast("Este turno ya tiene una marcación. No corresponde registrarlo como ausencia.");
+    if (getDayOffEvent(row.shift)) return toast("Este turno está marcado como franco.");
+    if (row.leaveRecord || leaveForShift(row.shift)) return toast("Este turno ya tiene una novedad programada.");
+
+    const operator = byId(state.profiles, row.shift.operator_id);
+    const site = byId(state.sites, row.shift.site_id);
+    const absenceEvent = getAbsenceEvent(row.shift);
+    const parsed = parseQuickAbsenceReason(absenceEvent);
+    state.absenceReasonContext = { shiftId: row.shift.id, eventId: absenceEvent?.id || null };
+
+    $("#quickAbsenceModalSubtitle").textContent = `${operator?.full_name || "Operario"} · ${site?.name || "Servicio"} · ${row.shift.shift_date}`;
+    $("#quickAbsenceReason").value = parsed.code || "medical";
+    $("#quickAbsenceDetail").value = parsed.detail || "";
+    $("#quickAbsenceModalTitle").textContent = parsed.code ? "Editar motivo de ausencia" : "Registrar ausencia";
+    $("#saveQuickAbsenceBtn").textContent = parsed.code ? "Actualizar motivo" : "Guardar ausencia";
+    openModal("quickAbsenceModal");
+  }
+
+  async function saveQuickAbsence(event) {
+    event.preventDefault();
+    const context = state.absenceReasonContext;
+    if (!context?.shiftId) return toast("No se encontró el turno a actualizar.");
+    const row = dashboardRowByShiftId(context.shiftId);
+    if (!row?.shift) return toast("No se encontró el turno.");
+    if (row.entryEvent || row.exitEvent) return toast("Este turno ya tiene una marcación. No corresponde registrarlo como ausencia.");
+
+    const reasonCode = $("#quickAbsenceReason")?.value || "other";
+    const detail = $("#quickAbsenceDetail")?.value.trim() || "";
+    if (reasonCode === "other" && !detail) return toast("Para 'Otro motivo', indicá una observación breve.");
+
+    const actor = state.currentProfile?.full_name || "supervisor/admin";
+    const existing = getAbsenceEvent(row.shift);
+
+    try {
+      if (reasonCode === "vacation") {
+        const date = row.shift.shift_date;
+        const overlappingVacation = (state.leaveRecords || []).find(leave =>
+          leave.operator_id === row.shift.operator_id
+          && isActiveLeave(leave)
+          && leave.leave_type === "vacation"
+          && leave.start_date <= date
+          && leave.end_date >= date
+        );
+
+        if (!overlappingVacation) {
+          await store.upsertLeaveEvent({
+            operator_id: row.shift.operator_id,
+            leave_type: "vacation",
+            start_date: date,
+            end_date: date,
+            reference: "Registro rápido desde En vivo",
+            notes: detail || `Vacaciones registradas por ${actor}.`,
+            status: "active",
+            created_by: state.currentProfile?.id || null,
+            updated_by: state.currentProfile?.id || null
+          });
+        }
+
+        if (existing?.id) {
+          const vacationNote = [stripQuickAbsenceMetadata(existing.notes || ""), `Reclasificada como vacaciones por ${actor}.${detail ? ` Detalle: ${detail}` : ""}`].filter(Boolean).join("\n");
+          await store.updateAttendanceEvent(existing.id, {
+            notes: vacationNote,
+            recorded_by: state.currentProfile?.id || null
+          });
+        }
+
+        closeModal("quickAbsenceModal");
+        state.absenceReasonContext = null;
+        toast("Vacaciones registradas. Ese día no se contabiliza como ausencia.", "success");
+        await renderSupervisorView();
+        return;
+      }
+
+      const notes = buildQuickAbsenceNotes(existing?.notes || "", reasonCode, detail, actor);
+      if (existing?.id) {
+        await store.updateAttendanceEvent(existing.id, {
+          notes,
+          recorded_by: state.currentProfile?.id || null
+        });
+      } else {
+        await store.createEvent({
+          shift_id: row.shift.id,
+          assignment_id: row.shift.assignment_id || null,
+          shift_date: row.shift.shift_date,
+          operator_id: row.shift.operator_id,
+          site_id: row.shift.site_id,
+          event_type: "absent",
+          observed_status: "absent",
+          work_type: ["coverage", "reinforcement"].includes(row.shift.assignment_type) ? row.shift.assignment_type : "regular",
+          entry_source: "assignment",
+          validation_status: "confirmed",
+          notes,
+          client_time: new Date().toISOString(),
+          recorded_via: "supervisor_manual",
+          recorded_by: state.currentProfile?.id || null
+        });
+      }
+      closeModal("quickAbsenceModal");
+      state.absenceReasonContext = null;
+      toast(`Ausencia registrada: ${quickAbsenceReasonLabel(reasonCode) || "Otro motivo"}.`, "success");
+      await renderSupervisorView();
+    } catch (error) {
+      toast(error.message || "No se pudo registrar el motivo de ausencia.");
+    }
+  }
+
+  function openManualAttendanceModal(shiftId, type) {
+    if (!isManagementProfile()) return toast("No tenés permisos para cargar marcaciones manuales.");
+    const row = dashboardRowByShiftId(shiftId);
+    if (!row?.shift) return toast("No se encontró el turno.");
+    if (!['present', 'checkout'].includes(type)) return;
+    if (type === 'present' && row.entryEvent) return toast("Ese turno ya tiene una entrada registrada.");
+    if (type === 'checkout' && row.exitEvent) return toast("Ese turno ya tiene una salida registrada.");
+    if (type === 'checkout' && !row.entryEvent) return toast("Primero debe existir una entrada para poder cargar la salida manual.");
+
+    const operator = byId(state.profiles, row.shift.operator_id);
+    const site = byId(state.sites, row.shift.site_id);
+    const hasSchedule = Boolean(row.shift.scheduled_start && row.shift.scheduled_end);
+    const scheduled = hasSchedule ? getScheduledDateTime(row.shift, type === 'present' ? 'scheduled_start' : 'scheduled_end') : null;
+    const dashboardDate = row.shift.shift_date;
+    const now = new Date();
+    const suggested = dashboardDate === todayISO() || !scheduled ? now : scheduled;
+    state.manualAttendanceContext = { shiftId, type };
+    $("#manualAttendanceModalTitle").textContent = type === 'present' ? "Registrar entrada manual" : "Registrar salida manual";
+    $("#manualAttendanceModalSubtitle").textContent = `${operator?.full_name || "Operario"} · ${site?.name || "Servicio"} · ${dashboardDate}`;
+    $("#manualAttendanceDateTime").value = localDateTimeInputValue(suggested);
+    $("#manualAttendanceReason").value = "";
+    openModal("manualAttendanceModal");
+    window.setTimeout(() => $("#manualAttendanceReason")?.focus(), 100);
+  }
+
+  async function saveManualAttendance(event) {
+    event.preventDefault();
+    const context = state.manualAttendanceContext;
+    if (!context) return toast("No se encontró la marcación a cargar.");
+    const row = dashboardRowByShiftId(context.shiftId);
+    if (!row?.shift) return toast("No se encontró el turno.");
+    const dateTimeRaw = $("#manualAttendanceDateTime").value;
+    const reason = $("#manualAttendanceReason").value.trim();
+    if (!dateTimeRaw) return toast("Indicá la fecha y hora real de la marcación.");
+    if (!reason) return toast("Indicá el motivo de la carga manual.");
+    const [manualDate, manualTime] = String(dateTimeRaw).split("T");
+    const moment = zonedDateTimeToDate(manualDate, manualTime || "00:00");
+    if (Number.isNaN(moment.getTime())) return toast("La fecha y hora ingresadas no son válidas.");
+
+    const shiftDate = row.shift.shift_date;
+    const selectedDate = manualDate;
+    const hasSchedule = Boolean(row.shift.scheduled_start && row.shift.scheduled_end);
+    const scheduledEnd = hasSchedule ? getScheduledDateTime(row.shift, "scheduled_end") : null;
+    const overnightAllowedDate = scheduledEnd ? dateISOInTimeZone(scheduledEnd) : shiftDate;
+    if (selectedDate !== shiftDate && !(context.type === 'checkout' && hasSchedule && selectedDate === overnightAllowedDate)) {
+      return toast("La fecha de la marcación no coincide con el día del turno.");
+    }
+
+    let observedStatus = "present";
+    if (context.type === "present") {
+      if (hasSchedule) {
+        const start = getScheduledDateTime(row.shift, "scheduled_start");
+        observedStatus = moment.getTime() > start.getTime() + Number(row.shift.grace_minutes || 0) * 60000 ? "late" : "present";
+      } else observedStatus = "present";
+    } else {
+      if (hasSchedule) {
+        const end = getScheduledDateTime(row.shift, "scheduled_end");
+        observedStatus = moment.getTime() < end.getTime() - Number(row.shift.grace_minutes || 0) * 60000 ? "early_exit" : "on_time_exit";
+      } else observedStatus = "on_time_exit";
+    }
+
+    const assignmentType = row.isSelfReportedExtra ? (row.extraWorkType || "coverage") : (row.shift.assignment_type || "fixed");
+    const workType = ["coverage", "reinforcement"].includes(assignmentType) ? assignmentType : "regular";
+    const entrySource = row.isSelfReportedExtra ? "operator_extra" : "assignment";
+    const validationStatus = row.isSelfReportedExtra ? (row.extraValidationStatus || "pending") : "confirmed";
+    const actor = state.currentProfile?.full_name || "Supervisor/Administrador";
+
+    try {
+      if (context.type === "present" && getDayOffEvent(row.shift)) await store.clearShiftDayOff(row.shift.id);
+      await store.createEvent({
+        shift_id: row.shift.id,
+        assignment_id: row.shift.assignment_id || null,
+        shift_date: row.shift.shift_date,
+        operator_id: row.shift.operator_id,
+        site_id: row.shift.site_id,
+        event_type: context.type,
+        observed_status: observedStatus,
+        work_type: workType,
+        entry_source: entrySource,
+        validation_status: validationStatus,
+        notes: `Carga manual por ${actor}. Motivo: ${reason}`,
+        lat: null,
+        lng: null,
+        gps_accuracy_m: null,
+        distance_m: null,
+        is_inside_site: null,
+        client_time: moment.toISOString(),
+        recorded_via: "supervisor_manual",
+        recorded_by: state.currentProfile?.id || null
+      });
+      closeModal("manualAttendanceModal");
+      state.manualAttendanceContext = null;
+      toast(`${context.type === "present" ? "Entrada" : "Salida"} manual registrada sin GPS.`, "success");
+      await renderSupervisorView();
+    } catch (error) {
+      toast(error.message || "No se pudo guardar la marcación manual.");
+    }
+  }
+
+  function openOperatorOvertimeRequestModal(shiftId, assignment) {
+    const entryEvent = state.events.find(event => event.shift_id === shiftId && event.event_type === "present");
+    const exitEvent = state.events.find(event => event.shift_id === shiftId && event.event_type === "checkout");
+    if (!entryEvent || exitEvent) return operatorProblem("La solicitud de hora extra solo está disponible mientras el turno está abierto.", { action: "solicitud_hora_extra", category: "usage", severity: "warning", shiftId, siteId: entryEvent?.site_id });
+    const existingAuthorization = overtimeAuthorizationForShift(shiftId);
+    if (existingAuthorization) return operatorProblem("Este turno ya tiene horas extra autorizadas.", { action: "solicitud_hora_extra", category: "usage", severity: "warning", shiftId, siteId: entryEvent?.site_id });
+    const request = overtimeRequestForShift(shiftId);
+    const shiftDate = entryEvent.shift_date || shiftDateFromId(shiftId, todayISO());
+    const shift = { shift_date: shiftDate, scheduled_start: assignment?.scheduled_start, scheduled_end: assignment?.scheduled_end };
+    const scheduledEnd = getScheduledDateTime(shift, "scheduled_end");
+    let suggested = request?.requested_until ? new Date(request.requested_until) : new Date(scheduledEnd.getTime() + 60 * 60000);
+    const minimum = new Date(Math.max(scheduledEnd.getTime() + 60000, Date.now() + 60000));
+    if (!Number.isFinite(suggested.getTime()) || suggested <= minimum) suggested = new Date(minimum.getTime() + 59 * 60000);
+
+    state.overtimeRequestContext = { shiftId, assignmentId: assignment?.id || entryEvent.assignment_id };
+    $("#operatorOvertimeRequestModalTitle").textContent = isPendingOvertimeRequest(request) ? "Editar solicitud de hora extra" : "Solicitar hora extra";
+    $("#operatorOvertimeRequestModalSubtitle").textContent = `${byId(state.sites, entryEvent.site_id)?.name || "Servicio"} · salida prevista ${formatTime(assignment?.scheduled_end)}`;
+    $("#operatorOvertimeRequestedUntil").value = formatDateTimeLocalInput(suggested);
+    $("#operatorOvertimeRequestedUntil").min = formatDateTimeLocalInput(minimum);
+    $("#operatorOvertimeRequestReason").value = isPendingOvertimeRequest(request) ? (request.reason || "") : "";
+    openModal("operatorOvertimeRequestModal");
+    window.setTimeout(() => $("#operatorOvertimeRequestedUntil")?.focus(), 100);
+  }
+
+  async function saveOperatorOvertimeRequest(event) {
+    event.preventDefault();
+    const shiftId = state.overtimeRequestContext?.shiftId;
+    if (!shiftId) return operatorProblem("No se encontró el turno para solicitar la hora extra.", { action: "solicitud_hora_extra", category: "configuration", severity: "warning" });
+    const raw = $("#operatorOvertimeRequestedUntil")?.value;
+    const reason = $("#operatorOvertimeRequestReason")?.value.trim() || "";
+    if (!raw) return operatorProblem("Indicá hasta qué hora necesitás continuar.", { action: "solicitud_hora_extra", category: "usage", severity: "warning", shiftId });
+    if (!reason) return operatorProblem("Indicá por qué necesitás realizar la hora extra.", { action: "solicitud_hora_extra", category: "usage", severity: "warning", shiftId });
+    const requestedUntil = parseBusinessDateTimeLocal(raw);
+    if (!Number.isFinite(requestedUntil.getTime())) return operatorProblem("La fecha y hora solicitadas no son válidas.", { action: "solicitud_hora_extra", category: "usage", severity: "warning", shiftId });
+    if (requestedUntil <= new Date()) return operatorProblem("La hora solicitada debe estar en el futuro.", { action: "solicitud_hora_extra", category: "usage", severity: "warning", shiftId });
+
+    try {
+      await store.requestOvertime(shiftId, requestedUntil.toISOString(), reason);
+      closeModal("operatorOvertimeRequestModal");
+      state.overtimeRequestContext = null;
+      toast("Solicitud enviada. Quedó pendiente de aprobación del supervisor.", "success");
+      await renderOperatorView();
+    } catch (error) {
+      operatorException(error, "No se pudo enviar la solicitud de hora extra.", { action: "solicitud_hora_extra", shiftId });
+    }
+  }
+
+  function openOvertimeAuthorizationModal(shiftId) {
+    if (!isManagementProfile()) return toast("No tenés permisos para autorizar horas extra.");
+    const row = dashboardRowByShiftId(shiftId);
+    if (!row?.shift || row.isSelfReportedExtra) return toast("No se encontró un turno programado válido.");
+    if (!row.entryEvent) return toast("Primero debe existir una entrada registrada.");
+    const operator = byId(state.profiles, row.shift.operator_id);
+    const site = byId(state.sites, row.shift.site_id);
+    const scheduledEnd = getScheduledDateTime(row.shift, "scheduled_end");
+    const existing = overtimeAuthorizationForShift(shiftId);
+    const request = overtimeRequestForShift(shiftId);
+    const reviewingRequest = isPendingOvertimeRequest(request);
+    if (row.exitEvent && !reviewingRequest) return toast("El turno ya tiene una salida registrada.");
+
+    let suggested = reviewingRequest && request?.requested_until
+      ? new Date(request.requested_until)
+      : existing?.authorized_until ? new Date(existing.authorized_until) : new Date(scheduledEnd.getTime() + 60 * 60000);
+    const minimum = new Date(scheduledEnd.getTime() + 60000);
+    if (!Number.isFinite(suggested.getTime()) || suggested <= minimum) suggested = new Date(minimum.getTime() + 59 * 60000);
+
+    state.overtimeAuthorizationContext = { shiftId, reviewRequest: reviewingRequest };
+    $("#overtimeAuthorizationModalTitle").textContent = reviewingRequest ? "Revisar solicitud de hora extra" : existing ? "Editar autorización de horas extra" : "Autorizar horas extra";
+    $("#overtimeAuthorizationModalSubtitle").textContent = `${operator?.full_name || "Operario"} · ${site?.name || "Servicio"} · salida prevista ${formatTime(row.shift.scheduled_end)}${row.exitEvent ? " · turno ya finalizado" : ""}`;
+    $("#overtimeAuthorizedUntil").value = formatDateTimeLocalInput(suggested);
+    $("#overtimeAuthorizedUntil").min = formatDateTimeLocalInput(minimum);
+    $("#overtimeAuthorizationReason").value = reviewingRequest ? (request?.reason || "") : (existing?.notes || "");
+    const warning = $("#overtimeAuthorizationModalWarning");
+    if (warning) warning.innerHTML = reviewingRequest
+      ? `<strong>Solicitud del operario pendiente.</strong> Solicitó continuar hasta las <strong>${escapeHtml(formatTimeInBusinessZone(request.requested_until))}</strong>${request.reason ? ` por: ${escapeHtml(request.reason)}` : ""}. Aprobarla convierte la solicitud en hora extra autorizada; rechazarla deja constancia de que no fue aprobada.`
+      : `<strong>Solo supervisor o administrador.</strong> Esta aprobación posterga el cierre automático. El operario verá que la hora extra fue autorizada y podrá fichar la salida real con GPS. Si no registra salida, el sistema cerrará el turno 45 minutos después del límite autorizado.`;
+    const revokeButton = $("#revokeOvertimeAuthorizationBtn");
+    if (revokeButton) revokeButton.classList.toggle("hidden", !existing || reviewingRequest);
+    const rejectButton = $("#rejectOvertimeRequestBtn");
+    if (rejectButton) rejectButton.classList.toggle("hidden", !reviewingRequest);
+    const saveButton = $("#saveOvertimeAuthorizationBtn");
+    if (saveButton) saveButton.textContent = reviewingRequest ? "Aprobar hora extra" : "Guardar autorización";
+    openModal("overtimeAuthorizationModal");
+    window.setTimeout(() => $("#overtimeAuthorizedUntil")?.focus(), 100);
+  }
+
+  async function saveOvertimeAuthorization(event) {
+    event.preventDefault();
+    const context = state.overtimeAuthorizationContext || {};
+    const shiftId = context.shiftId;
+    if (!shiftId) return toast("No se encontró el turno a autorizar.");
+    const row = dashboardRowByShiftId(shiftId);
+    if (!row?.shift || !row.entryEvent) return toast("El turno ya no está disponible para extender.");
+    if (row.exitEvent && !context.reviewRequest) return toast("El turno ya tiene una salida registrada.");
+    const raw = $("#overtimeAuthorizedUntil")?.value;
+    const reason = $("#overtimeAuthorizationReason")?.value.trim() || "";
+    if (!raw) return toast("Indicá hasta qué hora está autorizada la extensión.");
+    if (!reason) return toast("Indicá el motivo de la autorización de horas extra.");
+    const authorizedUntil = parseBusinessDateTimeLocal(raw);
+    if (!Number.isFinite(authorizedUntil.getTime())) return toast("La fecha y hora autorizadas no son válidas.");
+    const scheduledEnd = getScheduledDateTime(row.shift, "scheduled_end");
+    if (authorizedUntil <= scheduledEnd) return toast("La hora autorizada debe ser posterior al horario programado de salida.");
+    if (!context.reviewRequest && authorizedUntil <= new Date()) return toast("La hora autorizada debe estar en el futuro.");
+
+    try {
+      if (context.reviewRequest) {
+        await store.approveOvertimeRequest(shiftId, authorizedUntil.toISOString(), reason);
+      } else {
+        await store.setOvertimeAuthorization(shiftId, authorizedUntil.toISOString(), reason);
+      }
+      closeModal("overtimeAuthorizationModal");
+      state.overtimeAuthorizationContext = null;
+      toast(context.reviewRequest ? "Solicitud de hora extra aprobada." : `Horas extra autorizadas hasta las ${formatTimeInBusinessZone(authorizedUntil)}.`, "success");
+      await renderSupervisorView();
+    } catch (error) {
+      toast(error.message || "No se pudo autorizar la hora extra.");
+    }
+  }
+
+  async function rejectOvertimeRequest() {
+    const shiftId = state.overtimeAuthorizationContext?.shiftId;
+    if (!shiftId || !state.overtimeAuthorizationContext?.reviewRequest) return toast("No se encontró una solicitud pendiente.");
+    const note = $("#overtimeAuthorizationReason")?.value.trim() || "";
+    if (!window.confirm("¿Rechazar esta solicitud de hora extra? La marcación real de entrada/salida no se borra.")) return;
+    try {
+      await store.rejectOvertimeRequest(shiftId, note);
+      closeModal("overtimeAuthorizationModal");
+      state.overtimeAuthorizationContext = null;
+      toast("Solicitud de hora extra rechazada.", "success");
+      await renderSupervisorView();
+    } catch (error) {
+      toast(error.message || "No se pudo rechazar la solicitud de hora extra.");
+    }
+  }
+
+  async function revokeOvertimeAuthorization() {
+    const shiftId = state.overtimeAuthorizationContext?.shiftId;
+    if (!shiftId) return toast("No se encontró la autorización.");
+    if (!window.confirm("¿Quitar la autorización de horas extra? Si el turno sigue abierto, volverá a aplicar el cierre automático habitual.")) return;
+    try {
+      await store.revokeOvertimeAuthorization(shiftId);
+      closeModal("overtimeAuthorizationModal");
+      state.overtimeAuthorizationContext = null;
+      toast("Autorización de horas extra quitada.", "success");
+      await renderSupervisorView();
+    } catch (error) {
+      toast(error.message || "No se pudo quitar la autorización.");
+    }
+  }
+
+  function renderDashboard() {
+    const rows = getDashboardRows();
+    state.dashboardRows = rows;
+
     const counts = rows.reduce((acc, row) => {
       acc.total++;
       if (row.entryEvent) acc.entries++;
@@ -794,27 +3773,123 @@
     }, { total: 0, entries: 0, exits: 0, alerts: 0 });
 
     $("#kpiGrid").innerHTML = `
-      ${kpi("Coberturas del día", counts.total)}
-      ${kpi("Entradas registradas", counts.entries, "status-present")}
-      ${kpi("Salidas registradas", counts.exits, "status-ok")}
-      ${kpi("Alertas operativas", counts.alerts, counts.alerts ? "status-late" : "status-present")}
+      ${kpi("Coberturas del día", counts.total, "", "coverage")}
+      ${kpi("Entradas registradas", counts.entries, "status-present", "entries")}
+      ${kpi("Salidas registradas", counts.exits, "status-ok", "exits")}
+      ${kpi("Alertas operativas", counts.alerts, counts.alerts ? "status-late" : "status-present", "alerts")}
     `;
 
-    const tableRows = rows.map(row => {
+    renderLiveStatusFilters(rows);
+    const statusFilteredRows = filteredDashboardRows(rows);
+    const searchTerm = sectionSearchTerm("live");
+    const visibleRows = searchTerm ? statusFilteredRows.filter(row => {
+      const operator = byId(state.profiles, row.shift.operator_id);
+      const site = byId(state.sites, row.shift.site_id);
+      return valuesMatchSearch(
+        searchTerm,
+        operator?.full_name, operator?.phone,
+        site?.name, site?.address, site?.zone, site?.supervisor_name,
+        row.entryStatus?.label, row.exitStatus?.label, row.status?.label,
+        assignmentTypeLabel(row.shift.assignment_type || row.extraWorkType || "fixed"),
+        row.leaveRecord ? leaveTypeLabel(row.leaveRecord.leave_type) : "",
+        row.leaveRecord?.notes, row.leaveRecord?.reference,
+        row.entryEvent?.notes, row.exitEvent?.notes, row.manualEvent?.notes
+      );
+    }) : statusFilteredRows;
+    updateSectionSearchCount("live", visibleRows.length, statusFilteredRows.length);
+
+    const tableRows = visibleRows.map(row => {
       const { shift, entryEvent, exitEvent, entryStatus, exitStatus, status, lastEvent } = row;
       const operator = byId(state.profiles, shift.operator_id);
       const site = byId(state.sites, shift.site_id);
-      const message = buildWhatsAppMessage(shift, status);
+      const message = row.isFlexible ? `${operator?.full_name || "El operario"} tiene jornada flexible en ${site?.name || "el servicio"}; las marcaciones reflejan la hora real de entrada y salida.` : row.isSelfReportedExtra ? `Trabajo extraordinario registrado por ${operator?.full_name || "operario"} en ${site?.name || "servicio"}.` : buildWhatsAppMessage(shift, status);
       const url = whatsappUrl(site?.whatsapp_phone, message);
+      const assignmentType = row.isSelfReportedExtra ? (row.extraWorkType || "coverage") : (shift.assignment_type || "fixed");
+      const typeBadge = assignmentType !== "fixed" ? `<span class="extra-duty-badge ${escapeHtml(assignmentType)}">${escapeHtml(assignmentTypeLabel(assignmentType))}</span>` : "";
+      const validationActions = row.isSelfReportedExtra && row.extraValidationStatus === "pending"
+        ? `<div class="validation-actions"><button class="secondary-btn small-btn" data-extra-validation="confirmed" data-extra-shift="${escapeHtml(shift.id)}" type="button">Validar</button><button class="ghost-btn small-btn" data-extra-validation="rejected" data-extra-shift="${escapeHtml(shift.id)}" type="button">Rechazar</button></div>`
+        : row.isSelfReportedExtra ? `<span class="muted small">${escapeHtml(validationLabel(row.extraValidationStatus))}</span>` : "";
+      const mapButtons = [
+        hasCoordinates(entryEvent) ? `<button class="location-btn" data-map-event="${escapeHtml(entryEvent.id)}" type="button">Mapa entrada</button>` : "",
+        hasCoordinates(exitEvent) ? `<button class="location-btn" data-map-event="${escapeHtml(exitEvent.id)}" type="button">Mapa salida</button>` : ""
+      ].filter(Boolean).join("");
+      const dayOffEvent = getDayOffEvent(shift);
+      const absenceEvent = getAbsenceEvent(shift);
+      const absenceReason = parseQuickAbsenceReason(absenceEvent);
+      const leaveRecord = row.leaveRecord || leaveForShift(shift);
+      const hasNotes = Boolean(String(entryEvent?.notes || "").trim() || String(exitEvent?.notes || "").trim() || String(dayOffEvent?.notes || "").trim() || String(absenceEvent?.notes || "").trim() || String(leaveRecord?.notes || "").trim() || String(leaveRecord?.reference || "").trim() || ((assignmentType !== "fixed") && String(shift?.notes || "").trim()));
+      const observationButton = leaveRecord
+        ? `<button class="secondary-btn small-btn" data-open-leave="${escapeHtml(leaveRecord.id)}" type="button">Ver novedad</button>`
+        : hasNotes ? `<button class="secondary-btn small-btn observation-btn" data-observation-shift="${escapeHtml(shift.id)}" type="button">Ver observación</button>` : "";
+      const canUseDayOff = !row.isSelfReportedExtra && assignmentType === "fixed" && !entryEvent && !exitEvent && !leaveRecord;
+      const dayOffButton = canUseDayOff
+        ? (dayOffEvent
+          ? `<button class="ghost-btn small-btn" data-clear-dayoff="${escapeHtml(shift.id)}" type="button">Quitar franco</button>`
+          : `<button class="dayoff-btn small-btn" data-mark-dayoff="${escapeHtml(shift.id)}" type="button">Marcar franco</button>`)
+        : "";
+      const canRegisterAbsence = !row.isSelfReportedExtra && assignmentType === "fixed" && !entryEvent && !exitEvent && !dayOffEvent && !leaveRecord;
+      const absenceButton = canRegisterAbsence
+        ? `<button class="absence-reason-btn small-btn" data-quick-absence="${escapeHtml(shift.id)}" type="button">${absenceReason.label ? "Editar motivo ausencia" : absenceEvent ? "Registrar motivo" : "Registrar ausencia"}</button>`
+        : "";
+      const manualEntryButton = !entryEvent && !dayOffEvent && !leaveRecord && !row.isSelfReportedExtra
+        ? `<button class="secondary-btn small-btn" data-manual-attendance="present" data-manual-shift="${escapeHtml(shift.id)}" type="button">${row.automaticAbsenceEvent ? "Entrada tardía manual" : "Entrada manual"}</button>` : "";
+      const manualExitButton = entryEvent && !exitEvent
+        ? `<button class="secondary-btn small-btn" data-manual-attendance="checkout" data-manual-shift="${escapeHtml(shift.id)}" type="button">Salida manual</button>` : "";
+      const overtimeAuthorization = row.overtimeAuthorization || overtimeAuthorizationForShift(shift.id);
+      const overtimeRequest = row.overtimeRequest || overtimeRequestForShift(shift.id);
+      const overtimeRequestPending = isPendingOvertimeRequest(overtimeRequest);
+      const overtimeButton = !row.isSelfReportedExtra && !leaveRecord && entryEvent && shift.scheduled_end && (overtimeRequestPending || !exitEvent)
+        ? `<button class="overtime-btn small-btn" data-overtime-authorization="${escapeHtml(shift.id)}" type="button">${overtimeRequestPending ? "Revisar hora extra" : overtimeAuthorization ? "Editar hora extra" : "Autorizar hora extra"}</button>` : "";
+      const overtimeDetail = overtimeAuthorization
+        ? `<div class="overtime-live-note approved"><strong>Hora extra autorizada</strong> hasta ${escapeHtml(formatTimeInBusinessZone(overtimeAuthorization.authorized_until))}${overtimeAuthorization.approved_by_name ? ` · ${escapeHtml(overtimeAuthorization.approved_by_name)}` : ""}</div>`
+        : overtimeRequestPending
+          ? `<div class="overtime-live-note pending"><strong>Pendiente de aprobación</strong> · solicitó hasta ${escapeHtml(formatTimeInBusinessZone(overtimeRequest.requested_until))}${overtimeRequest.reason ? `<br>${escapeHtml(overtimeRequest.reason)}` : ""}</div>`
+          : overtimeRequest?.status === "rejected"
+            ? `<div class="overtime-live-note unapproved"><strong>Solicitud de hora extra rechazada</strong></div>`
+            : row.overtimeMinutes > 0
+              ? `<div class="exit-delay-live-note completed"><strong>Salida +${escapeHtml(String(row.overtimeMinutes))} min</strong><br>respecto del horario programado</div>`
+              : "";
+      const entryTiming = row.entryTiming || getEntryTimingInfo(shift, entryEvent);
+      const lateEntryNote = entryEvent && entryTiming.isLate
+        ? `<div class="late-entry-note ${entryTiming.isAfterAbsenceThreshold ? "critical" : ""}">${entryTiming.isAfterAbsenceThreshold
+          ? `Llegó +${entryTiming.lateMinutes} min · superó umbral de ausencia (+${entryTiming.absenceAfterMinutes} min)`
+          : `Llegó +${entryTiming.lateMinutes} min respecto del horario previsto`}</div>`
+        : "";
+      const otherServiceEntrySite = row.otherServiceEntry ? byId(state.sites, row.otherServiceEntry.site_id) : null;
+      const otherServiceEntryNote = row.otherServiceEntry
+        ? `<div class="late-entry-note critical">Sin entrada en este servicio. El operario registró entrada en <strong>${escapeHtml(otherServiceEntrySite?.name || "otro servicio")}</strong> a las ${escapeHtml(formatClock(row.otherServiceEntry.client_time || row.otherServiceEntry.created_at))}.</div>`
+        : "";
+      const rowTimingClass = entryTiming.isAfterAbsenceThreshold ? "live-late-critical-row" : entryTiming.isLate ? "live-late-row" : "";
+      const overtimeRowClass = overtimeRequestPending ? "live-overtime-pending-row" : overtimeRequest?.status === "rejected" ? "live-overtime-unapproved-row" : overtimeAuthorization ? "live-overtime-approved-row" : "";
+      const leaveRowClass = leaveRecord ? "live-leave-row" : "";
+      const rowClasses = [searchTerm ? "search-match-row" : "", rowTimingClass, overtimeRowClass, leaveRowClass].filter(Boolean).join(" ");
+      const entryCell = leaveRecord
+        ? `<span class="status-pill status-leave">${escapeHtml(leaveTypeLabel(leaveRecord.leave_type))}</span><br><span class="muted small">${escapeHtml(leavePeriodLabel(leaveRecord))}</span>${leaveRecord.reference ? `<br><span class="muted small">Ref: ${escapeHtml(leaveRecord.reference)}</span>` : ""}`
+        : `${statusDetailCell(entryStatus, entryEvent || dayOffEvent || absenceEvent, "Sin entrada")}${lateEntryNote}${otherServiceEntryNote}`;
+      const exitCell = leaveRecord
+        ? `<span class="status-pill status-leave">No corresponde</span>`
+        : statusDetailCell(exitStatus, exitEvent || dayOffEvent, "Sin salida");
+      const operationalDetail = leaveRecord
+        ? `<span class="muted small">Ausencia justificada programada</span>`
+        : `<span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.client_time || lastEvent.created_at)}` : "—"}</span>${overtimeDetail}`;
+
       return `
-        <tr>
+        <tr class="${rowClasses}">
           <td><strong>${escapeHtml(operator?.full_name || "—")}</strong><br><span class="muted small">${escapeHtml(operator?.phone || "")}</span></td>
-          <td><strong>${escapeHtml(site?.name || "—")}</strong><br><span class="muted small">${escapeHtml(site?.address || "")}</span></td>
-          <td>${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}</td>
-          <td>${statusDetailCell(entryStatus, entryEvent, "Sin entrada")}</td>
-          <td>${statusDetailCell(exitStatus, exitEvent, "Sin salida")}</td>
-          <td><span class="status-pill ${status.className}">${status.label}</span><br><span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.created_at)}` : "—"}</span></td>
+          <td><strong>${escapeHtml(site?.name || "—")}</strong><br>${typeBadge ? `${typeBadge}<br>` : ""}<span class="muted small">${escapeHtml(site?.address || "")}</span></td>
+          <td>${row.isFlexible ? `<span class="extra-schedule-label">Flexible · hora real</span>` : row.isSelfReportedExtra ? `<span class="extra-schedule-label">Sin horario previo</span>` : `${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`}</td>
+          <td>${entryCell}</td>
+          <td>${exitCell}</td>
+          <td><span class="status-pill ${status.className}">${status.label}</span><br>${operationalDetail}</td>
           <td class="row-actions">
+            ${mapButtons}
+            ${observationButton}
+            ${dayOffButton}
+            ${absenceButton}
+            ${manualEntryButton}
+            ${manualExitButton}
+            ${overtimeButton}
+            ${validationActions}
             <a class="wa-btn ${normalizePhone(site?.whatsapp_phone) ? "" : "disabled-link"}" href="${url}" target="_blank" rel="noopener">WhatsApp consorcio</a>
           </td>
         </tr>`;
@@ -825,30 +3900,333 @@
         <thead>
           <tr><th>Operario</th><th>Servicio</th><th>Horario</th><th>Entrada</th><th>Salida</th><th>Estado operativo</th><th>Acción</th></tr>
         </thead>
-        <tbody>${tableRows || `<tr><td colspan="7">No hay cobertura programada para esta fecha.</td></tr>`}</tbody>
+        <tbody>${tableRows || `<tr><td colspan="7">${rows.length ? "No hay personas que coincidan con este filtro." : "No hay cobertura programada para esta fecha."}</td></tr>`}</tbody>
       </table>`;
-    $("#lastRefreshLabel").textContent = `Actualizado ${new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })}`;
+    $("#liveTable").querySelectorAll("[data-open-leave]").forEach(btn => btn.addEventListener("click", () => {
+      const leave = (state.leaveRecords || []).find(item => item.id === btn.dataset.openLeave);
+      if (!leave) return;
+      renderTab("leaves");
+      editLeave(leave.id);
+    }));
+    $("#lastRefreshLabel").textContent = `Actualizado ${new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: APP_TIME_ZONE })}`;
+    setupLiveFloatingScrollbar();
+    requestAnimationFrame(refreshLiveFloatingScrollbar);
   }
 
-  function kpi(label, value, className = "") {
-    return `<div class="summary-card ${className}"><div class="kpi-value">${value}</div><div class="kpi-label">${label}</div></div>`;
+  function kpi(label, value, className = "", detailKey = "") {
+    if (!detailKey) {
+      return `<div class="summary-card ${className}"><div class="kpi-value">${value}</div><div class="kpi-label">${label}</div></div>`;
+    }
+    return `<button class="summary-card kpi-button ${className}" data-kpi-detail="${detailKey}" type="button" aria-label="Ver detalle de ${escapeHtml(label)}"><div class="kpi-value">${value}</div><div class="kpi-label">${label}</div><span class="kpi-hint">Ver detalle</span></button>`;
+  }
+
+  function formatOperationalDate(dateString) {
+    try {
+      return formatISODate(dateString, { weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" });
+    } catch (_) {
+      return dateString;
+    }
+  }
+
+  function openModal(id) {
+    const modal = $(`#${id}`);
+    if (!modal) return;
+    modal.classList.remove("hidden");
+    document.body.classList.add("modal-open");
+  }
+
+  function closeModal(id) {
+    const modal = $(`#${id}`);
+    if (!modal) return;
+    modal.classList.add("hidden");
+    if (id === "manualAttendanceModal") state.manualAttendanceContext = null;
+    if (id === "quickAbsenceModal") state.absenceReasonContext = null;
+    if (id === "overtimeAuthorizationModal") state.overtimeAuthorizationContext = null;
+    if (id === "locationModal" && attendanceMapInstance) {
+      attendanceMapInstance.remove();
+      attendanceMapInstance = null;
+      const mapEl = $("#attendanceMap");
+      if (mapEl) mapEl.innerHTML = "";
+    }
+    if (id === "serviceLocationModal" && serviceMapInstance) {
+      serviceMapInstance.remove();
+      serviceMapInstance = null;
+      const mapEl = $("#serviceMap");
+      if (mapEl) mapEl.innerHTML = "";
+    }
+    if ($$(".modal-backdrop:not(.hidden)").length === 0) document.body.classList.remove("modal-open");
+  }
+
+  function quickDetailBadge(row, kind) {
+    if (kind === "entries") return `<span class="status-pill ${row.entryStatus.className}">${escapeHtml(row.entryStatus.label)}</span>`;
+    if (kind === "exits") return `<span class="status-pill ${row.exitStatus.className}">${escapeHtml(row.exitStatus.label)}</span>`;
+    if (kind === "alerts") {
+      return operationalAlertItems(row).map(item => `<span class="status-pill ${item.className}">${escapeHtml(item.label)}</span>`).join("");
+    }
+    return `<span class="status-pill ${row.status.className}">${escapeHtml(row.status.label)}</span>`;
+  }
+
+  function quickDetailMeta(row, kind) {
+    const shift = row.shift;
+    const lines = [row.isSelfReportedExtra ? "Sin horario previo · trabajo extraordinario" : `Horario ${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`];
+    if (kind === "entries" && row.entryEvent) {
+      lines.push(`Entrada: ${formatDateTime(row.entryEvent.client_time || row.entryEvent.created_at)}`);
+      lines.push(gpsSummary(row.entryEvent));
+    } else if (kind === "exits" && row.exitEvent) {
+      lines.push(`Salida: ${formatDateTime(row.exitEvent.client_time || row.exitEvent.created_at)}`);
+      lines.push(gpsSummary(row.exitEvent));
+    } else if (kind === "alerts") {
+      if (row.entryEvent) lines.push(`Entrada: ${formatDateTime(row.entryEvent.client_time || row.entryEvent.created_at)}`);
+      const timing = row.entryTiming || getEntryTimingInfo(row.shift, row.entryEvent);
+      if (row.entryEvent && timing.isLate) lines.push(timing.isAfterAbsenceThreshold
+        ? `Demora: +${timing.lateMinutes} min · superó umbral de ausencia (+${timing.absenceAfterMinutes} min)`
+        : `Demora: +${timing.lateMinutes} min`);
+      if (row.exitEvent) lines.push(`Salida: ${formatDateTime(row.exitEvent.client_time || row.exitEvent.created_at)}`);
+      if (row.manualEvent?.notes) lines.push(row.manualEvent.notes);
+    } else {
+      lines.push(`Entrada: ${row.entryEvent ? formatDateTime(row.entryEvent.client_time || row.entryEvent.created_at) : "Sin registrar"}`);
+      lines.push(`Salida: ${row.exitEvent ? formatDateTime(row.exitEvent.client_time || row.exitEvent.created_at) : "Sin registrar"}`);
+    }
+    return lines.filter(Boolean).map(line => escapeHtml(line)).join(" · ");
+  }
+
+  function quickDetailMapActions(row, kind) {
+    const events = [];
+    if (["coverage", "entries", "alerts"].includes(kind) && hasCoordinates(row.entryEvent)) events.push([row.entryEvent, "Ver entrada en mapa"]);
+    if (["coverage", "exits", "alerts"].includes(kind) && hasCoordinates(row.exitEvent)) events.push([row.exitEvent, "Ver salida en mapa"]);
+    return events.map(([event, label]) => `<button class="location-btn" data-map-event="${escapeHtml(event.id)}" type="button">${label}</button>`).join("");
+  }
+
+  function openQuickDetail(kind) {
+    if (!isManagementProfile()) return;
+    const rows = state.dashboardRows.length ? [...state.dashboardRows] : getDashboardRows();
+    const date = $("#dashboardDate").value || todayISO();
+    const config = {
+      coverage: { title: "Coberturas del día", subtitle: "Dotación programada y estado actual", filter: () => true },
+      entries: { title: "Entradas registradas", subtitle: "Ingresos efectivamente fichados", filter: row => Boolean(row.entryEvent) },
+      exits: { title: "Salidas registradas", subtitle: "Egresos efectivamente fichados", filter: row => Boolean(row.exitEvent) },
+      alerts: { title: "Alertas operativas", subtitle: "Incidencias que requieren revisión", filter: row => hasOperationalAlert(row) }
+    }[kind];
+    if (!config) return;
+
+    let filtered = rows.filter(config.filter);
+    if (kind === "alerts") filtered.sort((a, b) => operationalAlertPriority(a) - operationalAlertPriority(b));
+
+    $("#quickDetailTitle").textContent = config.title;
+    $("#quickDetailSubtitle").textContent = `${formatOperationalDate(date)} · ${config.subtitle} · ${filtered.length} registro${filtered.length === 1 ? "" : "s"}`;
+
+    $("#quickDetailBody").innerHTML = filtered.map(row => {
+      const operator = byId(state.profiles, row.shift.operator_id);
+      const site = byId(state.sites, row.shift.site_id);
+      return `
+        <article class="quick-detail-item">
+          <div class="quick-detail-main">
+            <div class="quick-detail-title">
+              <strong>${escapeHtml(operator?.full_name || "—")}</strong>
+              ${quickDetailBadge(row, kind)}
+            </div>
+            <div class="quick-detail-meta"><strong>${escapeHtml(site?.name || "—")}</strong> · ${escapeHtml(site?.address || "Sin dirección")}</div>
+            <div class="quick-detail-meta">${quickDetailMeta(row, kind)}</div>
+          </div>
+          <div class="quick-detail-actions">${quickDetailMapActions(row, kind)}</div>
+        </article>`;
+    }).join("") || `<div class="empty-state-compact">No hay registros para mostrar en esta categoría.</div>`;
+
+    openModal("quickDetailModal");
+  }
+
+  function nearestServiceTo(lat, lng) {
+    return state.sites
+      .filter(site => Number.isFinite(Number(site.lat)) && Number.isFinite(Number(site.lng)))
+      .map(site => ({ site, distance: haversineMeters(lat, lng, Number(site.lat), Number(site.lng)) }))
+      .sort((a, b) => a.distance - b.distance)[0] || null;
+  }
+
+  function openAttendanceMap(eventId) {
+    if (!isManagementProfile()) return;
+    const attendanceEvent = state.events.find(event => String(event.id) === String(eventId));
+    if (!attendanceEvent || !hasCoordinates(attendanceEvent)) {
+      toast("Esta marcación no tiene coordenadas GPS disponibles.");
+      return;
+    }
+    if (!window.L) {
+      toast("No se pudo cargar el mapa. Revisá la conexión a internet.");
+      return;
+    }
+
+    const lat = Number(attendanceEvent.lat);
+    const lng = Number(attendanceEvent.lng);
+    const operator = byId(state.profiles, attendanceEvent.operator_id);
+    const assignedSite = byId(state.sites, attendanceEvent.site_id);
+    const assignedDistance = assignedSite ? haversineMeters(lat, lng, Number(assignedSite.lat), Number(assignedSite.lng)) : null;
+    const nearest = nearestServiceTo(lat, lng);
+    const withinAssigned = assignedSite && assignedDistance !== null ? assignedDistance <= Number(assignedSite.gps_radius_m || 120) : null;
+
+    $("#locationModalTitle").textContent = `${eventTypeLabel(attendanceEvent.event_type)} · ${operator?.full_name || "Operario"}`;
+    $("#locationModalSubtitle").textContent = `${formatDateTime(attendanceEvent.client_time || attendanceEvent.created_at)} · ${assignedSite?.name || "Servicio sin identificar"}`;
+
+    const nearestDifferent = nearest?.site && assignedSite && nearest.site.id !== assignedSite.id;
+    $("#locationSummary").innerHTML = `
+      <div class="location-summary-card">
+        <strong>Fichaje GPS</strong>
+        <span>${lat.toFixed(6)}, ${lng.toFixed(6)} · Precisión ${attendanceEvent.gps_accuracy_m ? `${Math.round(Number(attendanceEvent.gps_accuracy_m))} m` : "sin dato"}</span>
+      </div>
+      <div class="location-summary-card ${withinAssigned === false ? "alert" : "ok"}">
+        <strong>Servicio asignado</strong>
+        <span>${escapeHtml(assignedSite?.name || "Sin servicio")} · ${assignedDistance !== null ? `${Math.round(assignedDistance)} m del punto` : "sin distancia"}${assignedSite ? ` · radio aceptado ${Math.round(Number(assignedSite.gps_radius_m || 120))} m` : ""}</span>
+      </div>
+      <div class="location-summary-card ${nearestDifferent ? "alert" : ""}">
+        <strong>Servicio geolocalizado más cercano</strong>
+        <span>${nearest ? `${escapeHtml(nearest.site.name)} · ${Math.round(nearest.distance)} m` : "No hay servicios geolocalizados"}${nearestDifferent ? " · distinto del asignado" : ""}</span>
+      </div>`;
+
+    openModal("locationModal");
+
+    window.requestAnimationFrame(() => {
+      if (attendanceMapInstance) attendanceMapInstance.remove();
+      attendanceMapInstance = window.L.map("attendanceMap", { zoomControl: true });
+      window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>'
+      }).addTo(attendanceMapInstance);
+
+      const checkinPoint = [lat, lng];
+      const checkinMarker = window.L.circleMarker(checkinPoint, {
+        radius: 9,
+        color: "#991b1b",
+        weight: 3,
+        fillColor: "#dc2626",
+        fillOpacity: .95
+      }).addTo(attendanceMapInstance);
+      checkinMarker.bindPopup(`<strong>${escapeHtml(operator?.full_name || "Operario")}</strong><br>${escapeHtml(eventTypeLabel(attendanceEvent.event_type))}<br>${escapeHtml(formatDateTime(attendanceEvent.client_time || attendanceEvent.created_at))}`).openPopup();
+
+      if (Number(attendanceEvent.gps_accuracy_m) > 0) {
+        window.L.circle(checkinPoint, {
+          radius: Number(attendanceEvent.gps_accuracy_m),
+          color: "#dc2626",
+          weight: 1,
+          fillColor: "#fecaca",
+          fillOpacity: .12
+        }).addTo(attendanceMapInstance);
+      }
+
+      state.sites.forEach(site => {
+        if (!Number.isFinite(Number(site.lat)) || !Number.isFinite(Number(site.lng))) return;
+        const isAssigned = assignedSite?.id === site.id;
+        const marker = window.L.circleMarker([Number(site.lat), Number(site.lng)], {
+          radius: isAssigned ? 10 : 6,
+          color: isAssigned ? "#a16207" : "#475569",
+          weight: isAssigned ? 4 : 2,
+          fillColor: isAssigned ? "#f2b705" : "#64748b",
+          fillOpacity: isAssigned ? .95 : .72
+        }).addTo(attendanceMapInstance);
+        marker.bindPopup(`<strong>${escapeHtml(site.name)}</strong><br>${escapeHtml(site.address || "")}<br>${isAssigned ? "Servicio asignado" : "Servicio Clean It"}`);
+      });
+
+      if (assignedSite && Number.isFinite(Number(assignedSite.lat)) && Number.isFinite(Number(assignedSite.lng))) {
+        const assignedPoint = [Number(assignedSite.lat), Number(assignedSite.lng)];
+        window.L.circle(assignedPoint, {
+          radius: Number(assignedSite.gps_radius_m || 120),
+          color: "#a16207",
+          weight: 2,
+          fillColor: "#fde68a",
+          fillOpacity: .12
+        }).addTo(attendanceMapInstance);
+        window.L.polyline([checkinPoint, assignedPoint], { color: "#0f172a", weight: 3, dashArray: "7,7", opacity: .7 }).addTo(attendanceMapInstance);
+        attendanceMapInstance.fitBounds(window.L.latLngBounds([checkinPoint, assignedPoint]).pad(.35), { maxZoom: 17 });
+      } else {
+        attendanceMapInstance.setView(checkinPoint, 16);
+      }
+
+      window.setTimeout(() => attendanceMapInstance?.invalidateSize(), 50);
+    });
+  }
+
+  function openServiceMap(siteId) {
+    if (!isManagementProfile()) return;
+    const site = byId(state.sites, siteId);
+    if (!site) return;
+    const lat = Number(site.lat);
+    const lng = Number(site.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      toast("Este servicio no tiene coordenadas GPS válidas cargadas.");
+      return;
+    }
+    if (!window.L) {
+      toast("No se pudo cargar el mapa. Revisá la conexión a internet.");
+      return;
+    }
+
+    $("#serviceLocationModalTitle").textContent = site.name || "Servicio";
+    $("#serviceLocationModalSubtitle").textContent = site.address || "Sin dirección";
+    $("#serviceLocationSummary").innerHTML = `
+      <div class="location-summary-card ok">
+        <strong>Coordenadas</strong>
+        <span>${lat}, ${lng}</span>
+      </div>
+      <div class="location-summary-card">
+        <strong>Radio GPS aceptado</strong>
+        <span>${Math.round(Number(site.gps_radius_m || 120))} m</span>
+      </div>
+      <div class="location-summary-card">
+        <strong>Servicio</strong>
+        <span>${escapeHtml(site.zone || "Sin zona")} · ${escapeHtml(site.supervisor_name || "Sin supervisor")}</span>
+      </div>`;
+
+    openModal("serviceLocationModal");
+    window.requestAnimationFrame(() => {
+      if (serviceMapInstance) serviceMapInstance.remove();
+      serviceMapInstance = window.L.map("serviceMap", { zoomControl: true });
+      window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>'
+      }).addTo(serviceMapInstance);
+
+      state.sites.forEach(candidate => {
+        const candidateLat = Number(candidate.lat);
+        const candidateLng = Number(candidate.lng);
+        if (!Number.isFinite(candidateLat) || !Number.isFinite(candidateLng)) return;
+        const selected = String(candidate.id) === String(site.id);
+        const marker = window.L.circleMarker([candidateLat, candidateLng], {
+          radius: selected ? 10 : 5,
+          color: selected ? "#a16207" : "#64748b",
+          weight: selected ? 4 : 2,
+          fillColor: selected ? "#f2b705" : "#94a3b8",
+          fillOpacity: selected ? .95 : .65
+        }).addTo(serviceMapInstance);
+        marker.bindPopup(`<strong>${escapeHtml(candidate.name || "Servicio")}</strong><br>${escapeHtml(candidate.address || "Sin dirección")}${selected ? "<br><strong>Servicio seleccionado</strong>" : ""}`);
+        if (selected) marker.openPopup();
+      });
+
+      window.L.circle([lat, lng], {
+        radius: Number(site.gps_radius_m || 120),
+        color: "#a16207",
+        weight: 2,
+        fillColor: "#fde68a",
+        fillOpacity: .13
+      }).addTo(serviceMapInstance);
+      serviceMapInstance.setView([lat, lng], 16);
+      window.setTimeout(() => serviceMapInstance?.invalidateSize(), 50);
+    });
   }
 
   function assignmentMatchesSearch(site, assignments, term) {
     if (!term) return true;
-    const haystack = [
+    return valuesMatchSearch(
+      term,
       site.name, site.address, site.zone, site.supervisor_name, site.service_type,
       ...assignments.map(a => byId(state.profiles, a.operator_id)?.full_name || "")
-    ].join(" ").toLowerCase();
-    return haystack.includes(term.toLowerCase());
+    );
   }
 
   function renderCoverage() {
-    const term = $("#coverageSearch")?.value?.trim() || "";
+    const term = sectionSearchTerm("coverage");
     const grid = $("#coverageGrid");
-    const html = state.sites
-      .map(site => ({ site, assignments: state.assignments.filter(a => a.site_id === site.id) }))
-      .filter(group => assignmentMatchesSearch(group.site, group.assignments, term))
+    const groups = state.sites
+      .map(site => ({ site, assignments: state.assignments.filter(a => a.site_id === site.id && (a.assignment_type || "fixed") === "fixed") }));
+    const visibleGroups = groups.filter(group => assignmentMatchesSearch(group.site, group.assignments, term));
+    updateSectionSearchCount("coverage", visibleGroups.length, groups.length);
+    const html = visibleGroups
       .map(({ site, assignments }) => {
         const dayCards = DAYS.map(day => {
           const dayAssignments = assignments.filter(a => (a.days_of_week || []).map(Number).includes(day.id));
@@ -860,7 +4238,7 @@
         }).join("");
 
         return `
-          <article class="service-card">
+          <article class="service-card ${term ? "search-match-card" : ""}">
             <div class="service-card-head">
               <div>
                 <h3>${escapeHtml(site.name)}</h3>
@@ -880,8 +4258,20 @@
 
   function renderSites() {
     const list = $("#sitesList");
-    list.innerHTML = state.sites.map(site => `
-      <div class="list-item">
+    const validIds = new Set(state.sites.map(site => site.id));
+    state.bulkSelectedSiteIds = new Set([...state.bulkSelectedSiteIds].filter(id => validIds.has(id)));
+    const searchTerm = sectionSearchTerm("sites");
+    const visibleSites = searchTerm ? state.sites.filter(site => valuesMatchSearch(searchTerm, site.name, site.address, site.zone, site.supervisor_name, site.service_type, site.whatsapp_name, site.whatsapp_phone)) : state.sites;
+    updateSectionSearchCount("sites", visibleSites.length, state.sites.length);
+
+    list.innerHTML = visibleSites.map(site => `
+      <div class="list-item ${state.bulkSelectedSiteIds.has(site.id) ? "bulk-selected-item" : ""} ${searchTerm ? "search-match-card" : ""}">
+        <div class="bulk-select-line">
+          <label class="bulk-select-control">
+            <input type="checkbox" data-select-site="${site.id}" ${state.bulkSelectedSiteIds.has(site.id) ? "checked" : ""} />
+            <span>Seleccionar para cambio masivo</span>
+          </label>
+        </div>
         <div class="list-item-head">
           <div>
             <div class="list-item-title">${escapeHtml(site.name)}</div>
@@ -892,17 +4282,27 @@
           </div>
         </div>
         <div class="list-item-actions">
+          <button class="secondary-btn small-btn" data-map-site="${site.id}" type="button">Ver mapa</button>
           <button class="secondary-btn small-btn" data-edit-site="${site.id}" type="button">Editar</button>
           <button class="danger-btn small-btn" data-delete-site="${site.id}" type="button">Eliminar</button>
         </div>
       </div>`).join("") || `<p class="muted">No hay servicios cargados.</p>`;
 
+    list.querySelectorAll("[data-select-site]").forEach(input => input.addEventListener("change", () => {
+      if (input.checked) state.bulkSelectedSiteIds.add(input.dataset.selectSite);
+      else state.bulkSelectedSiteIds.delete(input.dataset.selectSite);
+      input.closest(".list-item")?.classList.toggle("bulk-selected-item", input.checked);
+      updateBulkSelectionSummaries();
+    }));
+    list.querySelectorAll("[data-map-site]").forEach(btn => btn.addEventListener("click", () => openServiceMap(btn.dataset.mapSite)));
     list.querySelectorAll("[data-edit-site]").forEach(btn => btn.addEventListener("click", () => editSite(btn.dataset.editSite)));
     list.querySelectorAll("[data-delete-site]").forEach(btn => btn.addEventListener("click", () => deleteSite(btn.dataset.deleteSite)));
+    updateBulkSelectionSummaries();
   }
 
   function sitePayloadFromForm() {
     const id = $("#siteId").value || undefined;
+    const coordinates = parseCoordinatesInput($("#siteCoordinates").value);
     return {
       ...(id ? { id } : {}),
       name: $("#siteName").value.trim(),
@@ -910,8 +4310,8 @@
       zone: $("#siteZone").value.trim(),
       supervisor_name: $("#siteSupervisor").value.trim(),
       service_type: $("#siteType").value.trim(),
-      lat: toNumber($("#siteLat").value),
-      lng: toNumber($("#siteLng").value),
+      lat: coordinates.lat,
+      lng: coordinates.lng,
       gps_radius_m: Number($("#siteRadius").value || 120),
       whatsapp_name: $("#siteContactName").value.trim(),
       whatsapp_phone: $("#siteWhatsapp").value.trim(),
@@ -936,14 +4336,14 @@
     $("#siteZone").value = site.zone || "";
     $("#siteSupervisor").value = site.supervisor_name || "";
     $("#siteType").value = site.service_type || "";
-    $("#siteLat").value = site.lat || "";
-    $("#siteLng").value = site.lng || "";
+    $("#siteCoordinates").value = Number.isFinite(Number(site.lat)) && Number.isFinite(Number(site.lng)) ? `${site.lat}, ${site.lng}` : "";
     $("#siteRadius").value = site.gps_radius_m || 120;
     $("#siteContactName").value = site.whatsapp_name || "";
     $("#siteWhatsapp").value = site.whatsapp_phone || "";
     $("#siteFormTitle").textContent = "Editar servicio / consorcio";
     $("#cancelSiteEditBtn").classList.remove("hidden");
     renderTab("sites");
+    scrollToActiveEditor("#siteForm");
   }
 
   async function deleteSite(id) {
@@ -955,8 +4355,23 @@
 
   function renderAssignmentSelectors() {
     const operators = state.profiles.filter(p => p.role === "operator");
-    $("#assignmentOperator").innerHTML = operators.map(op => `<option value="${op.id}">${escapeHtml(op.full_name)}</option>`).join("");
-    $("#assignmentSite").innerHTML = state.sites.map(site => `<option value="${site.id}">${escapeHtml(site.name)}</option>`).join("");
+    const operatorOptions = operators.map(op => `<option value="${op.id}">${escapeHtml(op.full_name)}</option>`).join("");
+    const siteOptions = state.sites.map(site => `<option value="${site.id}">${escapeHtml(site.name)}</option>`).join("");
+    $("#assignmentOperator").innerHTML = operatorOptions;
+    $("#assignmentSite").innerHTML = siteOptions;
+    if ($("#extraAssignmentOperator")) $("#extraAssignmentOperator").innerHTML = operatorOptions;
+    if ($("#extraAssignmentSite")) $("#extraAssignmentSite").innerHTML = siteOptions;
+    if ($("#specialAssignmentOperator")) $("#specialAssignmentOperator").innerHTML = operatorOptions;
+    if ($("#specialAssignmentSite")) $("#specialAssignmentSite").innerHTML = siteOptions;
+    if ($("#leaveOperator")) $("#leaveOperator").innerHTML = operatorOptions;
+    if ($("#userFlexibleSite")) {
+      const selected = Array.from($("#userFlexibleSite").selectedOptions || []).map(option => option.value);
+      $("#userFlexibleSite").innerHTML = siteOptions;
+      Array.from($("#userFlexibleSite").options || []).forEach(option => {
+        option.selected = selected.includes(option.value);
+      });
+    }
+    if ($("#extraCoveredOperator")) $("#extraCoveredOperator").innerHTML = `<option value="">Sin especificar</option>${operatorOptions}`;
   }
 
   function defaultScheduleStart() { return "08:00"; }
@@ -1061,7 +4476,7 @@
       const end = document.getElementById(scheduleInputId("assignmentDayEnd", day.id))?.value;
       if (validate) {
         if (!start || !end) throw new Error(`Cargá horario de entrada y salida para ${day.long}.`);
-        if (end <= start) throw new Error(`En ${day.long}, la hora de salida debe ser posterior a la entrada.`);
+        if (end === start) throw new Error(`En ${day.long}, entrada y salida no pueden ser iguales. Los turnos nocturnos, por ejemplo 22:00 a 06:00, sí están permitidos.`);
       }
       rows.push({ day_id: day.id, scheduled_start: start || defaultScheduleStart(), scheduled_end: end || defaultScheduleEnd() });
     }
@@ -1087,35 +4502,1227 @@
     }));
   }
 
+
+  // ---------------------------------------------------------------------------
+  // Auditoría y sincronización de asignaciones contra Excel
+  // ---------------------------------------------------------------------------
+  function auditEntityKey(value) {
+    return normalizeSearchText(value)
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function auditNameTokens(value) {
+    return auditEntityKey(value).split(" ").filter(Boolean).sort();
+  }
+
+  function auditNameFingerprint(value) {
+    return auditNameTokens(value).join("|");
+  }
+
+  function auditRowValue(row, candidates) {
+    const wanted = new Set((candidates || []).map(auditEntityKey));
+    for (const [key, value] of Object.entries(row || {})) {
+      if (wanted.has(auditEntityKey(key))) return value;
+    }
+    return "";
+  }
+
+  function auditDayId(value) {
+    const key = auditEntityKey(value);
+    const map = {
+      lunes: 1, lun: 1,
+      martes: 2, mar: 2,
+      miercoles: 3, mie: 3,
+      jueves: 4, jue: 4,
+      viernes: 5, vie: 5,
+      sabado: 6, sab: 6,
+      domingo: 7, dom: 7
+    };
+    return map[key] || null;
+  }
+
+  function auditParseSchedule(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return null;
+    const match = raw.match(/(\d{1,2}):(\d{2})[^0-9]+(\d{1,2}):(\d{2})/);
+    if (!match) return null;
+    const startH = Number(match[1]);
+    const startM = Number(match[2]);
+    const endH = Number(match[3]);
+    const endM = Number(match[4]);
+    if ([startH, endH].some(n => !Number.isInteger(n) || n < 0 || n > 23) || [startM, endM].some(n => !Number.isInteger(n) || n < 0 || n > 59)) return null;
+    const start = `${String(startH).padStart(2, "0")}:${String(startM).padStart(2, "0")}`;
+    const end = `${String(endH).padStart(2, "0")}:${String(endM).padStart(2, "0")}`;
+    if (start === end) return null;
+    return { start, end, overnight: end < start, raw };
+  }
+
+  function auditParseCoordinates(value) {
+    const match = String(value || "").replace(/;/g, ",").match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
+    if (!match) return null;
+    const lat = Number(match[1]);
+    const lng = Number(match[2]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng };
+  }
+
+  function auditFindSheet(workbook, expectedName, requiredHeaders = []) {
+    const expected = auditEntityKey(expectedName);
+    const exact = workbook.SheetNames.find(name => auditEntityKey(name) === expected);
+    if (exact) return { name: exact, sheet: workbook.Sheets[exact] };
+    for (const name of workbook.SheetNames) {
+      const sheet = workbook.Sheets[name];
+      const rows = window.XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false, header: 1 });
+      const headers = (rows[0] || []).map(auditEntityKey);
+      if (requiredHeaders.every(header => headers.includes(auditEntityKey(header)))) return { name, sheet };
+    }
+    return null;
+  }
+
+  async function parseAssignmentAuditFile(file) {
+    if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+    if (!file) throw new Error("Seleccioná un archivo Excel.");
+    const buffer = await file.arrayBuffer();
+    const workbook = window.XLSX.read(buffer, { type: "array", cellDates: false });
+    const coverageSheet = auditFindSheet(workbook, "Cobertura por día", ["Servicio", "Día", "Operario", "Horario"]);
+    if (!coverageSheet) throw new Error('No encontré una hoja "Cobertura por día" con las columnas Servicio, Día, Operario y Horario.');
+
+    const coverageRows = window.XLSX.utils.sheet_to_json(coverageSheet.sheet, { defval: "", raw: false });
+    const serviceSheet = auditFindSheet(workbook, "Servicios", ["Servicio", "Dirección"]);
+    const serviceRows = serviceSheet ? window.XLSX.utils.sheet_to_json(serviceSheet.sheet, { defval: "", raw: false }) : [];
+    const serviceMeta = new Map();
+    serviceRows.forEach(row => {
+      const name = String(auditRowValue(row, ["Servicio"]) || "").trim();
+      if (!name) return;
+      const coordinates = auditParseCoordinates(auditRowValue(row, ["Coordenadas", "Coordenada"]));
+      serviceMeta.set(auditEntityKey(name), {
+        name,
+        address: String(auditRowValue(row, ["Dirección", "Direccion"]) || "").trim(),
+        zone: String(auditRowValue(row, ["Zona"]) || "").trim(),
+        supervisor: String(auditRowValue(row, ["Supervisor"]) || "").trim(),
+        frequency: String(auditRowValue(row, ["Frecuencia"]) || "fixed").trim() || "fixed",
+        coordinates
+      });
+    });
+
+    const groups = new Map();
+    const issues = [];
+    let validCoverageRows = 0;
+    let noCoverageRows = 0;
+    let overnightRows = 0;
+
+    coverageRows.forEach((row, index) => {
+      const rowNumber = index + 2;
+      const serviceName = String(auditRowValue(row, ["Servicio"]) || "").trim();
+      const dayRaw = String(auditRowValue(row, ["Día", "Dia"]) || "").trim();
+      const operatorName = String(auditRowValue(row, ["Operario"]) || "").trim();
+      const scheduleRaw = String(auditRowValue(row, ["Horario"]) || "").trim();
+      if (!serviceName && !dayRaw && !operatorName && !scheduleRaw) return;
+      if (!serviceName) {
+        issues.push({ rowNumber, type: "invalid", message: "Falta el servicio.", raw: row });
+        return;
+      }
+      const dayId = auditDayId(dayRaw);
+      if (!dayId) {
+        issues.push({ rowNumber, type: "invalid", message: `Día no reconocido: ${dayRaw || "vacío"}.`, serviceName, raw: row });
+        return;
+      }
+      const serviceKey = auditEntityKey(serviceName);
+      const groupKey = `${serviceKey}|${dayId}`;
+      if (!groups.has(groupKey)) groups.set(groupKey, { groupKey, serviceKey, serviceName, dayId, dayName: dayLabel(dayId, "long"), expectedRows: [], explicitNoCoverage: false, sourceRows: [] });
+      const group = groups.get(groupKey);
+      group.sourceRows.push(rowNumber);
+
+      const noCoverage = !operatorName || auditEntityKey(operatorName) === "sin cobertura";
+      if (noCoverage) {
+        group.explicitNoCoverage = true;
+        noCoverageRows++;
+        return;
+      }
+      const schedule = auditParseSchedule(scheduleRaw);
+      if (!schedule) {
+        group.expectedRows.push({ rowNumber, operatorName, scheduleRaw, invalid: true, message: `Horario no reconocido: ${scheduleRaw || "vacío"}.` });
+        return;
+      }
+      if (schedule.overnight) overnightRows++;
+      validCoverageRows++;
+      group.expectedRows.push({ rowNumber, operatorName, scheduleRaw, start: schedule.start, end: schedule.end, overnight: schedule.overnight, invalid: false });
+    });
+
+    for (const group of groups.values()) {
+      if (group.explicitNoCoverage && group.expectedRows.some(row => !row.invalid)) {
+        issues.push({ type: "invalid", serviceName: group.serviceName, dayId: group.dayId, message: `${group.serviceName} / ${group.dayName}: el Excel mezcla "Sin cobertura" con operarios cargados.` });
+      }
+    }
+
+    return {
+      fileName: file.name,
+      coverageSheetName: coverageSheet.name,
+      serviceSheetName: serviceSheet?.name || null,
+      coverageRowsCount: coverageRows.length,
+      validCoverageRows,
+      noCoverageRows,
+      overnightRows,
+      groups,
+      issues,
+      serviceMeta
+    };
+  }
+
+  function auditMatchSite(serviceName, serviceMeta) {
+    const nameKey = auditEntityKey(serviceName);
+    const direct = state.sites.filter(site => auditEntityKey(site.name) === nameKey);
+    if (direct.length === 1) return { site: direct[0], method: "nombre exacto" };
+
+    const fingerprint = auditNameFingerprint(serviceName);
+    const fpMatches = state.sites.filter(site => auditNameFingerprint(site.name) === fingerprint);
+    if (fpMatches.length === 1) return { site: fpMatches[0], method: "nombre normalizado" };
+
+    const meta = serviceMeta?.get(nameKey);
+    if (meta?.address) {
+      const addressKey = auditEntityKey(meta.address);
+      const addressMatches = state.sites.filter(site => auditEntityKey(site.address) === addressKey);
+      if (addressMatches.length === 1) return { site: addressMatches[0], method: "dirección" };
+    }
+
+    if (meta?.coordinates) {
+      const nearby = state.sites
+        .filter(site => Number.isFinite(Number(site.lat)) && Number.isFinite(Number(site.lng)))
+        .map(site => ({ site, distance: haversineMeters(meta.coordinates.lat, meta.coordinates.lng, Number(site.lat), Number(site.lng)) }))
+        .sort((a, b) => a.distance - b.distance);
+      if (nearby[0] && nearby[0].distance <= 35 && (!nearby[1] || nearby[1].distance - nearby[0].distance >= 20)) {
+        return { site: nearby[0].site, method: `GPS (${Math.round(nearby[0].distance)} m)` };
+      }
+    }
+    return { site: null, method: null };
+  }
+
+  function auditMatchOperator(operatorName) {
+    const operators = state.profiles.filter(profile => String(profile.role).toLowerCase() === "operator" && profile.is_active !== false);
+    const fingerprint = auditNameFingerprint(operatorName);
+    const exact = operators.filter(profile => auditNameFingerprint(profile.full_name) === fingerprint);
+    if (exact.length === 1) return { operator: exact[0], method: "nombre" };
+
+    const sourceTokens = new Set(auditNameTokens(operatorName));
+    const subsetCandidates = operators.filter(profile => {
+      const profileTokens = new Set(auditNameTokens(profile.full_name));
+      const sourceInside = [...sourceTokens].every(token => profileTokens.has(token));
+      const profileInside = [...profileTokens].every(token => sourceTokens.has(token));
+      return sourceTokens.size >= 2 && (sourceInside || profileInside);
+    });
+    if (subsetCandidates.length === 1) return { operator: subsetCandidates[0], method: "nombre compatible" };
+
+    const scored = operators.map(profile => {
+      const profileTokens = new Set(auditNameTokens(profile.full_name));
+      const intersection = [...sourceTokens].filter(token => profileTokens.has(token)).length;
+      const union = new Set([...sourceTokens, ...profileTokens]).size || 1;
+      return { operator: profile, score: intersection / union };
+    }).sort((a, b) => b.score - a.score);
+    if (scored[0]?.score >= .8 && (!scored[1] || scored[0].score - scored[1].score >= .15)) return { operator: scored[0].operator, method: "nombre aproximado" };
+    return { operator: null, method: null };
+  }
+
+  function auditAssignmentActiveOnDate(assignment, dateString) {
+    if (!assignment || assignment.is_active === false) return false;
+    if ((assignment.assignment_type || "fixed") !== "fixed") return false;
+    if (assignment.valid_from && assignment.valid_from > dateString) return false;
+    if (assignment.valid_to && assignment.valid_to < dateString) return false;
+    return true;
+  }
+
+  function auditCurrentAtoms(dateString) {
+    const atoms = [];
+    state.assignments.filter(a => auditAssignmentActiveOnDate(a, dateString)).forEach(assignment => {
+      (assignment.days_of_week || []).map(Number).forEach(dayId => atoms.push({
+        assignment,
+        assignmentId: assignment.id,
+        siteId: assignment.site_id,
+        operatorId: assignment.operator_id,
+        dayId,
+        start: formatTime(assignment.scheduled_start),
+        end: formatTime(assignment.scheduled_end)
+      }));
+    });
+    return atoms;
+  }
+
+  function auditSameAtom(expected, current) {
+    return expected.operatorId === current.operatorId && expected.start === current.start && expected.end === current.end;
+  }
+
+  function auditPairScore(expected, current) {
+    let score = 0;
+    if (expected.operatorId && expected.operatorId === current.operatorId) score += 4;
+    if (expected.start === current.start && expected.end === current.end) score += 3;
+    return score;
+  }
+
+  function auditExpectedText(row) {
+    if (!row) return "—";
+    const name = row.operatorName || row.operator?.full_name || "—";
+    const schedule = row.start && row.end ? `${row.start}–${row.end}${row.end < row.start ? " (+1 día)" : ""}` : (row.scheduleRaw || "—");
+    return `${name} · ${schedule}`;
+  }
+
+  function auditCurrentText(atom) {
+    if (!atom) return "—";
+    const op = byId(state.profiles, atom.operatorId);
+    return `${op?.full_name || "Operario no disponible"} · ${atom.start}–${atom.end}${atom.end < atom.start ? " (+1 día)" : ""}`;
+  }
+
+  function buildAssignmentAuditAnalysis(parsed, dateString) {
+    const currentAtoms = auditCurrentAtoms(dateString);
+    const currentBySiteDay = new Map();
+    currentAtoms.forEach(atom => {
+      const key = `${atom.siteId}|${atom.dayId}`;
+      if (!currentBySiteDay.has(key)) currentBySiteDay.set(key, []);
+      currentBySiteDay.get(key).push(atom);
+    });
+
+    const results = [];
+    const syncPlans = new Map();
+    const siteMatches = new Map();
+    const operatorMatches = new Map();
+
+    (parsed.issues || []).forEach((issue, index) => {
+      results.push({
+        id: `issue-${index}`,
+        severity: "blocked",
+        status: "invalid",
+        statusLabel: "Dato inválido",
+        serviceName: issue.serviceName || "Excel",
+        dayId: issue.dayId || null,
+        expectedText: issue.rowNumber ? `Fila ${issue.rowNumber}` : "—",
+        currentText: "—",
+        detail: issue.message,
+        canSync: false,
+        syncKey: null
+      });
+    });
+
+    for (const group of parsed.groups.values()) {
+      const siteMatch = auditMatchSite(group.serviceName, parsed.serviceMeta);
+      siteMatches.set(group.serviceKey, siteMatch);
+      if (!siteMatch.site) {
+        results.push({
+          id: `site-${group.groupKey}`,
+          severity: "blocked",
+          status: "unknown_site",
+          statusLabel: "Servicio no encontrado",
+          serviceName: group.serviceName,
+          serviceKey: group.serviceKey,
+          dayId: group.dayId,
+          expectedText: group.expectedRows.length ? `${group.expectedRows.length} cobertura${group.expectedRows.length === 1 ? "" : "s"} en Excel` : "Sin cobertura",
+          currentText: "—",
+          detail: "El servicio del Excel no pudo vincularse con un servicio activo de Presentismo.",
+          canSync: false,
+          syncKey: null,
+          canCreateSite: Boolean(parsed.serviceMeta?.get(group.serviceKey)?.address && parsed.serviceMeta?.get(group.serviceKey)?.coordinates)
+        });
+        continue;
+      }
+
+      const siteId = siteMatch.site.id;
+      const syncKey = `${siteId}|${group.dayId}`;
+      const current = [...(currentBySiteDay.get(syncKey) || [])];
+      const expected = [];
+      const unresolvedOperators = [];
+      let invalidGroup = false;
+
+      group.expectedRows.forEach(source => {
+        if (source.invalid) {
+          invalidGroup = true;
+          results.push({
+            id: `invalid-${group.groupKey}-${source.rowNumber}`,
+            severity: "blocked",
+            status: "invalid_schedule",
+            statusLabel: "Horario inválido",
+            serviceName: group.serviceName,
+            siteId,
+            dayId: group.dayId,
+            expectedText: `${source.operatorName || "—"} · ${source.scheduleRaw || "—"}`,
+            currentText: "—",
+            detail: `${source.message} Fila ${source.rowNumber}.`,
+            canSync: false,
+            syncKey
+          });
+          return;
+        }
+        const operatorKey = auditNameFingerprint(source.operatorName);
+        let operatorMatch = operatorMatches.get(operatorKey);
+        if (!operatorMatch) {
+          operatorMatch = auditMatchOperator(source.operatorName);
+          operatorMatches.set(operatorKey, operatorMatch);
+        }
+        if (!operatorMatch.operator) {
+          unresolvedOperators.push(source.operatorName);
+          results.push({
+            id: `operator-${group.groupKey}-${source.rowNumber}`,
+            severity: "blocked",
+            status: "unknown_operator",
+            statusLabel: "Operario no encontrado",
+            serviceName: group.serviceName,
+            siteId,
+            dayId: group.dayId,
+            operatorName: source.operatorName,
+            expectedText: auditExpectedText(source),
+            currentText: "—",
+            detail: "El nombre del Excel no coincide de forma segura con un operario activo de Presentismo.",
+            canSync: false,
+            syncKey
+          });
+          return;
+        }
+        expected.push({ ...source, siteId, operatorId: operatorMatch.operator.id, operator: operatorMatch.operator, operatorMatchMethod: operatorMatch.method });
+      });
+
+      const groupBlocked = invalidGroup || unresolvedOperators.length > 0 || (group.explicitNoCoverage && expected.length > 0);
+      const plan = { syncKey, siteId, site: siteMatch.site, siteMatchMethod: siteMatch.method, serviceName: group.serviceName, dayId: group.dayId, dayName: group.dayName, expectedAtoms: expected, currentAtoms: current, blocked: groupBlocked, unresolvedOperators };
+      syncPlans.set(syncKey, plan);
+
+      const expectedLeft = [...expected];
+      const currentLeft = [...current];
+
+      // Sacar primero coincidencias exactas como multiconjunto.
+      for (let i = expectedLeft.length - 1; i >= 0; i--) {
+        const expectedAtom = expectedLeft[i];
+        const currentIndex = currentLeft.findIndex(currentAtom => auditSameAtom(expectedAtom, currentAtom));
+        if (currentIndex === -1) continue;
+        const currentAtom = currentLeft[currentIndex];
+        results.push({
+          id: `match-${group.groupKey}-${expectedAtom.rowNumber}-${currentAtom.assignmentId}`,
+          severity: "ok",
+          status: "match",
+          statusLabel: "Coincide",
+          serviceName: group.serviceName,
+          siteId,
+          dayId: group.dayId,
+          expectedText: auditExpectedText(expectedAtom),
+          currentText: auditCurrentText(currentAtom),
+          detail: `Servicio, operario, día y horario coinciden (${siteMatch.method}).`,
+          canSync: false,
+          syncKey
+        });
+        expectedLeft.splice(i, 1);
+        currentLeft.splice(currentIndex, 1);
+      }
+
+      // Emparejar diferencias que claramente corresponden al mismo puesto.
+      while (expectedLeft.length && currentLeft.length) {
+        let best = null;
+        for (let ei = 0; ei < expectedLeft.length; ei++) {
+          for (let ci = 0; ci < currentLeft.length; ci++) {
+            const score = auditPairScore(expectedLeft[ei], currentLeft[ci]);
+            if (!best || score > best.score) best = { ei, ci, score };
+          }
+        }
+        if (!best || (best.score === 0 && !(expectedLeft.length === 1 && currentLeft.length === 1))) break;
+        const expectedAtom = expectedLeft.splice(best.ei, 1)[0];
+        const currentAtom = currentLeft.splice(best.ci, 1)[0];
+        const sameOperator = expectedAtom.operatorId === currentAtom.operatorId;
+        const sameSchedule = expectedAtom.start === currentAtom.start && expectedAtom.end === currentAtom.end;
+        const status = sameOperator ? "time_mismatch" : sameSchedule ? "operator_mismatch" : "operator_time_mismatch";
+        const label = sameOperator ? "Horario distinto" : sameSchedule ? "Operario distinto" : "Operario y horario distintos";
+        results.push({
+          id: `mismatch-${group.groupKey}-${expectedAtom.rowNumber}-${currentAtom.assignmentId}`,
+          severity: "warning",
+          status,
+          statusLabel: label,
+          serviceName: group.serviceName,
+          siteId,
+          dayId: group.dayId,
+          expectedText: auditExpectedText(expectedAtom),
+          currentText: auditCurrentText(currentAtom),
+          detail: "La planificación del Excel y la asignación fija vigente no coinciden.",
+          canSync: !groupBlocked,
+          syncKey
+        });
+      }
+
+      expectedLeft.forEach(expectedAtom => results.push({
+        id: `missing-${group.groupKey}-${expectedAtom.rowNumber}`,
+        severity: "warning",
+        status: "missing_assignment",
+        statusLabel: "Falta en Presentismo",
+        serviceName: group.serviceName,
+        siteId,
+        dayId: group.dayId,
+        expectedText: auditExpectedText(expectedAtom),
+        currentText: "Sin asignación equivalente",
+        detail: "El Excel espera esta cobertura pero no existe una asignación fija equivalente.",
+        canSync: !groupBlocked,
+        syncKey
+      }));
+
+      currentLeft.forEach(currentAtom => results.push({
+        id: `extra-${group.groupKey}-${currentAtom.assignmentId}-${currentAtom.dayId}-${currentAtom.operatorId}`,
+        severity: "warning",
+        status: "extra_assignment",
+        statusLabel: "Sobra en Presentismo",
+        serviceName: group.serviceName,
+        siteId,
+        dayId: group.dayId,
+        expectedText: expected.length ? "No figura esta cobertura" : "Sin cobertura",
+        currentText: auditCurrentText(currentAtom),
+        detail: expected.length ? "Hay una asignación fija adicional que no figura en el Excel." : "El Excel indica que ese día no debería haber cobertura fija.",
+        canSync: !groupBlocked,
+        syncKey
+      }));
+
+      if (!expected.length && !current.length && group.explicitNoCoverage && !groupBlocked) {
+        results.push({
+          id: `nocoverage-${group.groupKey}`,
+          severity: "ok",
+          status: "no_coverage_match",
+          statusLabel: "Sin cobertura · coincide",
+          serviceName: group.serviceName,
+          siteId,
+          dayId: group.dayId,
+          expectedText: "Sin cobertura",
+          currentText: "Sin asignación fija",
+          detail: "El Excel y Presentismo coinciden: no hay cobertura fija para ese día.",
+          canSync: false,
+          syncKey
+        });
+      }
+    }
+
+    const stats = {
+      ok: results.filter(row => row.severity === "ok").length,
+      warnings: results.filter(row => row.severity === "warning").length,
+      blocked: results.filter(row => row.severity === "blocked").length,
+      total: results.length,
+      syncableKeys: new Set(results.filter(row => row.severity === "warning" && row.canSync && row.syncKey).map(row => row.syncKey)).size
+    };
+    return { dateString, results, syncPlans, siteMatches, operatorMatches, stats };
+  }
+
+  function auditStatusClass(row) {
+    if (row.severity === "ok") return "audit-status-ok";
+    if (row.severity === "blocked") return "audit-status-blocked";
+    return "audit-status-warning";
+  }
+
+  function auditRowClass(row) {
+    if (row.severity === "ok") return "audit-ok-row";
+    if (row.severity === "blocked") return "audit-blocked-row";
+    return "audit-difference-row";
+  }
+
+  function assignmentAuditFilteredRows() {
+    const analysis = state.assignmentAuditAnalysis;
+    if (!analysis) return [];
+    const filter = state.assignmentAuditFilter || "alerts";
+    if (filter === "ok") return analysis.results.filter(row => row.severity === "ok");
+    if (filter === "alerts") return analysis.results.filter(row => row.severity !== "ok");
+    return analysis.results;
+  }
+
+  function auditSyncableAlertKeys() {
+    const analysis = state.assignmentAuditAnalysis;
+    if (!analysis) return [];
+    return [...new Set(analysis.results.filter(row => row.severity === "warning" && row.canSync && row.syncKey).map(row => row.syncKey))];
+  }
+
+  function renderAssignmentAudit() {
+    const panel = $("#assignmentAuditPanel");
+    const info = $("#assignmentAuditFileInfo");
+    const analysis = state.assignmentAuditAnalysis;
+    if (!panel || !info) return;
+
+    if (!analysis || !state.assignmentAuditParsed) {
+      panel.classList.add("hidden");
+      if (!state.assignmentAuditFileName) info.textContent = "Todavía no cargaste un archivo.";
+      return;
+    }
+    panel.classList.remove("hidden");
+    const parsed = state.assignmentAuditParsed;
+    info.textContent = `${parsed.fileName} · hoja ${parsed.coverageSheetName} · ${parsed.coverageRowsCount} filas leídas · ${parsed.validCoverageRows} coberturas con operario · ${parsed.noCoverageRows} filas sin cobertura${parsed.overnightRows ? ` · ${parsed.overnightRows} turnos nocturnos` : ""}.`;
+
+    const stats = analysis.stats;
+    $("#assignmentAuditKpis").innerHTML = `
+      <div class="assignment-audit-kpi"><strong>${parsed.validCoverageRows}</strong><span>Coberturas del Excel</span></div>
+      <div class="assignment-audit-kpi audit-ok"><strong>${stats.ok}</strong><span>Coincidencias</span></div>
+      <div class="assignment-audit-kpi audit-alert"><strong>${stats.warnings}</strong><span>Diferencias</span></div>
+      <div class="assignment-audit-kpi audit-block"><strong>${stats.blocked}</strong><span>Bloqueos a revisar</span></div>`;
+
+    $$("[data-audit-filter]").forEach(button => button.classList.toggle("active", button.dataset.auditFilter === state.assignmentAuditFilter));
+    const rows = assignmentAuditFilteredRows();
+    const table = $("#assignmentAuditTable");
+    table.innerHTML = `
+      <table>
+        <thead><tr>
+          <th class="audit-col-select"></th>
+          <th class="audit-col-status">Estado</th>
+          <th class="audit-col-service">Servicio</th>
+          <th class="audit-col-day">Día</th>
+          <th class="audit-col-plan">Excel</th>
+          <th class="audit-col-app">Presentismo</th>
+          <th class="audit-col-detail">Detalle / acción</th>
+        </tr></thead>
+        <tbody>${rows.map(row => {
+          const selected = row.syncKey && state.assignmentAuditSelectedKeys.has(row.syncKey);
+          const selectCell = row.severity === "warning" && row.canSync ? `<input class="audit-checkbox" data-audit-select="${escapeHtml(row.syncKey)}" type="checkbox" ${selected ? "checked" : ""} title="Sincronizar este servicio y día" />` : "";
+          let action = "";
+          if (row.severity === "warning" && row.canSync) action = `<button class="secondary-btn small-btn audit-inline-action" data-audit-apply-key="${escapeHtml(row.syncKey)}" type="button">Corregir este día</button>`;
+          if (row.status === "unknown_site" && row.canCreateSite) action = `<button class="secondary-btn small-btn audit-inline-action" data-audit-create-site="${escapeHtml(row.serviceKey)}" type="button">Crear servicio desde Excel</button>`;
+          if (row.status === "unknown_operator") action = `<button class="ghost-btn small-btn audit-inline-action" data-audit-find-user="${escapeHtml(row.operatorName || "")}" type="button">Buscar / crear en Usuarios</button>`;
+          return `<tr class="${auditRowClass(row)}">
+            <td class="audit-col-select">${selectCell}</td>
+            <td><span class="audit-status-pill ${auditStatusClass(row)}">${escapeHtml(row.statusLabel)}</span></td>
+            <td><strong>${escapeHtml(row.serviceName || "—")}</strong></td>
+            <td>${escapeHtml(row.dayId ? dayLabel(row.dayId, "long") : "—")}</td>
+            <td><div class="audit-plan-line">${escapeHtml(row.expectedText || "—")}</div></td>
+            <td><div class="audit-app-line">${escapeHtml(row.currentText || "—")}</div></td>
+            <td><div>${escapeHtml(row.detail || "")}</div>${action}</td>
+          </tr>`;
+        }).join("") || `<tr><td colspan="7" class="muted">No hay resultados para este filtro.</td></tr>`}</tbody>
+      </table>`;
+
+    const selectedCount = state.assignmentAuditSelectedKeys.size;
+    $("#assignmentAuditSelectionSummary").textContent = `${selectedCount} servicio${selectedCount === 1 ? "" : "s"} + día seleccionado${selectedCount === 1 ? "" : "s"}. Hay ${stats.syncableKeys} día${stats.syncableKeys === 1 ? "" : "s"} con diferencias corregibles automáticamente.`;
+
+    table.querySelectorAll("[data-audit-select]").forEach(input => input.addEventListener("change", () => {
+      const key = input.dataset.auditSelect;
+      if (input.checked) state.assignmentAuditSelectedKeys.add(key);
+      else state.assignmentAuditSelectedKeys.delete(key);
+      renderAssignmentAudit();
+    }));
+    table.querySelectorAll("[data-audit-apply-key]").forEach(button => button.addEventListener("click", () => applyAssignmentAuditKeys([button.dataset.auditApplyKey]).catch(error => toast(error.message || "No se pudo sincronizar la asignación."))));
+    table.querySelectorAll("[data-audit-create-site]").forEach(button => button.addEventListener("click", () => createMissingAuditSite(button.dataset.auditCreateSite).catch(error => toast(error.message || "No se pudo crear el servicio."))));
+    table.querySelectorAll("[data-audit-find-user]").forEach(button => button.addEventListener("click", () => {
+      renderTab("users");
+      state.sectionSearch.users = button.dataset.auditFindUser || "";
+      syncContextSearchUI("users");
+      renderUsers();
+      focusCurrentSearchResults();
+    }));
+  }
+
+  function clearAssignmentAudit() {
+    state.assignmentAuditFileName = "";
+    state.assignmentAuditParsed = null;
+    state.assignmentAuditAnalysis = null;
+    state.assignmentAuditSelectedKeys.clear();
+    state.assignmentAuditFilter = "alerts";
+    if ($("#assignmentAuditFile")) $("#assignmentAuditFile").value = "";
+    if ($("#assignmentAuditFileInfo")) $("#assignmentAuditFileInfo").textContent = "Todavía no cargaste un archivo.";
+    renderAssignmentAudit();
+  }
+
+  function analyzeParsedAssignmentAudit() {
+    if (!state.assignmentAuditParsed) return;
+    const dateString = $("#assignmentAuditEffectiveDate")?.value || todayISO();
+    state.assignmentAuditAnalysis = buildAssignmentAuditAnalysis(state.assignmentAuditParsed, dateString);
+    const validKeys = new Set(state.assignmentAuditAnalysis.syncPlans.keys());
+    state.assignmentAuditSelectedKeys = new Set([...state.assignmentAuditSelectedKeys].filter(key => validKeys.has(key)));
+    renderAssignmentAudit();
+  }
+
+  async function analyzeAssignmentAuditFile() {
+    const file = $("#assignmentAuditFile")?.files?.[0];
+    const parsed = await parseAssignmentAuditFile(file);
+    state.assignmentAuditFileName = file.name;
+    state.assignmentAuditParsed = parsed;
+    state.assignmentAuditSelectedKeys.clear();
+    state.assignmentAuditFilter = "alerts";
+    analyzeParsedAssignmentAudit();
+    const differences = state.assignmentAuditAnalysis?.stats?.warnings || 0;
+    const blocked = state.assignmentAuditAnalysis?.stats?.blocked || 0;
+    toast(differences || blocked ? `Análisis listo: ${differences} diferencia${differences === 1 ? "" : "s"} y ${blocked} bloqueo${blocked === 1 ? "" : "s"}.` : "El Excel coincide con las asignaciones vigentes.", differences || blocked ? "" : "success");
+  }
+
+  async function createMissingAuditSite(serviceKey) {
+    const parsed = state.assignmentAuditParsed;
+    if (!parsed) throw new Error("Volvé a cargar el Excel.");
+    const meta = parsed.serviceMeta?.get(serviceKey);
+    if (!meta?.address || !meta?.coordinates) throw new Error("El Excel no tiene dirección y coordenadas suficientes para crear este servicio automáticamente.");
+    const existing = state.sites.find(site => auditEntityKey(site.name) === serviceKey);
+    if (existing) throw new Error("Ese servicio ya existe. Volvé a analizar el Excel.");
+    if (!window.confirm(`¿Crear el servicio "${meta.name}" usando dirección y coordenadas del Excel? El radio GPS inicial será 120 m y luego podés cambiarlo en Servicios.`)) return;
+    await store.upsertSite({
+      name: meta.name,
+      address: meta.address,
+      zone: meta.zone || null,
+      supervisor_name: meta.supervisor || null,
+      service_type: meta.frequency || "fixed",
+      lat: meta.coordinates.lat,
+      lng: meta.coordinates.lng,
+      gps_radius_m: 120,
+      is_active: true
+    });
+    await refreshBaseData($("#dashboardDate")?.value || todayISO());
+    renderSites();
+    renderAssignmentSelectors();
+    analyzeParsedAssignmentAudit();
+    toast("Servicio creado desde el Excel. El análisis fue recalculado.", "success");
+  }
+
+  function auditTemplateForExpected(expectedAtom, currentAtoms) {
+    const exact = currentAtoms.find(atom => auditSameAtom(expectedAtom, atom));
+    if (exact) return exact.assignment;
+    const sameOperator = currentAtoms.find(atom => atom.operatorId === expectedAtom.operatorId);
+    if (sameOperator) return sameOperator.assignment;
+    const sameSchedule = currentAtoms.find(atom => atom.start === expectedAtom.start && atom.end === expectedAtom.end);
+    if (sameSchedule) return sameSchedule.assignment;
+    return currentAtoms[0]?.assignment || null;
+  }
+
+  function auditAssignmentContinuationPayload(assignment, days, validFrom) {
+    return {
+      operator_id: assignment.operator_id,
+      site_id: assignment.site_id,
+      days_of_week: days,
+      scheduled_start: formatTime(assignment.scheduled_start),
+      scheduled_end: formatTime(assignment.scheduled_end),
+      grace_minutes: Number(assignment.grace_minutes ?? 10),
+      absence_after_minutes: Number(assignment.absence_after_minutes ?? 30),
+      valid_from: validFrom,
+      valid_to: assignment.valid_to || null,
+      notes: assignment.notes || null,
+      assignment_type: "fixed",
+      created_by: assignment.created_by || state.currentProfile?.id || null,
+      suppress_regular_assignments: false,
+      is_active: true
+    };
+  }
+
+  function buildAssignmentAuditSyncPayload(syncKeys, effectiveDate) {
+    const analysis = state.assignmentAuditAnalysis;
+    if (!analysis) throw new Error("Primero analizá el Excel.");
+    const keys = [...new Set(syncKeys || [])].filter(Boolean);
+    if (!keys.length) throw new Error("Seleccioná al menos una diferencia para corregir.");
+    const plans = keys.map(key => analysis.syncPlans.get(key)).filter(Boolean);
+    const blocked = plans.filter(plan => plan.blocked);
+    if (blocked.length) throw new Error(`Hay ${blocked.length} servicio/día bloqueado por datos sin resolver. Corregí primero esos nombres u horarios.`);
+
+    const selectedDaysBySite = new Map();
+    plans.forEach(plan => {
+      if (!selectedDaysBySite.has(plan.siteId)) selectedDaysBySite.set(plan.siteId, new Set());
+      selectedDaysBySite.get(plan.siteId).add(Number(plan.dayId));
+    });
+
+    const updates = [];
+    const inserts = [];
+    const activeFixed = state.assignments.filter(a => auditAssignmentActiveOnDate(a, effectiveDate));
+
+    // Cerrar o recortar las asignaciones actuales solamente desde la fecha elegida.
+    activeFixed.forEach(assignment => {
+      const selectedDays = selectedDaysBySite.get(assignment.site_id);
+      if (!selectedDays) return;
+      const days = (assignment.days_of_week || []).map(Number);
+      const affectedDays = days.filter(day => selectedDays.has(day));
+      if (!affectedDays.length) return;
+      const remainingDays = days.filter(day => !selectedDays.has(day));
+      const validFrom = assignment.valid_from || effectiveDate;
+      if (validFrom < effectiveDate) {
+        updates.push({ id: assignment.id, patch: { valid_to: addDaysISO(effectiveDate, -1) } });
+        if (remainingDays.length) inserts.push(auditAssignmentContinuationPayload(assignment, remainingDays, effectiveDate));
+      } else {
+        if (remainingDays.length) updates.push({ id: assignment.id, patch: { days_of_week: remainingDays } });
+        else updates.push({ id: assignment.id, patch: { is_active: false } });
+      }
+    });
+
+    // Crear la versión que dicta el Excel para cada servicio/día seleccionado.
+    const desiredRaw = [];
+    plans.forEach(plan => {
+      plan.expectedAtoms.forEach(expectedAtom => {
+        const template = auditTemplateForExpected(expectedAtom, plan.currentAtoms);
+        desiredRaw.push({
+          operator_id: expectedAtom.operatorId,
+          site_id: plan.siteId,
+          days_of_week: [Number(plan.dayId)],
+          scheduled_start: expectedAtom.start,
+          scheduled_end: expectedAtom.end,
+          grace_minutes: Number(template?.grace_minutes ?? 10),
+          absence_after_minutes: Number(template?.absence_after_minutes ?? 30),
+          valid_from: effectiveDate,
+          valid_to: template?.valid_to && template.valid_to >= effectiveDate ? template.valid_to : null,
+          notes: template?.notes || `Sincronizado desde Excel ${state.assignmentAuditFileName || "de planificación"}`,
+          assignment_type: "fixed",
+          created_by: state.currentProfile?.id || null,
+          suppress_regular_assignments: false,
+          is_active: true
+        });
+      });
+    });
+
+    // Agrupar días iguales para no llenar la base con una fila por día cuando no hace falta.
+    const grouped = new Map();
+    desiredRaw.forEach(payload => {
+      const key = [payload.operator_id, payload.site_id, payload.scheduled_start, payload.scheduled_end, payload.grace_minutes, payload.absence_after_minutes, payload.valid_to || "", payload.notes || ""].join("|");
+      if (!grouped.has(key)) grouped.set(key, { ...payload, days_of_week: [] });
+      grouped.get(key).days_of_week.push(...payload.days_of_week);
+    });
+    grouped.forEach(payload => {
+      payload.days_of_week = [...new Set(payload.days_of_week.map(Number))].sort((a, b) => a - b);
+      inserts.push(payload);
+    });
+
+    return { updates, inserts, plans };
+  }
+
+  async function applyAssignmentAuditKeys(syncKeys) {
+    const effectiveDate = $("#assignmentAuditEffectiveDate")?.value || todayISO();
+    const payload = buildAssignmentAuditSyncPayload(syncKeys, effectiveDate);
+    const daysCount = payload.plans.length;
+    const coverageCount = payload.plans.reduce((sum, plan) => sum + plan.expectedAtoms.length, 0);
+    const noCoverageCount = payload.plans.filter(plan => plan.expectedAtoms.length === 0).length;
+    const message = `¿Sincronizar ${daysCount} servicio/día desde ${effectiveDate}? Se crearán o ajustarán ${coverageCount} cobertura${coverageCount === 1 ? "" : "s"}${noCoverageCount ? ` y ${noCoverageCount} día${noCoverageCount === 1 ? "" : "s"} quedará${noCoverageCount === 1 ? "" : "n"} sin cobertura fija` : ""}. El historial anterior se conserva.`;
+    if (!window.confirm(message)) return;
+
+    await store.applyAssignmentSync(payload);
+    state.assignmentAuditSelectedKeys.clear();
+    await renderSupervisorView();
+    analyzeParsedAssignmentAudit();
+    toast("Asignaciones sincronizadas con el Excel.", "success");
+  }
+
+  function updateBulkSelectionSummaries() {
+    const assignmentCount = state.bulkSelectedAssignmentIds.size;
+    const siteCount = state.bulkSelectedSiteIds.size;
+    if ($("#bulkAssignmentSelectionSummary")) {
+      $("#bulkAssignmentSelectionSummary").textContent = `${assignmentCount} asignación${assignmentCount === 1 ? "" : "es"} seleccionada${assignmentCount === 1 ? "" : "s"} de ${state.assignments.length}.`;
+    }
+    if ($("#bulkSiteSelectionSummary")) {
+      $("#bulkSiteSelectionSummary").textContent = `${siteCount} servicio${siteCount === 1 ? "" : "s"} seleccionado${siteCount === 1 ? "" : "s"} de ${state.sites.length}.`;
+    }
+  }
+
+  function selectedAssignmentTargets() {
+    const scope = $("#bulkAssignmentScope")?.value || "all";
+    if (scope === "selected") return state.assignments.filter(a => state.bulkSelectedAssignmentIds.has(a.id));
+    return [...state.assignments];
+  }
+
+  function selectedSiteTargets() {
+    const scope = $("#bulkSiteScope")?.value || "all";
+    if (scope === "selected") return state.sites.filter(site => state.bulkSelectedSiteIds.has(site.id));
+    return [...state.sites];
+  }
+
+  async function applyBulkAssignmentSettings() {
+    const graceRaw = $("#bulkAssignmentGrace").value.trim();
+    const absentRaw = $("#bulkAssignmentAbsent").value.trim();
+    if (!graceRaw && !absentRaw) throw new Error("Ingresá al menos un valor para demora o ausencia.");
+
+    const patch = {};
+    if (graceRaw) {
+      const grace = Number(graceRaw);
+      if (!Number.isFinite(grace) || grace < 0 || grace > 120) throw new Error("La tolerancia de demora debe estar entre 0 y 120 minutos.");
+      patch.grace_minutes = Math.round(grace);
+    }
+    if (absentRaw) {
+      const absent = Number(absentRaw);
+      if (!Number.isFinite(absent) || absent < 1 || absent > 240) throw new Error("El margen de ausencia debe estar entre 1 y 240 minutos.");
+      patch.absence_after_minutes = Math.round(absent);
+    }
+
+    const targets = selectedAssignmentTargets();
+    if (!targets.length) throw new Error($("#bulkAssignmentScope").value === "selected" ? "Seleccioná al menos una asignación." : "No hay asignaciones activas para modificar.");
+
+    const invalid = targets.filter(a => {
+      const nextGrace = patch.grace_minutes ?? Number(a.grace_minutes ?? 10);
+      const nextAbsent = patch.absence_after_minutes ?? Number(a.absence_after_minutes ?? 30);
+      return nextAbsent <= nextGrace;
+    });
+    if (invalid.length) {
+      throw new Error(`La ausencia debe quedar después de la tolerancia de demora. Hay ${invalid.length} asignación${invalid.length === 1 ? "" : "es"} que quedarían con valores incompatibles.`);
+    }
+
+    const changes = [
+      patch.grace_minutes !== undefined ? `demora ${patch.grace_minutes} min` : null,
+      patch.absence_after_minutes !== undefined ? `ausencia ${patch.absence_after_minutes} min` : null
+    ].filter(Boolean).join(" · ");
+    const scopeLabel = $("#bulkAssignmentScope").value === "selected" ? "seleccionadas" : "activas";
+    if (!window.confirm(`¿Aplicar ${changes} a ${targets.length} asignación${targets.length === 1 ? "" : "es"} ${scopeLabel}? El cambio también puede modificar las alertas del día en curso.`)) return;
+
+    const button = $("#applyBulkAssignmentsBtn");
+    button.disabled = true;
+    try {
+      await store.bulkUpdateAssignments(targets.map(a => a.id), patch);
+      $("#bulkAssignmentGrace").value = "";
+      $("#bulkAssignmentAbsent").value = "";
+      toast(`${targets.length} asignación${targets.length === 1 ? "" : "es"} actualizada${targets.length === 1 ? "" : "s"}.`, "success");
+      await renderSupervisorView();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function applyBulkSiteRadius() {
+    const radius = Number($("#bulkSiteRadius").value);
+    if (!Number.isFinite(radius) || radius < 10 || radius > 1000) throw new Error("El radio GPS debe estar entre 10 y 1000 metros.");
+    const roundedRadius = Math.round(radius);
+    const targets = selectedSiteTargets();
+    if (!targets.length) throw new Error($("#bulkSiteScope").value === "selected" ? "Seleccioná al menos un servicio." : "No hay servicios activos para modificar.");
+
+    const scopeLabel = $("#bulkSiteScope").value === "selected" ? "seleccionados" : "activos";
+    if (!window.confirm(`¿Establecer un radio GPS de ${roundedRadius} m en ${targets.length} servicio${targets.length === 1 ? "" : "s"} ${scopeLabel}?`)) return;
+
+    const button = $("#applyBulkSitesBtn");
+    button.disabled = true;
+    try {
+      await store.bulkUpdateSites(targets.map(site => site.id), { gps_radius_m: roundedRadius });
+      $("#bulkSiteRadius").value = "";
+      toast(`${targets.length} servicio${targets.length === 1 ? "" : "s"} actualizado${targets.length === 1 ? "" : "s"} a ${roundedRadius} m.`, "success");
+      await renderSupervisorView();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function resetSpecialAssignmentForm() {
+    state.specialAssignmentEditingId = null;
+    $("#specialAssignmentForm")?.reset();
+    if ($("#specialAssignmentDate")) $("#specialAssignmentDate").value = todayISO();
+    if ($("#specialAssignmentStart")) $("#specialAssignmentStart").value = "08:00";
+    if ($("#specialAssignmentEnd")) $("#specialAssignmentEnd").value = "12:00";
+    if ($("#specialAssignmentGrace")) $("#specialAssignmentGrace").value = "10";
+    if ($("#specialAssignmentAbsent")) $("#specialAssignmentAbsent").value = "30";
+    if ($("#specialAssignmentFormTitle")) $("#specialAssignmentFormTitle").textContent = "Asignación especial por un día";
+    $("#cancelSpecialAssignmentEditBtn")?.classList.add("hidden");
+    if ($("#saveSpecialAssignmentBtn")) $("#saveSpecialAssignmentBtn").textContent = "Programar asignación especial";
+  }
+
+  function editSpecialAssignment(id) {
+    const assignment = byId(state.assignments, id);
+    if (!assignment || String(assignment.assignment_type || "") !== "special") return;
+    state.specialAssignmentEditingId = id;
+    $("#specialAssignmentOperator").value = assignment.operator_id;
+    $("#specialAssignmentSite").value = assignment.site_id;
+    $("#specialAssignmentDate").value = assignment.valid_from || todayISO();
+    $("#specialAssignmentStart").value = formatTime(assignment.scheduled_start);
+    $("#specialAssignmentEnd").value = formatTime(assignment.scheduled_end);
+    $("#specialAssignmentGrace").value = assignment.grace_minutes ?? 10;
+    $("#specialAssignmentAbsent").value = assignment.absence_after_minutes ?? 30;
+    $("#specialAssignmentNotes").value = assignment.notes || "";
+    $("#specialAssignmentFormTitle").textContent = "Editar asignación especial";
+    $("#cancelSpecialAssignmentEditBtn").classList.remove("hidden");
+    $("#saveSpecialAssignmentBtn").textContent = "Guardar cambio especial";
+    renderTab("assignments");
+    scrollToActiveEditor("#specialAssignmentForm");
+  }
+
+  async function saveSpecialAssignment(event) {
+    event.preventDefault();
+    const operatorId = $("#specialAssignmentOperator")?.value;
+    const siteId = $("#specialAssignmentSite")?.value;
+    const date = $("#specialAssignmentDate")?.value || todayISO();
+    const start = $("#specialAssignmentStart")?.value;
+    const end = $("#specialAssignmentEnd")?.value;
+    const grace = Number($("#specialAssignmentGrace")?.value || 10);
+    const absent = Number($("#specialAssignmentAbsent")?.value || 30);
+    const notes = $("#specialAssignmentNotes")?.value.trim() || "";
+    const editingId = state.specialAssignmentEditingId || null;
+
+    if (!operatorId || !siteId || !date || !start || !end) throw new Error("Completá operario, servicio, fecha y horario.");
+    if (end === start) throw new Error("Entrada y salida no pueden ser iguales. Los turnos nocturnos, por ejemplo 22:00 a 06:00, sí están permitidos.");
+    if (absent <= grace) throw new Error("El margen de ausencia debe ser posterior a la tolerancia de demora.");
+
+    const existing = state.assignments.find(a =>
+      a.id !== editingId
+      && a.operator_id === operatorId
+      && String(a.assignment_type || "") === "special"
+      && a.is_active !== false
+      && assignmentAppliesOnDate(a, date)
+    );
+    if (existing) throw new Error("Ese operario ya tiene una asignación especial para esa fecha. Editá o eliminá la existente antes de crear otra.");
+
+    await store.upsertAssignment({
+      ...(editingId ? { id: editingId } : {}),
+      operator_id: operatorId,
+      site_id: siteId,
+      days_of_week: [isoDayId(date)],
+      scheduled_start: start,
+      scheduled_end: end,
+      grace_minutes: grace,
+      absence_after_minutes: absent,
+      valid_from: date,
+      valid_to: date,
+      assignment_type: "special",
+      covered_operator_id: null,
+      ...(!editingId ? { created_by: state.currentProfile?.id || null } : {}),
+      suppress_regular_assignments: true,
+      notes: notes || "Cambio excepcional de horario / asignación por un día",
+      is_active: true
+    });
+
+    resetSpecialAssignmentForm();
+    toast("Asignación especial guardada. Ese día reemplaza la jornada habitual del operario.", "success");
+    await renderSupervisorView();
+  }
+
+  async function saveExtraAssignment(event) {
+    event.preventDefault();
+    const operatorId = $("#extraAssignmentOperator")?.value;
+    const siteId = $("#extraAssignmentSite")?.value;
+    const type = $("#extraAssignmentType")?.value || "coverage";
+    const date = $("#extraAssignmentDate")?.value || todayISO();
+    const start = $("#extraAssignmentStart")?.value;
+    const end = $("#extraAssignmentEnd")?.value;
+    const grace = Number($("#extraAssignmentGrace")?.value || 10);
+    const absent = Number($("#extraAssignmentAbsent")?.value || 30);
+    const coveredOperatorId = $("#extraCoveredOperator")?.value || null;
+    const notes = $("#extraAssignmentNotes")?.value.trim() || "";
+    const suppressRegular = Boolean($("#extraSuppressRegular")?.checked);
+
+    if (!operatorId || !siteId || !date || !start || !end) throw new Error("Completá operario, servicio, fecha y horario.");
+    if (end === start) throw new Error("Entrada y salida no pueden ser iguales. Los turnos nocturnos, por ejemplo 22:00 a 06:00, sí están permitidos.");
+    if (absent <= grace) throw new Error("El margen de ausencia debe ser posterior a la tolerancia de demora.");
+    const day = isoDayId(date);
+
+    await store.upsertAssignment({
+      operator_id: operatorId,
+      site_id: siteId,
+      days_of_week: [day],
+      scheduled_start: start,
+      scheduled_end: end,
+      grace_minutes: grace,
+      absence_after_minutes: absent,
+      valid_from: date,
+      valid_to: date,
+      assignment_type: type,
+      covered_operator_id: coveredOperatorId,
+      created_by: state.currentProfile?.id || null,
+      suppress_regular_assignments: suppressRegular,
+      notes: notes || (type === "coverage" ? "Cobertura extraordinaria" : "Refuerzo extraordinario"),
+      is_active: true
+    });
+
+    $("#extraAssignmentNotes").value = "";
+    $("#extraCoveredOperator").value = "";
+    if ($("#extraSuppressRegular")) $("#extraSuppressRegular").checked = false;
+    $("#extraAssignmentDate").value = todayISO();
+    toast(`${assignmentTypeLabel(type)} creada. El operario la verá como tarea extraordinaria.`, "success");
+    await renderSupervisorView();
+  }
+
+  function resetLeaveForm() {
+    state.leaveEditingId = null;
+    $("#leaveForm")?.reset();
+    if ($("#leaveStartDate")) $("#leaveStartDate").value = todayISO();
+    if ($("#leaveEndDate")) $("#leaveEndDate").value = todayISO();
+    if ($("#leaveFormTitle")) $("#leaveFormTitle").textContent = "Registrar / programar novedad";
+    $("#cancelLeaveEditBtn")?.classList.add("hidden");
+    if ($("#saveLeaveBtn")) $("#saveLeaveBtn").textContent = "Guardar novedad";
+  }
+
+
+  function prepareVacationPlanning() {
+    resetLeaveForm();
+    renderTab("leaves");
+    if ($("#leaveType")) $("#leaveType").value = "vacation";
+    if ($("#leaveFormTitle")) $("#leaveFormTitle").textContent = "Planificar vacaciones";
+    if ($("#saveLeaveBtn")) $("#saveLeaveBtn").textContent = "Guardar vacaciones";
+    scrollToActiveEditor("#leaveForm");
+  }
+
+  function editLeave(id) {
+    const leave = (state.leaveRecords || []).find(item => item.id === id);
+    if (!leave) return;
+    state.leaveEditingId = id;
+    $("#leaveOperator").value = leave.operator_id;
+    $("#leaveType").value = leave.leave_type || "other_leave";
+    $("#leaveStartDate").value = leave.start_date || todayISO();
+    $("#leaveEndDate").value = leave.end_date || leave.start_date || todayISO();
+    $("#leaveReference").value = leave.reference || "";
+    $("#leaveNotes").value = leave.notes || "";
+    $("#leaveFormTitle").textContent = "Editar novedad";
+    $("#cancelLeaveEditBtn").classList.remove("hidden");
+    $("#saveLeaveBtn").textContent = "Guardar cambios";
+    renderTab("leaves");
+    scrollToActiveEditor("#leaveForm");
+  }
+
+  async function saveLeave(event) {
+    event.preventDefault();
+    const operatorId = $("#leaveOperator")?.value;
+    const leaveType = $("#leaveType")?.value || "other_leave";
+    const startDate = $("#leaveStartDate")?.value;
+    const endDate = $("#leaveEndDate")?.value || startDate;
+    const reference = $("#leaveReference")?.value.trim() || "";
+    const notes = $("#leaveNotes")?.value.trim() || "";
+    const editingId = state.leaveEditingId || null;
+    if (!operatorId || !startDate || !endDate) throw new Error("Completá operario, fecha desde y fecha hasta.");
+    if (endDate < startDate) throw new Error("La fecha hasta no puede ser anterior a la fecha desde.");
+
+    const overlap = (state.leaveRecords || []).find(leave =>
+      leave.id !== editingId
+      && leave.operator_id === operatorId
+      && isActiveLeave(leave)
+      && leave.start_date <= endDate
+      && leave.end_date >= startDate
+    );
+    if (overlap && !window.confirm(`Ya existe una novedad activa para este operario entre ${leavePeriodLabel(overlap)}. ¿Querés guardar igualmente este registro superpuesto?`)) return;
+
+    await store.upsertLeaveEvent({
+      ...(editingId ? { id: editingId } : {}),
+      operator_id: operatorId,
+      leave_type: leaveType,
+      start_date: startDate,
+      end_date: endDate,
+      reference,
+      notes,
+      status: "active",
+      ...(!editingId ? { created_by: state.currentProfile?.id || null } : {}),
+      updated_by: state.currentProfile?.id || null
+    });
+
+    resetLeaveForm();
+    toast(`${leaveTypeLabel(leaveType)} guardado. Esos días no generarán ausencia automática.`, "success");
+    await renderSupervisorView();
+  }
+
+  async function cancelLeave(id) {
+    const leave = (state.leaveRecords || []).find(item => item.id === id);
+    if (!leave) return;
+    const operator = byId(state.profiles, leave.operator_id);
+    if (!window.confirm(`¿Cancelar ${leaveTypeLabel(leave.leave_type).toLowerCase()} de ${operator?.full_name || "este operario"} (${leavePeriodLabel(leave)})? El registro quedará en la trazabilidad.`)) return;
+    await store.cancelLeaveEvent(id, state.currentProfile?.id || null);
+    toast("Novedad cancelada. El historial se conserva.", "success");
+    if (state.leaveEditingId === id) resetLeaveForm();
+    await renderSupervisorView();
+  }
+
+  function leaveAuditActionLabel(action) {
+    if (action === "INSERT") return "Creada";
+    if (action === "UPDATE") return "Modificada";
+    if (action === "DELETE") return "Eliminada";
+    return action || "Cambio";
+  }
+
+  async function refreshLeaveAudit() {
+    try {
+      state.leaveAudit = await (store.listLeaveAudit?.() || Promise.resolve([]));
+    } catch (error) {
+      console.warn("No se pudo cargar trazabilidad de novedades", error);
+      state.leaveAudit = [];
+    }
+  }
+
+  function renderLeaves() {
+    const list = $("#leavesList");
+    if (!list) return;
+    const statusFilter = $("#leaveStatusFilter")?.value || "active";
+    const searchTerm = sectionSearchTerm("leaves");
+    const sorted = [...(state.leaveRecords || [])].sort((a, b) => `${b.start_date}|${b.created_at || ""}`.localeCompare(`${a.start_date}|${a.created_at || ""}`));
+    const statusRows = sorted.filter(leave => statusFilter === "all" || String(leave.status || "active") === statusFilter);
+    const visible = searchTerm ? statusRows.filter(leave => {
+      const operator = byId(state.profiles, leave.operator_id);
+      return valuesMatchSearch(searchTerm, operator?.full_name, leaveTypeLabel(leave.leave_type), leave.start_date, leave.end_date, leave.reference, leave.notes, leave.status);
+    }) : statusRows;
+    updateSectionSearchCount("leaves", visible.length, statusRows.length);
+
+    list.innerHTML = visible.map(leave => {
+      const operator = byId(state.profiles, leave.operator_id);
+      const creator = byId(state.profiles, leave.created_by);
+      const updater = byId(state.profiles, leave.updated_by);
+      const cancelled = String(leave.status || "active") === "cancelled";
+      return `
+        <div class="list-item leave-list-item ${cancelled ? "leave-cancelled" : ""} ${searchTerm ? "search-match-card" : ""}">
+          <div class="list-item-title-row">
+            <div>
+              <div class="list-item-title">${escapeHtml(operator?.full_name || "—")}</div>
+              <div class="muted small">${escapeHtml(leavePeriodLabel(leave))}</div>
+            </div>
+            <div class="leave-badge-stack">
+              <span class="leave-type-badge ${escapeHtml(leave.leave_type || "other_leave")}">${escapeHtml(leaveTypeLabel(leave.leave_type))}</span>
+              ${cancelled ? `<span class="status-pill status-rejected">Cancelada</span>` : `<span class="status-pill status-leave">Activa</span>`}
+            </div>
+          </div>
+          ${leave.reference ? `<div class="muted small"><strong>Referencia:</strong> ${escapeHtml(leave.reference)}</div>` : ""}
+          ${leave.notes ? `<div class="muted small"><strong>Observación:</strong> ${escapeHtml(leave.notes)}</div>` : ""}
+          <div class="muted small leave-trace-line">Creada ${leave.created_at ? escapeHtml(formatDateTime(leave.created_at)) : "—"}${creator ? ` por ${escapeHtml(creator.full_name)}` : ""}${leave.updated_at && leave.updated_at !== leave.created_at ? ` · Último cambio ${escapeHtml(formatDateTime(leave.updated_at))}${updater ? ` por ${escapeHtml(updater.full_name)}` : ""}` : ""}</div>
+          <div class="list-item-actions">
+            ${cancelled ? "" : `<button class="secondary-btn small-btn" data-edit-leave="${escapeHtml(leave.id)}" type="button">Editar</button><button class="danger-btn small-btn" data-cancel-leave="${escapeHtml(leave.id)}" type="button">Cancelar novedad</button>`}
+          </div>
+        </div>`;
+    }).join("") || `<p class="muted">No hay novedades que coincidan con este filtro.</p>`;
+
+    list.querySelectorAll("[data-edit-leave]").forEach(btn => btn.addEventListener("click", () => editLeave(btn.dataset.editLeave)));
+    list.querySelectorAll("[data-cancel-leave]").forEach(btn => btn.addEventListener("click", () => cancelLeave(btn.dataset.cancelLeave).catch(error => toast(error.message || "No se pudo cancelar la novedad."))));
+
+    const auditContainer = $("#leaveAuditList");
+    if (auditContainer) {
+      const rows = (state.leaveAudit || []).slice(0, 80);
+      auditContainer.innerHTML = rows.length ? `
+        <div class="responsive-table">
+          <table>
+            <thead><tr><th>Fecha</th><th>Acción</th><th>Operario</th><th>Novedad</th><th>Período</th><th>Usuario</th></tr></thead>
+            <tbody>${rows.map(change => {
+              const data = change.new_data || change.old_data || {};
+              const operator = byId(state.profiles, data.operator_id);
+              const user = byId(state.profiles, change.changed_by);
+              const period = data.start_date ? (data.start_date === data.end_date ? data.start_date : `${data.start_date} a ${data.end_date}`) : "—";
+              return `<tr><td>${escapeHtml(formatDateTime(change.changed_at))}</td><td>${escapeHtml(leaveAuditActionLabel(change.action))}</td><td>${escapeHtml(operator?.full_name || "—")}</td><td>${escapeHtml(leaveTypeLabel(data.leave_type))}${data.status === "cancelled" ? " · Cancelada" : ""}</td><td>${escapeHtml(period)}</td><td>${escapeHtml(user?.full_name || "Sistema")}</td></tr>`;
+            }).join("")}</tbody>
+          </table>
+        </div>` : `<p class="muted">Todavía no hay cambios registrados.</p>`;
+    }
+  }
+
   function renderAssignments() {
     const list = $("#assignmentsList");
+    const validIds = new Set(state.assignments.map(assignment => assignment.id));
+    state.bulkSelectedAssignmentIds = new Set([...state.bulkSelectedAssignmentIds].filter(id => validIds.has(id)));
     const sorted = [...state.assignments].sort((a, b) => {
       const siteA = byId(state.sites, a.site_id)?.name || "";
       const siteB = byId(state.sites, b.site_id)?.name || "";
       return `${siteA} ${a.scheduled_start}`.localeCompare(`${siteB} ${b.scheduled_start}`);
     });
-
-    list.innerHTML = sorted.map(assignment => {
+    const searchTerm = sectionSearchTerm("assignments");
+    const visibleAssignments = searchTerm ? sorted.filter(assignment => {
       const op = byId(state.profiles, assignment.operator_id);
       const site = byId(state.sites, assignment.site_id);
+      const coveredOp = assignment.covered_operator_id ? byId(state.profiles, assignment.covered_operator_id) : null;
+      return valuesMatchSearch(searchTerm, op?.full_name, site?.name, site?.address, site?.zone, coveredOp?.full_name, assignmentTypeLabel(assignment.assignment_type || "fixed"), assignment.notes, assignment.scheduled_start, assignment.scheduled_end);
+    }) : sorted;
+    updateSectionSearchCount("assignments", visibleAssignments.length, sorted.length);
+
+    list.innerHTML = visibleAssignments.map(assignment => {
+      const op = byId(state.profiles, assignment.operator_id);
+      const site = byId(state.sites, assignment.site_id);
+      const coveredOp = assignment.covered_operator_id ? byId(state.profiles, assignment.covered_operator_id) : null;
+      const assignmentType = assignment.assignment_type || "fixed";
       const days = (assignment.days_of_week || []).map(d => dayLabel(d)).join(", ");
       const vigencia = `${assignment.valid_from || "—"}${assignment.valid_to ? ` a ${assignment.valid_to}` : " en adelante"}`;
+      const selected = state.bulkSelectedAssignmentIds.has(assignment.id);
       return `
-        <div class="list-item">
-          <div class="list-item-title">${escapeHtml(site?.name || "—")}</div>
+        <div class="list-item ${selected ? "bulk-selected-item" : ""} ${searchTerm ? "search-match-card" : ""}">
+          <div class="bulk-select-line">
+            <label class="bulk-select-control">
+              <input type="checkbox" data-select-assignment="${assignment.id}" ${selected ? "checked" : ""} />
+              <span>Seleccionar para cambio masivo</span>
+            </label>
+          </div>
+          <div class="list-item-title-row"><div class="list-item-title">${escapeHtml(site?.name || "—")}</div>${assignmentType !== "fixed" ? `<span class="extra-duty-badge ${escapeHtml(assignmentType)}">${escapeHtml(assignmentTypeLabel(assignmentType))}</span>` : ""}</div>
           <div class="muted small"><strong>${escapeHtml(op?.full_name || "—")}</strong> · ${formatTime(assignment.scheduled_start)} a ${formatTime(assignment.scheduled_end)}</div>
+          ${coveredOp ? `<div class="muted small">Cubre a: <strong>${escapeHtml(coveredOp.full_name || "—")}</strong></div>` : ""}
+          ${assignment.suppress_regular_assignments ? `<div class="muted small"><strong>${assignmentType === "special" ? "Reemplaza toda la jornada habitual del operario para ese día." : "Reemplaza la asignación habitual del operario en ese horario."}</strong></div>` : ""}
           <div class="muted small">Días: ${escapeHtml(days || "—")} · Vigencia: ${escapeHtml(vigencia)}</div>
           <div class="muted small">Tolerancia: ${assignment.grace_minutes} min · Ausente desde: ${assignment.absence_after_minutes} min</div>
           ${assignment.notes ? `<div class="muted small">Notas: ${escapeHtml(assignment.notes)}</div>` : ""}
           <div class="list-item-actions">
-            <button class="secondary-btn small-btn" data-edit-assignment="${assignment.id}" type="button">Editar</button>
+            ${assignmentType === "special" ? `<button class="secondary-btn small-btn" data-edit-special-assignment="${assignment.id}" type="button">Editar</button>` : `<button class="secondary-btn small-btn" data-edit-assignment="${assignment.id}" type="button">Editar</button>`}
             <button class="danger-btn small-btn" data-delete-assignment="${assignment.id}" type="button">Eliminar</button>
           </div>
         </div>`;
     }).join("") || `<p class="muted">No hay asignaciones cargadas.</p>`;
 
+    list.querySelectorAll("[data-select-assignment]").forEach(input => input.addEventListener("change", () => {
+      if (input.checked) state.bulkSelectedAssignmentIds.add(input.dataset.selectAssignment);
+      else state.bulkSelectedAssignmentIds.delete(input.dataset.selectAssignment);
+      input.closest(".list-item")?.classList.toggle("bulk-selected-item", input.checked);
+      updateBulkSelectionSummaries();
+    }));
     list.querySelectorAll("[data-edit-assignment]").forEach(btn => btn.addEventListener("click", () => editAssignment(btn.dataset.editAssignment)));
+    list.querySelectorAll("[data-edit-special-assignment]").forEach(btn => btn.addEventListener("click", () => editSpecialAssignment(btn.dataset.editSpecialAssignment)));
     list.querySelectorAll("[data-delete-assignment]").forEach(btn => btn.addEventListener("click", () => deleteAssignment(btn.dataset.deleteAssignment)));
+    updateBulkSelectionSummaries();
   }
 
   function assignmentPayloadsFromForm() {
@@ -1132,7 +5739,8 @@
       valid_from: $("#assignmentValidFrom").value || todayISO(),
       valid_to: $("#assignmentValidTo").value || null,
       notes: $("#assignmentNotes").value.trim(),
-      is_active: true
+      is_active: true,
+      ...(!id ? { assignment_type: "fixed", created_by: state.currentProfile?.id || null } : {})
     };
 
     return groups.map((group, index) => ({
@@ -1174,72 +5782,203 @@
     $("#assignmentFormTitle").textContent = "Editar asignación fija";
     $("#cancelAssignmentEditBtn").classList.remove("hidden");
     renderTab("assignments");
+    scrollToActiveEditor("#assignmentForm");
   }
 
   async function deleteAssignment(id) {
-    if (!window.confirm("¿Eliminar esta asignación fija? Las marcaciones históricas quedan guardadas.")) return;
+    const assignment = byId(state.assignments, id);
+    const label = assignmentTypeLabel(assignment?.assignment_type || "fixed").toLowerCase();
+    if (!window.confirm(`¿Eliminar esta ${label}? Las marcaciones históricas quedan guardadas.`)) return;
     await store.deleteAssignment(id);
     toast("Asignación eliminada.");
     await renderSupervisorView();
   }
 
+  function canManageAccountUser(user) {
+    const currentRole = String(state.currentProfile?.role || "").toLowerCase();
+    const targetRole = String(user?.role || "").toLowerCase();
+    if (currentRole === "admin") return true;
+    // Un supervisor puede gestionar operarios y otros supervisores,
+    // pero nunca crear/editar/eliminar administradores.
+    return currentRole === "supervisor" && ["operator", "supervisor"].includes(targetRole);
+  }
+
   function renderUsers() {
     const list = $("#usersList");
-    list.innerHTML = state.profiles.map(user => `
-      <div class="list-item">
+    const searchTerm = sectionSearchTerm("users");
+    const visibleUsers = searchTerm ? state.profiles.filter(user => {
+      const flexibleModes = flexibleModesForOperatorDate(user.id, todayISO());
+      const flexSites = flexibleSiteNamesForModes(flexibleModes);
+      return valuesMatchSearch(searchTerm, user.full_name, user.username, user.phone, roleLabel(user.role), user.notes, user.pending_recovery_email, flexibleModes.length ? "jornada flexible" : "", ...flexSites);
+    }) : state.profiles;
+    updateSectionSearchCount("users", visibleUsers.length, state.profiles.length);
+    list.innerHTML = visibleUsers.map(user => {
+      const manageable = canManageAccountUser(user);
+      const username = user.username || (String(user.email || "").toLowerCase().endsWith("@cleanit.ar") ? String(user.email).split("@")[0] : "Sin usuario");
+      const pendingRecoveryEmail = String(user.pending_recovery_email || "").trim();
+      return `
+      <div class="list-item ${searchTerm ? "search-match-card" : ""}">
         <div class="list-item-title">${escapeHtml(user.full_name)}</div>
-        <div class="muted small">${user.role === "supervisor" ? "Supervisor" : "Operario"} · ${escapeHtml(user.phone || "Sin teléfono")}</div>
-        <div class="muted small">UUID Auth / ID perfil: ${escapeHtml(user.id)}</div>
+        <div class="muted small">${escapeHtml(roleLabel(user.role).replace(/^./, c => c.toUpperCase()))} · Usuario: <strong>${escapeHtml(username)}</strong></div>
+        ${(() => { const flexModes = flexibleModesForOperatorDate(user.id, todayISO()); const flexNames = flexibleSiteNamesForModes(flexModes); return flexModes.length ? `<div class="flexible-user-badge">Jornada flexible · ${escapeHtml(flexNames.length ? flexNames.join(" · ") : "servicio sin configurar")}</div>` : ""; })()}
+        ${pendingRecoveryEmail ? `<div class="recovery-request-box"><strong>Recuperación solicitada:</strong> ${escapeHtml(pendingRecoveryEmail)}<div class="muted small">La persona informó este correo desde «Olvidaste tu contraseña».</div></div>` : ""}
+        <div class="muted small">${escapeHtml(user.phone || "Sin teléfono")}</div>
         ${user.notes ? `<div class="muted small">Notas: ${escapeHtml(user.notes)}</div>` : ""}
         <div class="list-item-actions">
-          <button class="secondary-btn small-btn" data-edit-user="${user.id}" type="button">Editar</button>
-          <button class="danger-btn small-btn" data-delete-user="${user.id}" type="button">Eliminar</button>
+          ${manageable ? `<button class="secondary-btn small-btn" data-edit-user="${user.id}" type="button">Editar</button>` : ""}
+          ${manageable && pendingRecoveryEmail ? `<button class="primary-btn small-btn" data-approve-recovery="${user.id}" type="button">Aprobar email y enviar enlace</button>` : ""}
+          ${manageable && pendingRecoveryEmail ? `<button class="ghost-btn small-btn" data-reject-recovery="${user.id}" type="button">Rechazar email</button>` : ""}
+          ${manageable ? `<button class="secondary-btn small-btn" data-set-password="${user.id}" type="button">Cambiar contraseña</button>` : ""}
+          ${manageable ? `<button class="danger-btn small-btn" data-delete-user="${user.id}" type="button">Eliminar</button>` : ""}
         </div>
-      </div>`).join("") || `<p class="muted">No hay usuarios cargados.</p>`;
+      </div>`;
+    }).join("") || `<p class="muted">No hay usuarios cargados.</p>`;
 
     list.querySelectorAll("[data-edit-user]").forEach(btn => btn.addEventListener("click", () => editUser(btn.dataset.editUser)));
     list.querySelectorAll("[data-delete-user]").forEach(btn => btn.addEventListener("click", () => deleteUser(btn.dataset.deleteUser)));
+    list.querySelectorAll("[data-set-password]").forEach(btn => btn.addEventListener("click", () => setUserPasswordPrompt(btn.dataset.setPassword)));
+    list.querySelectorAll("[data-approve-recovery]").forEach(btn => btn.addEventListener("click", () => approveRecoveryEmail(btn.dataset.approveRecovery)));
+    list.querySelectorAll("[data-reject-recovery]").forEach(btn => btn.addEventListener("click", () => rejectRecoveryEmail(btn.dataset.rejectRecovery)));
   }
 
-  function userPayloadFromForm() {
-    const id = $("#userId").value || $("#userAuthId").value.trim();
-    if (!id) throw new Error("Tenés que cargar el UUID real del usuario creado en Supabase Authentication.");
+  async function approveRecoveryEmail(id) {
+    const user = byId(state.profiles, id);
+    if (!user || !canManageAccountUser(user) || !user.pending_recovery_email) return;
+    const email = String(user.pending_recovery_email).trim();
+    if (!window.confirm(`¿Aprobar ${email} como correo de recuperación de ${user.full_name} y enviarle el enlace para cambiar la contraseña?`)) return;
+    try {
+      await store.approveRecoveryEmail(id);
+      toast("Email aprobado. Se envió el enlace de recuperación.", "success");
+      await renderSupervisorView();
+    } catch (error) {
+      toast(error.message || "No se pudo aprobar el email de recuperación.");
+    }
+  }
+
+  async function rejectRecoveryEmail(id) {
+    const user = byId(state.profiles, id);
+    if (!user || !canManageAccountUser(user) || !user.pending_recovery_email) return;
+    if (!window.confirm(`¿Rechazar el email de recuperación solicitado para ${user.full_name}?`)) return;
+    try {
+      await store.rejectRecoveryEmail(id);
+      toast("Solicitud de recuperación rechazada.", "success");
+      await renderSupervisorView();
+    } catch (error) {
+      toast(error.message || "No se pudo rechazar la solicitud.");
+    }
+  }
+
+  function syncUserRolePermissions() {
+    const currentRole = String(state.currentProfile?.role || "").toLowerCase();
+    const isAdmin = currentRole === "admin";
+    const isSupervisor = currentRole === "supervisor";
+    const select = $("#userRole");
+    if (!select) return;
+
+    Array.from(select.options).forEach(option => {
+      if (isAdmin) {
+        option.disabled = false;
+      } else if (isSupervisor) {
+        option.disabled = !["operator", "supervisor"].includes(option.value);
+      } else {
+        option.disabled = option.value !== "operator";
+      }
+    });
+
+    // Si el valor actual quedó fuera de los permisos del usuario, vuelve a Operario.
+    const selected = select.options[select.selectedIndex];
+    if (selected?.disabled) select.value = "operator";
+  }
+
+  function syncUserFormFields() {
+    const isEditing = Boolean($("#userId").value);
+    const role = $("#userRole").value;
+    const passwordInput = $("#userPassword");
+    const passwordLabel = $("#userPasswordLabel");
+    const passwordHelp = $("#userPasswordHelp");
+    const flexibleBlock = $("#userFlexibleBlock");
+    const flexibleToggle = $("#userFlexibleAttendance");
+    const flexibleSite = $("#userFlexibleSite");
+
+    syncUserRolePermissions();
+    if (flexibleBlock) flexibleBlock.classList.toggle("hidden", role !== "operator");
+    if (flexibleSite) flexibleSite.disabled = role !== "operator" || !flexibleToggle?.checked;
+    passwordInput.required = !isEditing;
+    passwordLabel.textContent = isEditing ? "Nueva contraseña (opcional)" : "Contraseña inicial";
+    passwordInput.placeholder = isEditing ? "Dejar vacío para mantener la actual" : "Mínimo 6 caracteres";
+
+    if (isEditing) {
+      passwordHelp.textContent = "Si no querés cambiar la contraseña, dejá este campo vacío.";
+    } else if (role === "operator") {
+      passwordHelp.textContent = "Para operarios podés usar el DNI como contraseña inicial.";
+    } else {
+      passwordHelp.textContent = "Definí la contraseña inicial que quieras. No hace falta copiar ningún UUID de Supabase.";
+    }
+  }
+
+  function userAccountPayloadFromForm() {
+    const username = $("#userUsername").value.trim();
+    const password = $("#userPassword").value;
+    const fullName = $("#userName").value.trim();
+    if (username.length < 3) throw new Error("El nombre de usuario debe tener al menos 3 caracteres.");
+    if (!fullName) throw new Error("Cargá nombre y apellido.");
+    if (!$("#userId").value && password.length < 6) throw new Error("La contraseña inicial debe tener al menos 6 caracteres.");
+    if (password && password.length < 6) throw new Error("La contraseña debe tener al menos 6 caracteres.");
     return {
-      id,
-      full_name: $("#userName").value.trim(),
+      username,
+      password,
+      full_name: fullName,
       phone: $("#userPhone").value.trim(),
       role: $("#userRole").value,
       notes: $("#userNotes").value.trim(),
-      is_active: true
+      flexible_attendance: $("#userRole").value === "operator" && Boolean($("#userFlexibleAttendance")?.checked),
+      flexible_site_ids: $("#userRole").value === "operator" && $("#userFlexibleAttendance")?.checked ? Array.from($("#userFlexibleSite")?.selectedOptions || []).map(option => option.value).filter(Boolean) : []
     };
   }
 
   function resetUserForm() {
     $("#userForm").reset();
     $("#userId").value = "";
-    $("#userAuthId").value = "";
+    $("#userUsername").value = "";
+    $("#userPassword").value = "";
     $("#userRole").value = "operator";
+    if ($("#userFlexibleAttendance")) $("#userFlexibleAttendance").checked = false;
+    if ($("#userFlexibleSite")) Array.from($("#userFlexibleSite").options || []).forEach(option => option.selected = false);
     $("#userFormTitle").textContent = "Nuevo usuario";
     $("#cancelUserEditBtn").classList.add("hidden");
+    syncUserFormFields();
   }
 
   function editUser(id) {
     const user = byId(state.profiles, id);
-    if (!user) return;
+    if (!user || !canManageAccountUser(user)) return;
     $("#userId").value = user.id;
     $("#userRole").value = user.role || "operator";
-    $("#userAuthId").value = user.id || "";
+    $("#userUsername").value = user.username || (String(user.email || "").toLowerCase().endsWith("@cleanit.ar") ? String(user.email).split("@")[0] : "");
+    $("#userPassword").value = "";
     $("#userName").value = user.full_name || "";
     $("#userPhone").value = user.phone || "";
     $("#userNotes").value = user.notes || "";
+    const flexibleModes = flexibleModesForOperatorDate(user.id, todayISO());
+    if ($("#userFlexibleAttendance")) $("#userFlexibleAttendance").checked = Boolean(flexibleModes.length);
+    if ($("#userFlexibleSite")) {
+      const selectedIds = new Set(flexibleModes.map(mode => mode.site_id));
+      Array.from($("#userFlexibleSite").options || []).forEach(option => {
+        option.selected = selectedIds.has(option.value);
+      });
+    }
     $("#userFormTitle").textContent = "Editar usuario";
     $("#cancelUserEditBtn").classList.remove("hidden");
+    syncUserFormFields();
     renderTab("users");
+    scrollToActiveEditor("#userForm");
   }
 
   async function deleteUser(id) {
+    const user = byId(state.profiles, id);
+    if (!user || !canManageAccountUser(user)) return;
     if (id === state.currentProfile?.id) {
-      toast("No conviene eliminar tu propio usuario mientras estás logueado.");
+      toast("No podés eliminar tu propio usuario mientras estás logueado.");
       return;
     }
     if (!window.confirm("¿Eliminar este usuario? También se darán de baja sus asignaciones activas.")) return;
@@ -1248,64 +5987,1612 @@
     await renderSupervisorView();
   }
 
+  async function setUserPasswordPrompt(id) {
+    const user = byId(state.profiles, id);
+    if (!user || !canManageAccountUser(user)) return;
+    const password = window.prompt(`Nueva contraseña para ${user.full_name} (mínimo 6 caracteres):`);
+    if (!password) return;
+    try {
+      await store.setManagedUserPassword(id, password.trim());
+      toast("Contraseña actualizada.", "success");
+    } catch (error) {
+      toast(error.message || "No se pudo cambiar la contraseña.");
+    }
+  }
+
+  function eventTimestamp(event) {
+    return event?.client_time || event?.created_at || null;
+  }
+
+  function latestEventFromList(events, type) {
+    const allowed = Array.isArray(type) ? type : [type];
+    return [...events]
+      .filter(event => allowed.includes(event.event_type))
+      .sort((a, b) => new Date(eventTimestamp(b) || 0) - new Date(eventTimestamp(a) || 0))[0] || null;
+  }
+
+  function assignmentHistoricalEnd(assignment) {
+    if (assignment.valid_to) return assignment.valid_to;
+    if (assignment.is_active === false) {
+      const changed = assignment.updated_at || assignment.created_at;
+      return changed ? timestampToBusinessDate(changed) : null;
+    }
+    return null;
+  }
+
+  function assignmentAppliesHistorically(assignment, dateString) {
+    const day = isoDayId(dateString);
+    const days = Array.isArray(assignment.days_of_week) ? assignment.days_of_week.map(Number) : [];
+    if (!days.includes(day)) return false;
+    const start = assignment.valid_from || timestampToBusinessDate(assignment.created_at);
+    const end = assignmentHistoricalEnd(assignment);
+    if (start && start > dateString) return false;
+    if (end && end < dateString) return false;
+    return true;
+  }
+
+  function assignmentSuppressedHistorically(assignment, dateString, allAssignments) {
+    if ((assignment.assignment_type || "fixed") !== "fixed") return false;
+    return (allAssignments || []).some(extra =>
+      extra.operator_id === assignment.operator_id &&
+      (extra.assignment_type || "fixed") !== "fixed" &&
+      extra.suppress_regular_assignments === true &&
+      assignmentAppliesHistorically(extra, dateString) &&
+      (String(extra.assignment_type || "") === "special" || assignmentsOverlap(extra, assignment))
+    );
+  }
+
+  function scheduledRangeForShift(dateString, startTime, endTime) {
+    const startClock = String(startTime || "00:00").slice(0, 5);
+    const endClock = String(endTime || "00:00").slice(0, 5);
+    const start = zonedDateTimeToDate(dateString, startClock);
+    let endDateString = dateString;
+    if (endClock <= startClock) endDateString = addDaysISO(dateString, 1);
+    const end = zonedDateTimeToDate(endDateString, endClock);
+    return { start, end };
+  }
+
+  function eventInsideLabel(event) {
+    if (!event) return "";
+    return event.is_inside_site === true ? "Sí" : event.is_inside_site === false ? "No" : "";
+  }
+
+  function getHistoricalShiftEvaluation(shift, events, now = new Date(), leaveRecord = null) {
+    const entry = latestEventFromList(events, "present");
+    const exit = latestEventFromList(events, "checkout");
+    const absentEvent = latestEventFromList(events, "absent");
+    const lateEvent = latestEventFromList(events, "late");
+    const dayOffEvent = latestEventFromList(events, "day_off");
+    const { start, end } = scheduledRangeForShift(shift.shift_date, shift.scheduled_start, shift.scheduled_end);
+    const grace = Number(shift.grace_minutes ?? 10);
+    const absentAfter = Number(shift.absence_after_minutes ?? 30);
+    const isFuture = now.getTime() < start.getTime();
+    const absenceDue = now.getTime() > start.getTime() + absentAfter * 60000;
+    const exitDue = now.getTime() > end.getTime() + grace * 60000;
+
+    let entryStatus = "Pendiente";
+    let entryKey = "pending";
+    let source = "Programación";
+    if (entry) {
+      source = entry.recorded_via === "supervisor_manual" ? "Marcación manual supervisor/admin" : "Marcación";
+      if (entry.is_inside_site === false) { entryStatus = "Entrada fuera de radio"; entryKey = "outside"; }
+      else if (entry.observed_status === "late" || new Date(eventTimestamp(entry)).getTime() > start.getTime() + grace * 60000) { entryStatus = "Entrada tarde"; entryKey = "late"; }
+      else { entryStatus = "Entrada correcta"; entryKey = "present"; }
+    } else if (leaveRecord) {
+      entryStatus = leaveTypeLabel(leaveRecord.leave_type);
+      entryKey = "leave";
+      source = "Novedad justificada programada";
+    } else if (dayOffEvent) {
+      entryStatus = "Franco";
+      entryKey = "day_off";
+      source = "Franco cargado por supervisor/admin";
+    } else if (absentEvent) {
+      entryStatus = "Ausente registrado";
+      entryKey = "absent";
+      source = "Ausencia registrada";
+    } else if (!isFuture && absenceDue) {
+      entryStatus = "Sin entrada / ausencia inferida";
+      entryKey = "absent";
+      source = "Inferido por programación";
+    } else if (lateEvent) {
+      entryStatus = "Demora informada";
+      entryKey = "late";
+      source = "Demora registrada";
+    }
+
+    let exitStatus = leaveRecord && !entry ? "No corresponde" : dayOffEvent && !entry ? "Franco" : "Sin entrada";
+    let exitKey = leaveRecord && !entry ? "leave" : dayOffEvent && !entry ? "day_off" : "not_started";
+    if (exit) {
+      source = source === "Programación" ? (exit.recorded_via === "system_auto" ? "Cierre automático del sistema" : exit.recorded_via === "supervisor_manual" ? "Marcación manual supervisor/admin" : "Marcación") : source;
+      if (exit.recorded_via === "system_auto") { exitStatus = "Cierre automático · operario no registró salida"; exitKey = "auto_checkout"; }
+      else if (exit.is_inside_site === false) { exitStatus = "Salida fuera de radio"; exitKey = "exit_outside"; }
+      else if (exit.observed_status === "early_exit" || new Date(eventTimestamp(exit)).getTime() < end.getTime() - grace * 60000) { exitStatus = "Salida anticipada"; exitKey = "early_exit"; }
+      else { exitStatus = "Salida correcta"; exitKey = "completed"; }
+    } else if (entry) {
+      if (exitDue) { exitStatus = "Salida no registrada"; exitKey = "missing_exit"; }
+      else {
+        exitStatus = entryKey === "outside" ? "En servicio · entrada fuera de radio" : entryKey === "late" ? "En servicio · entrada tarde" : "En servicio";
+        exitKey = "in_service";
+      }
+    }
+
+    const alerts = [];
+    const entryIsLate = Boolean(entry) && (entry.observed_status === "late" || new Date(eventTimestamp(entry)).getTime() > start.getTime() + grace * 60000);
+    if (entryKey === "late" || entryIsLate) alerts.push("Llegada tarde");
+    if (entryKey === "outside") alerts.push("Entrada fuera de radio");
+    if (entryKey === "absent") alerts.push("Ausencia / sin entrada");
+    if (exitKey === "auto_checkout") alerts.push("Cierre automático por falta de salida");
+    if (exitKey === "early_exit") alerts.push("Salida anticipada");
+    if (exitKey === "exit_outside") alerts.push("Salida fuera de radio");
+    if (exitKey === "missing_exit") alerts.push("Salida no registrada");
+
+    let operational = "Pendiente";
+    if (entryKey === "leave") operational = entryStatus;
+    else if (entryKey === "day_off") operational = "Franco";
+    else if (entryKey === "absent") operational = entryStatus;
+    else if (entry && !exit) operational = exitStatus;
+    else if (entry && exit) {
+      if (exitKey === "auto_checkout") operational = "Jornada cerrada automáticamente";
+      else if (exitKey === "early_exit") operational = "Jornada con salida anticipada";
+      else if (exitKey === "exit_outside") operational = "Jornada · salida fuera de radio";
+      else if (entryKey === "outside") operational = "Jornada completa · entrada fuera de radio";
+      else if (entryKey === "late") operational = "Jornada completa · entrada tarde";
+      else operational = "Jornada completa";
+    } else if (isFuture) operational = "Programado";
+
+    const entryMoment = entry ? new Date(eventTimestamp(entry)) : null;
+    const exitMoment = exit ? new Date(eventTimestamp(exit)) : null;
+    const rawLateMinutes = entryMoment ? Math.max(0, Math.round((entryMoment.getTime() - start.getTime()) / 60000)) : null;
+    const rawEarlyExitMinutes = exitMoment ? Math.max(0, Math.round((end.getTime() - exitMoment.getTime()) / 60000)) : null;
+    const lateMinutes = entryMoment ? (entryIsLate ? rawLateMinutes : 0) : null;
+    const earlyExitMinutes = exitMoment ? (exitKey === "early_exit" ? rawEarlyExitMinutes : 0) : null;
+
+    return { entry, exit, absentEvent, lateEvent, dayOffEvent, entryStatus, entryKey, exitStatus, exitKey, operational, alerts, source, lateMinutes, earlyExitMinutes, start, end };
+  }
+
+  async function fetchReportContext(period) {
+    const [profiles, sites, assignments, events, leaves, flexibleModes] = await Promise.all([
+      store.listAllProfiles(),
+      store.listAllSites(),
+      store.listAllAssignments(),
+      store.listEventsRange(period.from, period.to),
+      store.listLeaveEvents?.() || Promise.resolve([]),
+      store.listFlexibleAttendanceModes?.() || Promise.resolve([])
+    ]);
+    return { profiles, sites, assignments, events, leaves: leaves || [], flexibleModes: flexibleModes || [] };
+  }
+
+  function resolveCompleteOperationalPeriod(period, context) {
+    if (!period.isAll) return period;
+    const starts = [
+      ...context.assignments.map(a => a.valid_from || timestampToBusinessDate(a.created_at)),
+      ...context.events.map(e => e.shift_date),
+      ...(context.leaves || []).map(leave => leave.start_date),
+      ...(context.flexibleModes || []).map(mode => mode.valid_from)
+    ];
+    const earliest = minISO(starts) || todayISO();
+    return { ...period, from: earliest, to: todayISO(), label: `${earliest}-al-${todayISO()}` };
+  }
+
+  function buildOperationalExportRows(period, context) {
+    const resolved = resolveCompleteOperationalPeriod(period, context);
+    const profilesById = new Map(context.profiles.map(item => [item.id, item]));
+    const sitesById = new Map(context.sites.map(item => [item.id, item]));
+    const eventsByShift = new Map();
+    const eventsByAssignmentDate = new Map();
+    context.events.forEach(event => {
+      if (!eventsByShift.has(event.shift_id)) eventsByShift.set(event.shift_id, []);
+      eventsByShift.get(event.shift_id).push(event);
+      if (event.assignment_id && event.shift_date) {
+        const key = `${event.assignment_id}__${event.shift_date}`;
+        if (!eventsByAssignmentDate.has(key)) eventsByAssignmentDate.set(key, []);
+        eventsByAssignmentDate.get(key).push(event);
+      }
+    });
+
+    const rows = [];
+    const matchedShiftIds = new Set();
+    const reportNow = new Date();
+
+    for (const assignment of context.assignments) {
+      let date = maxISO([resolved.from, assignment.valid_from || timestampToBusinessDate(assignment.created_at)]) || resolved.from;
+      const assignmentEnd = assignmentHistoricalEnd(assignment);
+      const endDate = minISO([resolved.to, assignmentEnd]) || resolved.to;
+      if (!date || !endDate || date > endDate) continue;
+
+      while (date <= endDate) {
+        const flexibleMode = (context.flexibleModes || []).find(mode => mode.operator_id === assignment.operator_id && flexibleModeAppliesOnDate(mode, date));
+        if (assignmentAppliesHistorically(assignment, date) && !assignmentSuppressedHistorically(assignment, date, context.assignments) && !flexibleMode) {
+          const shiftId = `${assignment.id}__${date}`;
+          const shift = {
+            id: shiftId,
+            shift_date: date,
+            assignment_id: assignment.id,
+            operator_id: assignment.operator_id,
+            site_id: assignment.site_id,
+            scheduled_start: assignment.scheduled_start,
+            scheduled_end: assignment.scheduled_end,
+            grace_minutes: assignment.grace_minutes ?? 10,
+            absence_after_minutes: assignment.absence_after_minutes ?? 30,
+            notes: assignment.notes || ""
+          };
+          const shiftEvents = eventsByShift.get(shiftId) || eventsByAssignmentDate.get(`${assignment.id}__${date}`) || [];
+          shiftEvents.forEach(e => matchedShiftIds.add(e.shift_id));
+          const leaveRecord = (context.leaves || []).find(leave => leave.operator_id === assignment.operator_id && isActiveLeave(leave) && leave.start_date <= date && leave.end_date >= date) || null;
+          const evalResult = getHistoricalShiftEvaluation(shift, shiftEvents, reportNow, leaveRecord);
+          const operator = profilesById.get(assignment.operator_id);
+          const site = sitesById.get(assignment.site_id);
+          const coveredOperator = assignment.covered_operator_id ? profilesById.get(assignment.covered_operator_id) : null;
+          const assignmentType = assignment.assignment_type || "fixed";
+          const notes = [assignment.notes, leaveRecord?.notes, leaveRecord?.reference, evalResult.dayOffEvent?.notes, evalResult.absentEvent?.notes, evalResult.lateEvent?.notes, evalResult.entry?.notes, evalResult.exit?.notes].filter(Boolean).join(" | ");
+          const duration = workedDuration(evalResult.entry, evalResult.exit);
+
+          rows.push({
+            "Fecha": date,
+            "Operario": operator?.full_name || assignment.operator_id || "",
+            "Servicio": site?.name || assignment.site_id || "",
+            "Tipo de trabajo": assignmentTypeLabel(assignmentType),
+            "Cubre a": coveredOperator?.full_name || "",
+            "Origen de tarea": assignmentType === "fixed" ? "Asignación fija" : "Tarea extraordinaria cargada por supervisor",
+            "Validación": "Validado",
+            "Dirección": site?.address || "",
+            "Horario programado": `${String(assignment.scheduled_start || "").slice(0, 5)} - ${String(assignment.scheduled_end || "").slice(0, 5)}`,
+            "Franco": evalResult.entryKey === "day_off" ? "Sí" : "No",
+            "Novedad justificada": leaveRecord ? leaveTypeLabel(leaveRecord.leave_type) : "",
+            "Período novedad": leaveRecord ? leavePeriodLabel(leaveRecord) : "",
+            "Hora entrada": evalResult.entry ? formatClock(eventTimestamp(evalResult.entry)) : "",
+            "Fecha/hora entrada": evalResult.entry ? eventTimestamp(evalResult.entry) : "",
+            "Registro entrada": evalResult.entry ? recordedViaLabel(evalResult.entry) : (evalResult.dayOffEvent ? recordedViaLabel(evalResult.dayOffEvent) : ""),
+            "Estado entrada": evalResult.entryStatus,
+            "Minutos demora": evalResult.lateMinutes ?? "",
+            "Entrada dentro radio": eventInsideLabel(evalResult.entry),
+            "Distancia entrada (m)": evalResult.entry?.distance_m != null ? Math.round(Number(evalResult.entry.distance_m)) : "",
+            "Precisión entrada (m)": evalResult.entry?.gps_accuracy_m != null ? Math.round(Number(evalResult.entry.gps_accuracy_m)) : "",
+            "Lat entrada": evalResult.entry?.lat ?? "",
+            "Lng entrada": evalResult.entry?.lng ?? "",
+            "Hora salida": evalResult.exit ? formatClock(eventTimestamp(evalResult.exit)) : "",
+            "Fecha/hora salida": evalResult.exit ? eventTimestamp(evalResult.exit) : "",
+            "Registro salida": evalResult.exit ? recordedViaLabel(evalResult.exit) : "",
+            "Duración trabajada": duration.label,
+            "Minutos trabajados": duration.minutes ?? "",
+            "Horas trabajadas (decimal)": duration.decimalHours ?? "",
+            "Estado salida": evalResult.exitStatus,
+            "Minutos salida anticipada": evalResult.earlyExitMinutes ?? "",
+            "Salida dentro radio": eventInsideLabel(evalResult.exit),
+            "Distancia salida (m)": evalResult.exit?.distance_m != null ? Math.round(Number(evalResult.exit.distance_m)) : "",
+            "Precisión salida (m)": evalResult.exit?.gps_accuracy_m != null ? Math.round(Number(evalResult.exit.gps_accuracy_m)) : "",
+            "Lat salida": evalResult.exit?.lat ?? "",
+            "Lng salida": evalResult.exit?.lng ?? "",
+            "Estado operativo": evalResult.operational,
+            "Alertas RRHH": evalResult.alerts.join(" | "),
+            "Origen del estado": evalResult.source,
+            "Observaciones": notes,
+            "Operator ID": assignment.operator_id,
+            "Site ID": assignment.site_id,
+            "Assignment ID": assignment.id,
+            "Shift ID": shiftId
+          });
+        }
+        date = addDaysISO(date, 1);
+      }
+    }
+
+    // No se pierden fichajes excepcionales que no puedan reconstruirse desde una asignación vigente/histórica.
+    const groupedUnmatched = new Map();
+    context.events.forEach(event => {
+      if (matchedShiftIds.has(event.shift_id)) return;
+      const key = event.shift_id || `${event.operator_id}_${event.shift_date}`;
+      if (!groupedUnmatched.has(key)) groupedUnmatched.set(key, []);
+      groupedUnmatched.get(key).push(event);
+    });
+    groupedUnmatched.forEach(events => {
+      const sample = events[0];
+      const entry = latestEventFromList(events, "present");
+      const exit = latestEventFromList(events, "checkout");
+      const dayOff = latestEventFromList(events, "day_off");
+      const isFlexibleEvent = isFlexibleShiftId(sample.shift_id);
+      const operator = profilesById.get(sample.operator_id);
+      const site = sitesById.get(sample.site_id);
+      const alerts = [];
+      if (!isFlexibleEvent && entry?.observed_status === "late") alerts.push("Llegada tarde");
+      if (entry?.is_inside_site === false) alerts.push("Entrada fuera de radio");
+      if (exit?.recorded_via === "system_auto") alerts.push("Cierre automático por falta de salida");
+      if (exit?.observed_status === "early_exit") alerts.push("Salida anticipada");
+      if (exit?.is_inside_site === false) alerts.push("Salida fuera de radio");
+      const duration = workedDuration(entry, exit);
+      rows.push({
+        "Fecha": sample.shift_date || "",
+        "Operario": operator?.full_name || sample.operator_id || "",
+        "Servicio": site?.name || sample.site_id || "",
+        "Tipo de trabajo": isFlexibleEvent ? "Jornada flexible" : workTypeLabel(entry?.work_type || sample.work_type || "regular"),
+        "Cubre a": "",
+        "Origen de tarea": isFlexibleEvent ? "Jornada flexible asignada" : (entry?.entry_source || sample.entry_source) === "operator_extra" ? "Declarado por operario" : "Marcación sin turno reconstruido",
+        "Validación": validationLabel(entry?.validation_status || sample.validation_status || "confirmed"),
+        "Dirección": site?.address || "",
+        "Horario programado": isFlexibleEvent ? "Flexible · hora real" : "No reconstruido",
+        "Franco": dayOff && !entry ? "Sí" : "No",
+        "Hora entrada": entry ? formatClock(eventTimestamp(entry)) : "",
+        "Fecha/hora entrada": entry ? eventTimestamp(entry) : "",
+        "Registro entrada": entry ? recordedViaLabel(entry) : (dayOff ? recordedViaLabel(dayOff) : ""),
+        "Estado entrada": entry ? (entry.is_inside_site === false ? "Entrada fuera de radio" : (!isFlexibleEvent && entry.observed_status === "late") ? "Entrada tarde" : "Entrada registrada") : (dayOff ? "Franco" : "Sin entrada"),
+        "Minutos demora": "",
+        "Entrada dentro radio": eventInsideLabel(entry),
+        "Distancia entrada (m)": entry?.distance_m != null ? Math.round(Number(entry.distance_m)) : "",
+        "Precisión entrada (m)": entry?.gps_accuracy_m != null ? Math.round(Number(entry.gps_accuracy_m)) : "",
+        "Lat entrada": entry?.lat ?? "",
+        "Lng entrada": entry?.lng ?? "",
+        "Hora salida": exit ? formatClock(eventTimestamp(exit)) : "",
+        "Fecha/hora salida": exit ? eventTimestamp(exit) : "",
+        "Registro salida": exit ? recordedViaLabel(exit) : "",
+        "Duración trabajada": duration.label,
+        "Minutos trabajados": duration.minutes ?? "",
+        "Horas trabajadas (decimal)": duration.decimalHours ?? "",
+        "Estado salida": exit ? (exit.recorded_via === "system_auto" ? "Cierre automático · operario no registró salida" : exit.is_inside_site === false ? "Salida fuera de radio" : exit.observed_status === "early_exit" ? "Salida anticipada" : "Salida registrada") : "",
+        "Minutos salida anticipada": "",
+        "Salida dentro radio": eventInsideLabel(exit),
+        "Distancia salida (m)": exit?.distance_m != null ? Math.round(Number(exit.distance_m)) : "",
+        "Precisión salida (m)": exit?.gps_accuracy_m != null ? Math.round(Number(exit.gps_accuracy_m)) : "",
+        "Lat salida": exit?.lat ?? "",
+        "Lng salida": exit?.lng ?? "",
+        "Estado operativo": isFlexibleEvent ? (entry ? (exit ? "Tramo flexible completado" : "Jornada flexible · en servicio") : "Jornada flexible") : entry ? (exit ? (exit.recorded_via === "system_auto" ? "Jornada cerrada automáticamente" : "Jornada con fichajes") : "En servicio / sin salida") : (dayOff ? "Franco" : eventTypeLabel(sample.event_type)),
+        "Alertas RRHH": alerts.join(" | "),
+        "Origen del estado": isFlexibleEvent ? "Marcación de jornada flexible" : dayOff ? "Franco cargado por supervisor/admin" : "Marcación sin turno reconstruido",
+        "Observaciones": events.map(e => e.notes).filter(Boolean).join(" | "),
+        "Operator ID": sample.operator_id || "",
+        "Site ID": sample.site_id || "",
+        "Assignment ID": sample.assignment_id || "",
+        "Shift ID": sample.shift_id || ""
+      });
+    });
+
+    rows.sort((a, b) => `${a.Fecha}|${a.Operario}|${a.Servicio}`.localeCompare(`${b.Fecha}|${b.Operario}|${b.Servicio}`));
+    return { rows, period: resolved };
+  }
+
+  function rowWorkedMinutes(row) {
+    const value = Number(row?.["Minutos trabajados"]);
+    return Number.isFinite(value) && value >= 0 ? value : 0;
+  }
+
+  function rowValidationBucket(row) {
+    const validation = String(row?.["Validación"] || "Validado").toLowerCase();
+    if (validation.includes("rechaz")) return "rejected";
+    if (validation.includes("pendiente")) return "pending";
+    return "confirmed";
+  }
+
+  function outsideIncidentsForRow(row) {
+    let count = 0;
+    if (String(row?.["Estado entrada"] || "").toLowerCase().includes("fuera de radio")) count++;
+    if (String(row?.["Estado salida"] || "").toLowerCase().includes("fuera de radio")) count++;
+    return count;
+  }
+
+
+  function rowWorkInterval(row) {
+    const startRaw = row?.["Fecha/hora entrada"];
+    const endRaw = row?.["Fecha/hora salida"];
+    if (!startRaw || !endRaw) return null;
+    const start = new Date(startRaw).getTime();
+    const end = new Date(endRaw).getTime();
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+    return { start, end };
+  }
+
+  function mergedIntervalsMinutes(intervals) {
+    const valid = (intervals || []).filter(Boolean).sort((a, b) => a.start - b.start);
+    if (!valid.length) return 0;
+    let totalMs = 0;
+    let currentStart = valid[0].start;
+    let currentEnd = valid[0].end;
+    for (let i = 1; i < valid.length; i++) {
+      const item = valid[i];
+      if (item.start <= currentEnd) currentEnd = Math.max(currentEnd, item.end);
+      else {
+        totalMs += currentEnd - currentStart;
+        currentStart = item.start;
+        currentEnd = item.end;
+      }
+    }
+    totalMs += currentEnd - currentStart;
+    return Math.round((totalMs / 60000) * 100) / 100;
+  }
+
+  function operationalSummaryByOperator(rows) {
+    const map = new Map();
+    rows.forEach(row => {
+      const key = row.Operario || "Sin identificar";
+      if (!map.has(key)) map.set(key, {
+        "Operario": key,
+        "Coberturas": 0,
+        "Francos": 0,
+        "Jornadas con entrada y salida": 0,
+        "Horas confirmadas": "0 h 00 min",
+        "Horas confirmadas (decimal)": 0,
+        "Minutos confirmados": 0,
+        "Horas pendientes validar": "0 h 00 min",
+        "Minutos pendientes validar": 0,
+        "Ingresos correctos": 0,
+        "Llegadas tarde": 0,
+        "Minutos demora acumulados": 0,
+        "Fichajes fuera de radio": 0,
+        "Ausencias / sin entrada": 0,
+        "Ausencias registradas": 0,
+        "Sin entrada inferido": 0,
+        "Salidas anticipadas": 0,
+        "Cierres automáticos": 0,
+        "Salidas no registradas": 0
+      });
+      const item = map.get(key);
+      item["Coberturas"]++;
+      if (row["Franco"] === "Sí" || row["Estado entrada"] === "Franco") item["Francos"]++;
+      const minutes = rowWorkedMinutes(row);
+      const validation = rowValidationBucket(row);
+      if (minutes > 0) {
+        item["Jornadas con entrada y salida"]++;
+        if (validation === "confirmed") item["Minutos confirmados"] += minutes;
+        if (validation === "pending") item["Minutos pendientes validar"] += minutes;
+      }
+      if (row["Estado entrada"] === "Entrada correcta" || row["Estado entrada"] === "Entrada registrada") item["Ingresos correctos"]++;
+      if (String(row["Estado entrada"]).includes("tarde") || String(row["Alertas RRHH"]).includes("Llegada tarde")) item["Llegadas tarde"]++;
+      item["Minutos demora acumulados"] += Number(row["Minutos demora"] || 0) || 0;
+      item["Fichajes fuera de radio"] += outsideIncidentsForRow(row);
+      if (String(row["Alertas RRHH"]).includes("Ausencia / sin entrada")) item["Ausencias / sin entrada"]++;
+      if (row["Origen del estado"] === "Ausencia registrada") item["Ausencias registradas"]++;
+      if (row["Origen del estado"] === "Inferido por programación") item["Sin entrada inferido"]++;
+      if (String(row["Alertas RRHH"]).includes("Salida anticipada")) item["Salidas anticipadas"]++;
+      if (String(row["Alertas RRHH"]).includes("Cierre automático")) item["Cierres automáticos"]++;
+      if (String(row["Alertas RRHH"]).includes("Salida no registrada")) item["Salidas no registradas"]++;
+    });
+    const dailyHours = operationalHoursByOperatorDate(rows);
+    const netHours = new Map();
+    dailyHours.forEach(day => {
+      if (!netHours.has(day.Operario)) netHours.set(day.Operario, { confirmed: 0, pending: 0 });
+      const total = netHours.get(day.Operario);
+      total.confirmed += Number(day["Minutos confirmados"] || 0);
+      total.pending += Number(day["Minutos pendientes validar"] || 0);
+    });
+    return Array.from(map.values()).map(item => {
+      const net = netHours.get(item.Operario) || { confirmed: 0, pending: 0 };
+      item["Minutos confirmados"] = Math.round(net.confirmed * 100) / 100;
+      item["Minutos pendientes validar"] = Math.round(net.pending * 100) / 100;
+      item["Horas confirmadas"] = minutesToHoursLabel(item["Minutos confirmados"]);
+      item["Horas confirmadas (decimal)"] = Math.round((item["Minutos confirmados"] / 60) * 10000) / 10000;
+      item["Horas pendientes validar"] = minutesToHoursLabel(item["Minutos pendientes validar"]);
+      item["Minutos demora acumulados"] = Math.round(item["Minutos demora acumulados"] * 100) / 100;
+      return item;
+    }).sort((a, b) => a.Operario.localeCompare(b.Operario));
+  }
+
+  function operationalSummaryByDate(rows) {
+    const map = new Map();
+    rows.forEach(row => {
+      const key = row.Fecha || "Sin fecha";
+      if (!map.has(key)) map.set(key, { "Fecha": key, "Coberturas": 0, "Francos": 0, "Horas confirmadas": "0 h 00 min", "Horas confirmadas (decimal)": 0, "Minutos confirmados": 0, "Ingresos correctos": 0, "Llegadas tarde": 0, "Fichajes fuera de radio": 0, "Ausencias / sin entrada": 0, "Ausencias registradas": 0, "Sin entrada inferido": 0, "Cierres automáticos": 0, "Alertas de salida": 0 });
+      const item = map.get(key);
+      item["Coberturas"]++;
+      if (row["Franco"] === "Sí" || row["Estado entrada"] === "Franco") item["Francos"]++;
+      if (rowValidationBucket(row) === "confirmed") item["Minutos confirmados"] += rowWorkedMinutes(row);
+      if (row["Estado entrada"] === "Entrada correcta" || row["Estado entrada"] === "Entrada registrada") item["Ingresos correctos"]++;
+      if (String(row["Alertas RRHH"]).includes("Llegada tarde")) item["Llegadas tarde"]++;
+      item["Fichajes fuera de radio"] += outsideIncidentsForRow(row);
+      if (String(row["Alertas RRHH"]).includes("Ausencia / sin entrada")) item["Ausencias / sin entrada"]++;
+      if (row["Origen del estado"] === "Ausencia registrada") item["Ausencias registradas"]++;
+      if (row["Origen del estado"] === "Inferido por programación") item["Sin entrada inferido"]++;
+      if (String(row["Alertas RRHH"]).includes("Cierre automático")) item["Cierres automáticos"]++;
+      if (/Salida anticipada|Salida no registrada|Salida fuera de radio|Cierre automático/.test(String(row["Alertas RRHH"]))) item["Alertas de salida"]++;
+    });
+    return Array.from(map.values()).map(item => {
+      item["Horas confirmadas"] = minutesToHoursLabel(item["Minutos confirmados"]);
+      item["Horas confirmadas (decimal)"] = Math.round((item["Minutos confirmados"] / 60) * 10000) / 10000;
+      return item;
+    }).sort((a, b) => a.Fecha.localeCompare(b.Fecha));
+  }
+
+  function operationalHoursByOperatorDate(rows) {
+    const map = new Map();
+    rows.forEach(row => {
+      const operatorKey = row["Operator ID"] || row.Operario || "Sin identificar";
+      const key = `${row.Fecha || ""}__${operatorKey}`;
+      if (!map.has(key)) map.set(key, {
+        "Fecha": row.Fecha || "",
+        "Operator ID": row["Operator ID"] || "",
+        "Operario": row.Operario || "Sin identificar",
+        "Servicios trabajados": new Set(),
+        "Turnos con entrada y salida": 0,
+        confirmedIntervals: [],
+        pendingIntervals: [],
+        rejectedIntervals: []
+      });
+      const item = map.get(key);
+      if (row.Servicio && rowWorkedMinutes(row) > 0) item["Servicios trabajados"].add(row.Servicio);
+      const interval = rowWorkInterval(row);
+      if (interval) {
+        item["Turnos con entrada y salida"]++;
+        const validation = rowValidationBucket(row);
+        if (validation === "confirmed") item.confirmedIntervals.push(interval);
+        if (validation === "pending") item.pendingIntervals.push(interval);
+        if (validation === "rejected") item.rejectedIntervals.push(interval);
+      }
+    });
+    return Array.from(map.values()).map(item => {
+      const confirmed = mergedIntervalsMinutes(item.confirmedIntervals);
+      const pending = mergedIntervalsMinutes(item.pendingIntervals);
+      const rejected = mergedIntervalsMinutes(item.rejectedIntervals);
+      return {
+        "Fecha": item.Fecha,
+        "Operator ID": item["Operator ID"],
+        "Operario": item.Operario,
+        "Servicios trabajados": Array.from(item["Servicios trabajados"]).join(" | "),
+        "Turnos con entrada y salida": item["Turnos con entrada y salida"],
+        "Minutos confirmados": confirmed,
+        "Horas confirmadas": minutesToHoursLabel(confirmed),
+        "Horas confirmadas (decimal)": Math.round((confirmed / 60) * 10000) / 10000,
+        "Minutos pendientes validar": pending,
+        "Horas pendientes validar": minutesToHoursLabel(pending),
+        "Minutos rechazados": rejected,
+        "Horas rechazadas": minutesToHoursLabel(rejected)
+      };
+    }).sort((a, b) => `${a.Fecha}|${a.Operario}`.localeCompare(`${b.Fecha}|${b.Operario}`));
+  }
+
+  async function getOperationalExportData() {
+    const requested = resolvePeriod("live");
+    const context = await fetchReportContext(requested);
+    return buildOperationalExportRows(requested, context);
+  }
+
+  async function exportLiveCsv() {
+    const button = $("#exportLiveCsvBtn");
+    await withExportButton(button, "Generando...", async () => {
+      const { rows, period } = await getOperationalExportData();
+      const headers = rows.length ? Object.keys(rows[0]) : ["Fecha", "Operario", "Servicio", "Estado operativo", "Alertas RRHH"];
+      downloadCsvObjects(rows, headers, `estado-operativo-cleanit-${period.label}.csv`);
+      toast(`${rows.length} cobertura${rows.length === 1 ? "" : "s"} exportada${rows.length === 1 ? "" : "s"} a CSV.`, "success");
+    });
+  }
+
+  async function exportLiveExcel() {
+    const button = $("#exportLiveExcelBtn");
+    await withExportButton(button, "Generando...", async () => {
+      if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+      const { rows, period } = await getOperationalExportData();
+      const wb = window.XLSX.utils.book_new();
+      const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Sin datos": "No hay coberturas o registros en el período seleccionado." }]);
+      applyWorksheetUsability(ws, [12, 28, 30, 34, 19, 13, 27, 15, 18, 20, 20, 14, 14, 13, 28, 23, 18, 20, 20, 14, 14, 38, 40, 28, 38, 38, 42]);
+      window.XLSX.utils.book_append_sheet(wb, ws, "Estado operativo");
+
+      const byOperator = operationalSummaryByOperator(rows);
+      const wsOperators = window.XLSX.utils.json_to_sheet(byOperator.length ? byOperator : [{ "Operario": "Sin datos" }]);
+      applyWorksheetUsability(wsOperators, [28, 13, 18, 16, 16, 22, 20, 20, 20, 23]);
+      window.XLSX.utils.book_append_sheet(wb, wsOperators, "Resumen por operario");
+
+      const byDate = operationalSummaryByDate(rows);
+      const wsDates = window.XLSX.utils.json_to_sheet(byDate.length ? byDate : [{ "Fecha": "Sin datos" }]);
+      applyWorksheetUsability(wsDates, [14, 13, 18, 19, 19, 18, 16, 20, 22, 20, 20, 18]);
+      window.XLSX.utils.book_append_sheet(wb, wsDates, "Resumen por día");
+
+      const hoursByDay = operationalHoursByOperatorDate(rows);
+      const wsHoursByDay = window.XLSX.utils.json_to_sheet(hoursByDay.length ? hoursByDay : [{ "Fecha": "Sin datos" }]);
+      applyWorksheetUsability(wsHoursByDay, [14, 30, 42, 22, 20, 19, 24, 24, 24]);
+      window.XLSX.utils.book_append_sheet(wb, wsHoursByDay, "Horas por operario y día");
+
+      window.XLSX.writeFile(wb, `estado-operativo-cleanit-${period.label}.xlsx`);
+      toast(`${rows.length} cobertura${rows.length === 1 ? "" : "s"} exportada${rows.length === 1 ? "" : "s"} a Excel.`, "success");
+    });
+  }
+
+
+  function analyticsServiceValue(row) {
+    return String(row?.["Site ID"] || row?.Servicio || "");
+  }
+
+  function updateAnalyticsServiceOptions(rows) {
+    const select = $("#analyticsService");
+    if (!select) return;
+    const current = select.value;
+    const services = new Map();
+    (rows || []).forEach(row => {
+      const value = analyticsServiceValue(row);
+      if (value && row.Servicio) services.set(value, row.Servicio);
+    });
+    const options = Array.from(services.entries()).sort((a, b) => a[1].localeCompare(b[1], "es"));
+    select.innerHTML = `<option value="">Todos los servicios</option>` + options.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("");
+    if (current && services.has(current)) select.value = current;
+  }
+
+  function buildAnalyticsSummary(rows, profiles, includeAllActive = true) {
+    const map = new Map();
+    const rowOperatorIds = new Set((rows || []).map(row => row["Operator ID"]).filter(Boolean));
+    const rowNames = new Map();
+    (rows || []).forEach(row => {
+      const key = row["Operator ID"] || `name:${row.Operario || "Sin identificar"}`;
+      if (!rowNames.has(key)) rowNames.set(key, row.Operario || "Sin identificar");
+    });
+
+    if (includeAllActive) {
+      (profiles || []).filter(profile => profile.role === "operator" && profile.is_active !== false).forEach(profile => {
+        const key = profile.id || `name:${profile.full_name}`;
+        map.set(key, {
+          operator_id: profile.id || "",
+          Operario: profile.full_name || "Sin identificar"
+        });
+      });
+    }
+    rowNames.forEach((name, key) => {
+      if (!map.has(key)) map.set(key, { operator_id: key.startsWith("name:") ? "" : key, Operario: name });
+    });
+
+    map.forEach(item => Object.assign(item, {
+      "Coberturas programadas": 0,
+      "Francos": 0,
+      "Jornadas con entrada": 0,
+      "Jornadas completas": 0,
+      "Minutos confirmados": 0,
+      "Horas confirmadas": "0 h 00 min",
+      "Horas confirmadas (decimal)": 0,
+      "Minutos pendientes validar": 0,
+      "Horas pendientes validar": "0 h 00 min",
+      "Ausencias / sin entrada": 0,
+      "Ausencias registradas": 0,
+      "Sin entrada inferido": 0,
+      "Llegadas tarde": 0,
+      "Minutos demora acumulados": 0,
+      "Promedio demora (min)": 0,
+      "Entradas fuera de radio": 0,
+      "Salidas fuera de radio": 0,
+      "Fichajes fuera de radio": 0,
+      "Salidas anticipadas": 0,
+      "Cierres automáticos": 0,
+      "Salidas no registradas": 0,
+      "Asistencia %": null,
+      "Puntualidad %": null
+    }));
+
+    (rows || []).forEach(row => {
+      const key = row["Operator ID"] || `name:${row.Operario || "Sin identificar"}`;
+      if (!map.has(key)) return;
+      const item = map.get(key);
+      const isDayOff = row["Franco"] === "Sí" || row["Estado entrada"] === "Franco";
+      const scheduled = Boolean(row["Horario programado"] && row["Horario programado"] !== "No reconstruido") && !isDayOff;
+      const hasEntry = Boolean(row["Fecha/hora entrada"]);
+      const complete = rowWorkedMinutes(row) > 0;
+      const alerts = String(row["Alertas RRHH"] || "");
+      if (isDayOff) item["Francos"]++;
+      if (scheduled) item["Coberturas programadas"]++;
+      if (hasEntry) item["Jornadas con entrada"]++;
+      if (complete) item["Jornadas completas"]++;
+      if (alerts.includes("Ausencia / sin entrada")) item["Ausencias / sin entrada"]++;
+      if (row["Origen del estado"] === "Ausencia registrada") item["Ausencias registradas"]++;
+      if (row["Origen del estado"] === "Inferido por programación") item["Sin entrada inferido"]++;
+      if (alerts.includes("Llegada tarde") || String(row["Estado entrada"] || "").toLowerCase().includes("tarde")) item["Llegadas tarde"]++;
+      item["Minutos demora acumulados"] += Number(row["Minutos demora"] || 0) || 0;
+      if (String(row["Estado entrada"] || "").toLowerCase().includes("fuera de radio")) item["Entradas fuera de radio"]++;
+      if (String(row["Estado salida"] || "").toLowerCase().includes("fuera de radio")) item["Salidas fuera de radio"]++;
+      if (alerts.includes("Salida anticipada")) item["Salidas anticipadas"]++;
+      if (alerts.includes("Cierre automático")) item["Cierres automáticos"]++;
+      if (alerts.includes("Salida no registrada")) item["Salidas no registradas"]++;
+    });
+
+    const daily = operationalHoursByOperatorDate(rows || []);
+    daily.forEach(day => {
+      const key = day["Operator ID"] || `name:${day.Operario || "Sin identificar"}`;
+      if (!map.has(key)) return;
+      const item = map.get(key);
+      item["Minutos confirmados"] += Number(day["Minutos confirmados"] || 0);
+      item["Minutos pendientes validar"] += Number(day["Minutos pendientes validar"] || 0);
+    });
+
+    return Array.from(map.values()).map(item => {
+      item["Minutos confirmados"] = Math.round(item["Minutos confirmados"] * 100) / 100;
+      item["Minutos pendientes validar"] = Math.round(item["Minutos pendientes validar"] * 100) / 100;
+      item["Horas confirmadas"] = minutesToHoursLabel(item["Minutos confirmados"]);
+      item["Horas confirmadas (decimal)"] = Math.round((item["Minutos confirmados"] / 60) * 10000) / 10000;
+      item["Horas pendientes validar"] = minutesToHoursLabel(item["Minutos pendientes validar"]);
+      item["Minutos demora acumulados"] = Math.round(item["Minutos demora acumulados"] * 100) / 100;
+      item["Promedio demora (min)"] = item["Llegadas tarde"] ? Math.round((item["Minutos demora acumulados"] / item["Llegadas tarde"]) * 10) / 10 : 0;
+      item["Fichajes fuera de radio"] = item["Entradas fuera de radio"] + item["Salidas fuera de radio"];
+      const scheduled = item["Coberturas programadas"];
+      item["Asistencia %"] = scheduled ? Math.max(0, Math.round(((scheduled - item["Ausencias / sin entrada"]) / scheduled) * 1000) / 10) : null;
+      item["Puntualidad %"] = item["Jornadas con entrada"] ? Math.max(0, Math.round(((item["Jornadas con entrada"] - item["Llegadas tarde"]) / item["Jornadas con entrada"]) * 1000) / 10) : null;
+      return item;
+    }).sort((a, b) => a.Operario.localeCompare(b.Operario, "es"));
+  }
+
+  function analyticsSort(items, metric) {
+    const order = $("#analyticsOrder")?.value || "desc";
+    const direction = order === "asc" ? 1 : -1;
+    return [...items].sort((a, b) => {
+      const av = Number(a?.[metric] || 0);
+      const bv = Number(b?.[metric] || 0);
+      if (av !== bv) return (av - bv) * direction;
+      return String(a.Operario || "").localeCompare(String(b.Operario || ""), "es");
+    });
+  }
+
+  function renderAnalyticsBars(containerId, summary, metric, formatter, tone) {
+    const container = $(containerId);
+    if (!container) return;
+    const sorted = analyticsSort(summary, metric).slice(0, 10);
+    const max = Math.max(0, ...sorted.map(item => Number(item[metric] || 0)));
+    if (!sorted.length) {
+      container.innerHTML = `<p class="muted small">Sin datos para el período seleccionado.</p>`;
+      return;
+    }
+    container.innerHTML = sorted.map((item, index) => {
+      const value = Number(item[metric] || 0);
+      const width = max > 0 ? Math.max(value > 0 ? 4 : 0, (value / max) * 100) : 0;
+      return `<div class="analytics-bar-row">
+        <div class="analytics-bar-label"><span>${index + 1}. ${escapeHtml(item.Operario)}</span><strong>${escapeHtml(formatter(value, item))}</strong></div>
+        <div class="analytics-bar-track"><span class="analytics-bar-fill tone-${escapeHtml(tone)}" style="width:${width.toFixed(2)}%"></span></div>
+      </div>`;
+    }).join("");
+  }
+
+  function renderAnalyticsRanking(containerId, summary, metric, formatter) {
+    const container = $(containerId);
+    if (!container) return;
+    const sorted = analyticsSort(summary, metric);
+    container.innerHTML = sorted.length ? sorted.map((item, index) => `
+      <div class="ranking-row">
+        <span class="ranking-position">${index + 1}</span>
+        <span class="ranking-name">${escapeHtml(item.Operario)}</span>
+        <strong class="ranking-value">${escapeHtml(formatter(Number(item[metric] || 0), item))}</strong>
+      </div>`).join("") : `<p class="muted small">Sin datos.</p>`;
+  }
+
+  function renderAnalyticsFromState() {
+    const service = $("#analyticsService")?.value || "";
+    const allRows = state.analyticsAllRows || [];
+    const serviceRows = service ? allRows.filter(row => analyticsServiceValue(row) === service) : allRows;
+    const searchTerm = sectionSearchTerm("analytics");
+    const rows = searchTerm ? serviceRows.filter(row => objectMatchesSearch(searchTerm, row)) : serviceRows;
+    const summary = buildAnalyticsSummary(rows, state.analyticsProfiles || [], !service && !searchTerm);
+    const daily = operationalHoursByOperatorDate(rows);
+    updateSectionSearchCount("analytics", rows.length, serviceRows.length);
+    state.analyticsRows = rows;
+    state.analyticsSummary = summary;
+    state.analyticsDaily = daily;
+
+    const totalConfirmed = summary.reduce((acc, item) => acc + Number(item["Minutos confirmados"] || 0), 0);
+    const totalPending = summary.reduce((acc, item) => acc + Number(item["Minutos pendientes validar"] || 0), 0);
+    const absences = summary.reduce((acc, item) => acc + Number(item["Ausencias / sin entrada"] || 0), 0);
+    const dayOffs = summary.reduce((acc, item) => acc + Number(item["Francos"] || 0), 0);
+    const lates = summary.reduce((acc, item) => acc + Number(item["Llegadas tarde"] || 0), 0);
+    const outside = summary.reduce((acc, item) => acc + Number(item["Fichajes fuera de radio"] || 0), 0);
+    const complete = summary.reduce((acc, item) => acc + Number(item["Jornadas completas"] || 0), 0);
+    const autoCheckouts = summary.reduce((acc, item) => acc + Number(item["Cierres automáticos"] || 0), 0);
+
+    $("#analyticsKpis").innerHTML = `
+      ${kpi("Horas confirmadas", minutesToHoursLabel(totalConfirmed), "status-present")}
+      ${kpi("Horas pendientes validar", minutesToHoursLabel(totalPending), totalPending ? "status-late" : "status-present")}
+      ${kpi("Jornadas completas", complete, "status-present")}
+      ${kpi("Ausencias / sin entrada", absences, absences ? "status-absent" : "status-present")}
+      ${kpi("Francos", dayOffs, "status-dayoff")}
+      ${kpi("Llegadas tarde", lates, lates ? "status-late" : "status-present")}
+      ${kpi("Fichajes fuera de radio", outside, outside ? "status-outside" : "status-present")}
+      ${kpi("Cierres automáticos", autoCheckouts, autoCheckouts ? "status-auto" : "status-present")}
+    `;
+
+    renderAnalyticsBars("#analyticsHoursChart", summary, "Minutos confirmados", value => minutesToHoursLabel(value), "hours");
+    renderAnalyticsBars("#analyticsAbsenceChart", summary, "Ausencias / sin entrada", value => String(value), "absence");
+    renderAnalyticsBars("#analyticsLateChart", summary, "Llegadas tarde", value => String(value), "late");
+    renderAnalyticsBars("#analyticsOutsideChart", summary, "Fichajes fuera de radio", value => String(value), "outside");
+    renderAnalyticsRanking("#analyticsAbsenceRanking", summary, "Ausencias / sin entrada", value => String(value));
+    renderAnalyticsRanking("#analyticsLateRanking", summary, "Llegadas tarde", value => String(value));
+    renderAnalyticsRanking("#analyticsOutsideRanking", summary, "Fichajes fuera de radio", value => String(value));
+
+    const rowsHtml = [...summary].sort((a, b) => a.Operario.localeCompare(b.Operario, "es")).map(item => `
+      <tr class="${searchTerm ? "search-match-row" : ""}">
+        <td><strong>${escapeHtml(item.Operario)}</strong></td>
+        <td><strong>${escapeHtml(item["Horas confirmadas"])}</strong><br><span class="muted small">${Number(item["Horas confirmadas (decimal)"] || 0).toFixed(2)} h</span></td>
+        <td>${escapeHtml(item["Horas pendientes validar"])}</td>
+        <td>${item["Jornadas completas"]}</td>
+        <td>${item["Francos"]}</td>
+        <td>${item["Ausencias / sin entrada"]}</td>
+        <td>${item["Llegadas tarde"]}<br><span class="muted small">${item["Minutos demora acumulados"]} min acum.</span></td>
+        <td>${item["Fichajes fuera de radio"]}</td>
+        <td>${item["Salidas anticipadas"]}</td>
+        <td>${item["Cierres automáticos"]}</td>
+        <td>${item["Salidas no registradas"]}</td>
+        <td>${item["Asistencia %"] == null ? "—" : `${item["Asistencia %"].toFixed(1)}%`}</td>
+        <td>${item["Puntualidad %"] == null ? "—" : `${item["Puntualidad %"].toFixed(1)}%`}</td>
+      </tr>`).join("");
+    $("#analyticsSummaryTable").innerHTML = `<table><thead><tr><th>Operario</th><th>Horas confirmadas</th><th>Horas pendientes</th><th>Jornadas completas</th><th>Francos</th><th>Ausencias</th><th>Tardanzas</th><th>Fuera de radio</th><th>Salidas anticipadas</th><th>Cierres automáticos</th><th>Sin salida</th><th>Asistencia</th><th>Puntualidad</th></tr></thead><tbody>${rowsHtml || `<tr><td colspan="13">Sin datos para el período seleccionado.</td></tr>`}</tbody></table>`;
+
+    const period = state.analyticsPeriodResolved;
+    const serviceLabel = service ? ($("#analyticsService")?.selectedOptions?.[0]?.textContent || "Servicio filtrado") : "Todos los servicios";
+    $("#analyticsRangeSummary").textContent = period ? `${period.from || "Inicio"} → ${period.to || todayISO()} · ${serviceLabel} · ${rows.length} coberturas analizadas` : "";
+  }
+
+  async function loadAnalyticsData() {
+    const button = $("#applyAnalyticsBtn");
+    await withExportButton(button, "Analizando...", async () => {
+      const requested = resolvePeriod("analytics");
+      const context = await fetchReportContext(requested);
+      const built = buildOperationalExportRows(requested, context);
+      state.analyticsAllRows = built.rows;
+      state.analyticsProfiles = context.profiles;
+      state.analyticsPeriodResolved = built.period;
+      state.analyticsLoaded = true;
+      updateAnalyticsServiceOptions(built.rows);
+      renderAnalyticsFromState();
+    });
+  }
+
+  function analyticsExportSummaryRows() {
+    return (state.analyticsSummary || []).map(item => ({
+      "Operario": item.Operario,
+      "Horas confirmadas": item["Horas confirmadas"],
+      "Horas confirmadas (decimal)": item["Horas confirmadas (decimal)"],
+      "Minutos confirmados": item["Minutos confirmados"],
+      "Horas pendientes validar": item["Horas pendientes validar"],
+      "Coberturas programadas": item["Coberturas programadas"],
+      "Francos": item["Francos"],
+      "Jornadas con entrada": item["Jornadas con entrada"],
+      "Jornadas completas": item["Jornadas completas"],
+      "Ausencias / sin entrada": item["Ausencias / sin entrada"],
+      "Ausencias registradas": item["Ausencias registradas"],
+      "Sin entrada inferido": item["Sin entrada inferido"],
+      "Llegadas tarde": item["Llegadas tarde"],
+      "Minutos demora acumulados": item["Minutos demora acumulados"],
+      "Promedio demora (min)": item["Promedio demora (min)"],
+      "Entradas fuera de radio": item["Entradas fuera de radio"],
+      "Salidas fuera de radio": item["Salidas fuera de radio"],
+      "Fichajes fuera de radio": item["Fichajes fuera de radio"],
+      "Salidas anticipadas": item["Salidas anticipadas"],
+      "Cierres automáticos": item["Cierres automáticos"],
+      "Salidas no registradas": item["Salidas no registradas"],
+      "Asistencia %": item["Asistencia %"],
+      "Puntualidad %": item["Puntualidad %"]
+    }));
+  }
+
+  const ANALYTICS_EXPORT_DEFINITIONS = {
+    hours: { kind: "chart", title: "Horas confirmadas", subtitle: "Top operarios", metric: "Minutos confirmados", tone: "#0f766e", formatter: value => minutesToHoursLabel(value), filename: "horas-confirmadas" },
+    absence: { kind: "chart", title: "Ausencias / sin entrada", subtitle: "Incidencias", metric: "Ausencias / sin entrada", tone: "#b91c1c", formatter: value => String(value), filename: "ausencias" },
+    late: { kind: "chart", title: "Llegadas tarde", subtitle: "Incidencias", metric: "Llegadas tarde", tone: "#b45309", formatter: value => String(value), filename: "llegadas-tarde" },
+    outside: { kind: "chart", title: "Fichajes fuera de radio", subtitle: "Entradas + salidas", metric: "Fichajes fuera de radio", tone: "#6d28d9", formatter: value => String(value), filename: "fuera-de-radio" },
+    "ranking-absence": { kind: "ranking", title: "Ranking de ausencias", subtitle: "Ausencias / sin entrada", metric: "Ausencias / sin entrada", tone: "#b91c1c", formatter: value => String(value), filename: "ranking-ausencias" },
+    "ranking-late": { kind: "ranking", title: "Ranking de tardanzas", subtitle: "Llegadas tarde", metric: "Llegadas tarde", tone: "#b45309", formatter: value => String(value), filename: "ranking-tardanzas" },
+    "ranking-outside": { kind: "ranking", title: "Ranking fuera de radio", subtitle: "Entradas + salidas fuera del radio", metric: "Fichajes fuera de radio", tone: "#6d28d9", formatter: value => String(value), filename: "ranking-fuera-de-radio" }
+  };
+
+  const ANALYTICS_TABLE_DEFINITIONS = {
+    absence: { title: "Ranking de ausencias", metric: "Ausencias / sin entrada", valueHeader: "Ausencias / sin entrada", formatter: value => String(value), filename: "ranking-ausencias" },
+    late: { title: "Ranking de tardanzas", metric: "Llegadas tarde", valueHeader: "Llegadas tarde", formatter: value => String(value), filename: "ranking-tardanzas" },
+    outside: { title: "Ranking fuera de radio", metric: "Fichajes fuera de radio", valueHeader: "Fichajes fuera de radio", formatter: value => String(value), filename: "ranking-fuera-de-radio" },
+    hours: { title: "Ranking de horas confirmadas", metric: "Minutos confirmados", valueHeader: "Minutos confirmados", formatter: value => minutesToHoursLabel(value), filename: "ranking-horas-confirmadas" }
+  };
+
+  function safeFilenamePart(value, fallback = "periodo") {
+    const normalized = String(value || fallback)
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-zA-Z0-9._-]+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .toLowerCase();
+    return normalized || fallback;
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function syncAnalyticsImageFormatControls(source = null) {
+    const toolbar = $("#analyticsImageFormat");
+    const selection = $("#analyticsSelectionImageFormat");
+    const normalized = source === "jpg" ? "jpg" : "png";
+    if (toolbar && toolbar.value !== normalized) toolbar.value = normalized;
+    if (selection && selection.value !== normalized) selection.value = normalized;
+    return normalized;
+  }
+
+  function analyticsImageFormat() {
+    const preferred = $("#analyticsSelectionImageFormat")?.value || $("#analyticsImageFormat")?.value || "png";
+    return syncAnalyticsImageFormatControls(preferred);
+  }
+
+  function analyticsExportContext() {
+    const period = state.analyticsPeriodResolved;
+    const service = $("#analyticsService")?.value || "";
+    const serviceLabel = service ? ($("#analyticsService")?.selectedOptions?.[0]?.textContent || "Servicio filtrado") : "Todos los servicios";
+    const periodText = period ? `${period.from || "Inicio"} → ${period.to || todayISO()}` : "Período seleccionado";
+    const orderText = $("#analyticsOrder")?.value === "asc" ? "Menor a mayor" : "Mayor a menor";
+    const label = safeFilenamePart(period?.label || periodText);
+    return { periodText, serviceLabel, orderText, label };
+  }
+
+  async function ensureAnalyticsData() {
+    if (!state.analyticsLoaded || !Array.isArray(state.analyticsSummary)) await loadAnalyticsData();
+  }
+
+  function analyticsSortedRows(metric, limit = null) {
+    const rows = analyticsSort(state.analyticsSummary || [], metric);
+    return Number.isFinite(limit) ? rows.slice(0, limit) : rows;
+  }
+
+  function truncateCanvasText(ctx, value, maxWidth) {
+    const text = String(value ?? "");
+    if (ctx.measureText(text).width <= maxWidth) return text;
+    const ellipsis = "…";
+    let low = 0;
+    let high = text.length;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (ctx.measureText(text.slice(0, mid) + ellipsis).width <= maxWidth) low = mid;
+      else high = mid - 1;
+    }
+    return text.slice(0, low) + ellipsis;
+  }
+
+  function roundedCanvasRect(ctx, x, y, width, height, radius) {
+    const r = Math.max(0, Math.min(radius, width / 2, height / 2));
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + width, y, x + width, y + height, r);
+    ctx.arcTo(x + width, y + height, x, y + height, r);
+    ctx.arcTo(x, y + height, x, y, r);
+    ctx.arcTo(x, y, x + width, y, r);
+    ctx.closePath();
+  }
+
+  function drawAnalyticsImageHeader(ctx, width, title, subtitle, accent) {
+    const context = analyticsExportContext();
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, ctx.canvas.height);
+    ctx.fillStyle = "#0f172a";
+    ctx.font = "800 46px Arial, sans-serif";
+    ctx.fillText("CLEAN IT · PRESENTISMO GPS", 110, 105);
+    ctx.fillStyle = accent;
+    roundedCanvasRect(ctx, 110, 142, 150, 10, 5);
+    ctx.fill();
+    ctx.fillStyle = "#0f172a";
+    ctx.font = "800 72px Arial, sans-serif";
+    ctx.fillText(title, 110, 245);
+    ctx.fillStyle = "#475569";
+    ctx.font = "500 32px Arial, sans-serif";
+    ctx.fillText(subtitle, 110, 296);
+    ctx.font = "500 28px Arial, sans-serif";
+    ctx.fillText(`${context.periodText} · ${context.serviceLabel} · Orden: ${context.orderText}`, 110, 345);
+  }
+
+  function drawAnalyticsImageFooter(ctx, width, height) {
+    ctx.strokeStyle = "#e2e8f0";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(110, height - 92);
+    ctx.lineTo(width - 110, height - 92);
+    ctx.stroke();
+    ctx.fillStyle = "#64748b";
+    ctx.font = "500 25px Arial, sans-serif";
+    ctx.fillText(`Generado ${formatDateTime(new Date().toISOString())}`, 110, height - 46);
+    ctx.textAlign = "right";
+    ctx.fillText("Clean It · Análisis de presentismo", width - 110, height - 46);
+    ctx.textAlign = "left";
+  }
+
+  function buildAnalyticsChartCanvas(definition) {
+    const rows = analyticsSortedRows(definition.metric, 10);
+    const width = 2400;
+    const height = 1600;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    drawAnalyticsImageHeader(ctx, width, definition.title, definition.subtitle, definition.tone);
+
+    const left = 110;
+    const right = 110;
+    const contentWidth = width - left - right;
+    const startY = 410;
+    const rowHeight = 105;
+    const max = Math.max(0, ...rows.map(item => Number(item[definition.metric] || 0)));
+
+    if (!rows.length) {
+      ctx.fillStyle = "#64748b";
+      ctx.font = "600 38px Arial, sans-serif";
+      ctx.fillText("Sin datos para el período seleccionado.", left, startY + 80);
+    } else {
+      rows.forEach((item, index) => {
+        const y = startY + index * rowHeight;
+        const value = Number(item[definition.metric] || 0);
+        const ratio = max > 0 ? value / max : 0;
+        const label = `${index + 1}. ${item.Operario || "Sin identificar"}`;
+        ctx.font = "700 30px Arial, sans-serif";
+        ctx.fillStyle = "#334155";
+        ctx.fillText(truncateCanvasText(ctx, label, contentWidth - 420), left, y + 30);
+        ctx.textAlign = "right";
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "800 30px Arial, sans-serif";
+        ctx.fillText(definition.formatter(value, item), width - right, y + 30);
+        ctx.textAlign = "left";
+
+        const barY = y + 49;
+        const barH = 30;
+        ctx.fillStyle = "#e2e8f0";
+        roundedCanvasRect(ctx, left, barY, contentWidth, barH, 15);
+        ctx.fill();
+        if (ratio > 0) {
+          ctx.fillStyle = definition.tone;
+          roundedCanvasRect(ctx, left, barY, Math.max(18, contentWidth * ratio), barH, 15);
+          ctx.fill();
+        }
+      });
+    }
+    drawAnalyticsImageFooter(ctx, width, height);
+    return canvas;
+  }
+
+  function buildAnalyticsRankingCanvas(definition) {
+    const rows = analyticsSortedRows(definition.metric);
+    const width = 2200;
+    const rowHeight = 72;
+    const height = Math.max(1150, Math.min(16000, 520 + Math.max(1, rows.length) * rowHeight));
+    const maxRows = Math.max(1, Math.floor((height - 520) / rowHeight));
+    const visibleRows = rows.slice(0, maxRows);
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    drawAnalyticsImageHeader(ctx, width, definition.title, definition.subtitle, definition.tone);
+
+    const x = 110;
+    const tableWidth = width - 220;
+    const startY = 395;
+    ctx.fillStyle = "#0f172a";
+    roundedCanvasRect(ctx, x, startY, tableWidth, 64, 16);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "800 27px Arial, sans-serif";
+    ctx.fillText("#", x + 28, startY + 42);
+    ctx.fillText("OPERARIO", x + 118, startY + 42);
+    ctx.textAlign = "right";
+    ctx.fillText("VALOR", x + tableWidth - 28, startY + 42);
+    ctx.textAlign = "left";
+
+    if (!visibleRows.length) {
+      ctx.fillStyle = "#64748b";
+      ctx.font = "600 34px Arial, sans-serif";
+      ctx.fillText("Sin datos para el período seleccionado.", x + 28, startY + 130);
+    } else {
+      visibleRows.forEach((item, index) => {
+        const y = startY + 64 + index * rowHeight;
+        ctx.fillStyle = index % 2 === 0 ? "#f8fafc" : "#ffffff";
+        ctx.fillRect(x, y, tableWidth, rowHeight);
+        ctx.strokeStyle = "#e2e8f0";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, y + rowHeight);
+        ctx.lineTo(x + tableWidth, y + rowHeight);
+        ctx.stroke();
+        ctx.fillStyle = definition.tone;
+        ctx.font = "800 28px Arial, sans-serif";
+        ctx.fillText(String(index + 1), x + 28, y + 46);
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "700 28px Arial, sans-serif";
+        ctx.fillText(truncateCanvasText(ctx, item.Operario || "Sin identificar", tableWidth - 520), x + 118, y + 46);
+        ctx.textAlign = "right";
+        ctx.font = "800 28px Arial, sans-serif";
+        ctx.fillText(definition.formatter(Number(item[definition.metric] || 0), item), x + tableWidth - 28, y + 46);
+        ctx.textAlign = "left";
+      });
+    }
+    if (rows.length > visibleRows.length) {
+      ctx.fillStyle = "#b45309";
+      ctx.font = "700 25px Arial, sans-serif";
+      ctx.fillText(`La imagen incluye los primeros ${visibleRows.length} de ${rows.length} operarios. El Excel incluye el ranking completo.`, x, height - 120);
+    }
+    drawAnalyticsImageFooter(ctx, width, height);
+    return canvas;
+  }
+
+  function canvasToImageBlob(canvas, format) {
+    const mime = format === "jpg" ? "image/jpeg" : "image/png";
+    const quality = format === "jpg" ? 0.95 : undefined;
+    return new Promise((resolve, reject) => {
+      canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error("No se pudo generar la imagen.")), mime, quality);
+    });
+  }
+
+  async function buildAnalyticsImageBlob(key, format = analyticsImageFormat()) {
+    const definition = ANALYTICS_EXPORT_DEFINITIONS[key];
+    if (!definition) throw new Error("Exportación no reconocida.");
+    const canvas = definition.kind === "ranking" ? buildAnalyticsRankingCanvas(definition) : buildAnalyticsChartCanvas(definition);
+    return canvasToImageBlob(canvas, format);
+  }
+
+  function analyticsRankingSheetRows(key) {
+    const definition = ANALYTICS_TABLE_DEFINITIONS[key];
+    if (!definition) return [];
+    return analyticsSortedRows(definition.metric).map((item, index) => ({
+      "Posición": index + 1,
+      "Operario": item.Operario,
+      [definition.valueHeader]: Number(item[definition.metric] || 0),
+      "Valor legible": definition.formatter(Number(item[definition.metric] || 0), item),
+      "Horas confirmadas": item["Horas confirmadas"],
+      "Ausencias / sin entrada": item["Ausencias / sin entrada"],
+      "Llegadas tarde": item["Llegadas tarde"],
+      "Fichajes fuera de radio": item["Fichajes fuera de radio"],
+      "Asistencia %": item["Asistencia %"],
+      "Puntualidad %": item["Puntualidad %"]
+    }));
+  }
+
+  function buildAnalyticsWorkbook() {
+    if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+    const summary = analyticsExportSummaryRows();
+    const daily = state.analyticsDaily || [];
+    const detail = state.analyticsRows || [];
+    const byDate = operationalSummaryByDate(detail);
+    const wb = window.XLSX.utils.book_new();
+
+    const wsSummary = window.XLSX.utils.json_to_sheet(summary.length ? summary : [{ "Operario": "Sin datos" }]);
+    applyWorksheetUsability(wsSummary, [30, 20, 22, 20, 24, 20, 20, 20, 22, 22, 20, 18, 24, 22, 22, 22, 22, 22, 22, 16, 16]);
+    window.XLSX.utils.book_append_sheet(wb, wsSummary, "Resumen operarios");
+
+    const wsDaily = window.XLSX.utils.json_to_sheet(daily.length ? daily : [{ "Fecha": "Sin datos" }]);
+    applyWorksheetUsability(wsDaily, [14, 38, 30, 42, 22, 20, 20, 22, 24, 24, 22, 20]);
+    window.XLSX.utils.book_append_sheet(wb, wsDaily, "Horas por operario y día");
+
+    const wsDetail = window.XLSX.utils.json_to_sheet(detail.length ? detail : [{ "Sin datos": "No hay registros en el período seleccionado." }]);
+    applyWorksheetUsability(wsDetail, [14, 30, 30, 28, 20, 24, 18, 30, 20, 18, 28, 24, 18, 16, 18, 22, 18, 18, 18, 22, 18, 20, 18, 18, 18, 18, 36, 40, 30, 42]);
+    window.XLSX.utils.book_append_sheet(wb, wsDetail, "Detalle RRHH");
+
+    const wsDate = window.XLSX.utils.json_to_sheet(byDate.length ? byDate : [{ "Fecha": "Sin datos" }]);
+    applyWorksheetUsability(wsDate, [14, 18, 22, 22, 20, 20, 20, 20, 22, 22, 22, 20]);
+    window.XLSX.utils.book_append_sheet(wb, wsDate, "Resumen por día");
+
+    [["hours", "Ranking horas"], ["absence", "Ranking ausencias"], ["late", "Ranking tardanzas"], ["outside", "Ranking fuera radio"]].forEach(([key, sheetName]) => {
+      const rows = analyticsRankingSheetRows(key);
+      const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Operario": "Sin datos" }]);
+      applyWorksheetUsability(ws, [12, 34, 24, 22, 22, 22, 22, 22, 18, 18]);
+      window.XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    });
+    return wb;
+  }
+
+  function analyticsWorkbookBlob(wb = buildAnalyticsWorkbook()) {
+    const data = window.XLSX.write(wb, { bookType: "xlsx", type: "array" });
+    return new Blob([data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  }
+
+  function analyticsSelectionCheckboxes() {
+    return Array.from(document.querySelectorAll('[data-analytics-selection]'));
+  }
+
+  function getSelectedAnalyticsExports() {
+    return analyticsSelectionCheckboxes().filter(input => input.checked).map(input => ({
+      type: input.dataset.analyticsSelection || "image",
+      key: input.value
+    }));
+  }
+
+  function updateAnalyticsSelectionSummary() {
+    const summaryEl = $("#analyticsSelectionSummary");
+    if (!summaryEl) return;
+    const selected = getSelectedAnalyticsExports();
+    const imageCount = selected.filter(item => item.type === "image").length;
+    const tableCount = selected.filter(item => item.type === "table").length;
+    if (!selected.length) {
+      summaryEl.textContent = "No hay elementos seleccionados.";
+      return;
+    }
+    const parts = [];
+    if (imageCount) parts.push(`${imageCount} imagen${imageCount === 1 ? "" : "es"}`);
+    if (tableCount) parts.push(`${tableCount} tabla${tableCount === 1 ? "" : "s"}`);
+    summaryEl.textContent = `${selected.length} seleccionado${selected.length === 1 ? "" : "s"}: ${parts.join(" y ")}.`;
+  }
+
+  function setAnalyticsSelection(mode) {
+    const boxes = analyticsSelectionCheckboxes();
+    boxes.forEach(input => {
+      if (mode === "clear") input.checked = false;
+      else if (mode === "images") input.checked = input.dataset.analyticsSelection === "image";
+      else if (mode === "tables") input.checked = input.dataset.analyticsSelection === "table";
+      else if (mode === "charts") input.checked = input.dataset.analyticsSelection === "image" && !String(input.value || "").startsWith("ranking-");
+      else if (mode === "rankings") input.checked = input.dataset.analyticsSelection === "image" && String(input.value || "").startsWith("ranking-");
+      else if (mode === "all") input.checked = true;
+    });
+    updateAnalyticsSelectionSummary();
+  }
+
+  function buildAnalyticsSingleTableWorkbook(key) {
+    if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+    const wb = window.XLSX.utils.book_new();
+    if (key === "summary") {
+      const rows = analyticsExportSummaryRows();
+      const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Operario": "Sin datos" }]);
+      applyWorksheetUsability(ws, [30, 20, 22, 20, 24, 20, 20, 20, 22, 22, 20, 18, 24, 22, 22, 22, 22, 22, 22, 16, 16]);
+      window.XLSX.utils.book_append_sheet(wb, ws, "Resumen operarios");
+      return { wb, filename: "resumen-operarios" };
+    }
+    const definition = ANALYTICS_TABLE_DEFINITIONS[key];
+    if (!definition) throw new Error("Tabla no reconocida.");
+    const rows = analyticsRankingSheetRows(key);
+    const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Operario": "Sin datos" }]);
+    applyWorksheetUsability(ws, [12, 34, 24, 22, 22, 22, 22, 22, 18, 18]);
+    window.XLSX.utils.book_append_sheet(wb, ws, definition.title.slice(0, 31));
+    return { wb, filename: definition.filename };
+  }
+
+  async function exportSelectedAnalytics() {
+    const button = $("#downloadSelectedAnalyticsBtn");
+    await withExportButton(button, "Preparando...", async () => {
+      await ensureAnalyticsData();
+      if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+      const selected = getSelectedAnalyticsExports();
+      if (!selected.length) throw new Error("Seleccioná al menos un gráfico, ranking o tabla.");
+      const format = analyticsImageFormat();
+      const context = analyticsExportContext();
+
+      if (selected.length === 1) {
+        const item = selected[0];
+        if (item.type === "image") {
+          const definition = ANALYTICS_EXPORT_DEFINITIONS[item.key];
+          if (!definition) throw new Error("No se encontró la imagen seleccionada.");
+          const blob = await buildAnalyticsImageBlob(item.key, format);
+          downloadBlob(blob, `${definition.filename}-${context.label}.${format}`);
+          toast(`${definition.title} descargado en ${format.toUpperCase()}.`, "success");
+          return;
+        }
+        if (item.key === "workbook") {
+          const wb = buildAnalyticsWorkbook();
+          window.XLSX.writeFile(wb, `analisis-presentismo-cleanit-${context.label}.xlsx`);
+          toast("Excel completo descargado.", "success");
+          return;
+        }
+        const { wb, filename } = buildAnalyticsSingleTableWorkbook(item.key);
+        window.XLSX.writeFile(wb, `${filename}-${context.label}.xlsx`);
+        toast("Tabla Excel descargada.", "success");
+        return;
+      }
+
+      if (!window.JSZip) throw new Error("No se pudo cargar el módulo para generar el ZIP. Verificá tu conexión y volvé a intentar.");
+      const zip = new window.JSZip();
+      const imagesFolder = zip.folder("imagenes");
+      const tablesFolder = zip.folder("tablas");
+      const imageItems = selected.filter(item => item.type === "image");
+      const tableItems = selected.filter(item => item.type === "table");
+
+      for (const item of imageItems) {
+        const definition = ANALYTICS_EXPORT_DEFINITIONS[item.key];
+        if (!definition) continue;
+        imagesFolder.file(`${definition.filename}.${format}`, await buildAnalyticsImageBlob(item.key, format));
+      }
+      for (const item of tableItems) {
+        if (item.key === "workbook") {
+          tablesFolder.file(`analisis-completo-${context.label}.xlsx`, analyticsWorkbookBlob(buildAnalyticsWorkbook()));
+          continue;
+        }
+        const { wb, filename } = buildAnalyticsSingleTableWorkbook(item.key);
+        tablesFolder.file(`${filename}-${context.label}.xlsx`, analyticsWorkbookBlob(wb));
+      }
+      const selectionLines = selected.map(item => `- ${item.type === "image" ? "Imagen" : "Tabla"}: ${item.key}`).join("\n");
+      zip.file("LEEME.txt", `Clean It · Presentismo GPS\nPeríodo: ${context.periodText}\nServicio: ${context.serviceLabel}\nOrden rankings: ${context.orderText}\nFormato imágenes: ${format.toUpperCase()}\n\nSelección incluida:\n${selectionLines}\n`);
+      const bundle = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+      downloadBlob(bundle, `analisis-seleccion-${context.label}.zip`);
+      toast("Selección exportada correctamente.", "success");
+    });
+  }
+
+  async function exportAnalyticsImage(key, button = null) {
+    await withExportButton(button, "Generando...", async () => {
+      await ensureAnalyticsData();
+      const definition = ANALYTICS_EXPORT_DEFINITIONS[key];
+      if (!definition) throw new Error("No se encontró el gráfico o ranking.");
+      const format = analyticsImageFormat();
+      const blob = await buildAnalyticsImageBlob(key, format);
+      const context = analyticsExportContext();
+      downloadBlob(blob, `${definition.filename}-${context.label}.${format}`);
+      toast(`${definition.title} descargado en ${format.toUpperCase()} de alta resolución.`, "success");
+    });
+  }
+
+  async function exportAnalyticsTable(key, button = null) {
+    await withExportButton(button, "Generando...", async () => {
+      await ensureAnalyticsData();
+      if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+      const context = analyticsExportContext();
+      const wb = window.XLSX.utils.book_new();
+      if (key === "summary") {
+        const rows = analyticsExportSummaryRows();
+        const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Operario": "Sin datos" }]);
+        applyWorksheetUsability(ws, [30, 20, 22, 20, 24, 20, 20, 20, 22, 22, 20, 18, 24, 22, 22, 22, 22, 22, 22, 16, 16]);
+        window.XLSX.utils.book_append_sheet(wb, ws, "Resumen operarios");
+        window.XLSX.writeFile(wb, `resumen-operarios-${context.label}.xlsx`);
+        toast("Tabla resumen descargada en Excel.", "success");
+        return;
+      }
+      const definition = ANALYTICS_TABLE_DEFINITIONS[key];
+      if (!definition) throw new Error("Tabla no reconocida.");
+      const rows = analyticsRankingSheetRows(key);
+      const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Operario": "Sin datos" }]);
+      applyWorksheetUsability(ws, [12, 34, 24, 22, 22, 22, 22, 22, 18, 18]);
+      window.XLSX.utils.book_append_sheet(wb, ws, definition.title.slice(0, 31));
+      window.XLSX.writeFile(wb, `${definition.filename}-${context.label}.xlsx`);
+      toast(`${definition.title} descargado en Excel.`, "success");
+    });
+  }
+
+  async function exportAnalyticsBundle() {
+    const button = $("#downloadAnalyticsBundleBtn");
+    await withExportButton(button, "Armando ZIP...", async () => {
+      await ensureAnalyticsData();
+      if (!window.JSZip) throw new Error("No se pudo cargar el módulo para generar el ZIP. Verificá tu conexión y volvé a intentar.");
+      if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+      const format = analyticsImageFormat();
+      const context = analyticsExportContext();
+      const zip = new window.JSZip();
+      const chartFolder = zip.folder("graficos");
+      const rankingFolder = zip.folder("rankings");
+      const tableFolder = zip.folder("tablas");
+
+      for (const key of ["hours", "absence", "late", "outside"]) {
+        const definition = ANALYTICS_EXPORT_DEFINITIONS[key];
+        chartFolder.file(`${definition.filename}.${format}`, await buildAnalyticsImageBlob(key, format));
+      }
+      for (const key of ["ranking-absence", "ranking-late", "ranking-outside"]) {
+        const definition = ANALYTICS_EXPORT_DEFINITIONS[key];
+        rankingFolder.file(`${definition.filename}.${format}`, await buildAnalyticsImageBlob(key, format));
+      }
+
+      const wb = buildAnalyticsWorkbook();
+      tableFolder.file(`analisis-completo-${context.label}.xlsx`, analyticsWorkbookBlob(wb));
+      zip.file("LEEME.txt", `Clean It · Presentismo GPS\nPeríodo: ${context.periodText}\nServicio: ${context.serviceLabel}\nOrden rankings: ${context.orderText}\nFormato imágenes: ${format.toUpperCase()}\n\nIncluye 4 gráficos, 3 rankings en imagen y un Excel con resumen, horas por día, detalle RRHH y rankings completos.\n`);
+
+      const bundle = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+      downloadBlob(bundle, `analisis-presentismo-cleanit-${context.label}.zip`);
+      toast("Paquete completo generado: gráficos, rankings y tablas Excel.", "success");
+    });
+  }
+
+  async function exportAnalyticsCsv() {
+    const button = $("#exportAnalyticsCsvBtn");
+    await withExportButton(button, "Generando...", async () => {
+      await loadAnalyticsData();
+      const rows = state.analyticsRows || [];
+      const headers = rows.length ? Object.keys(rows[0]) : ["Fecha", "Operario", "Servicio", "Duración trabajada", "Alertas RRHH"];
+      const label = state.analyticsPeriodResolved?.label || "periodo";
+      downloadCsvObjects(rows, headers, `analisis-presentismo-cleanit-${label}.csv`);
+      toast(`${rows.length} registros detallados exportados a CSV.`, "success");
+    });
+  }
+
+  async function exportAnalyticsExcel() {
+    const button = $("#exportAnalyticsExcelBtn");
+    await withExportButton(button, "Generando...", async () => {
+      await ensureAnalyticsData();
+      const wb = buildAnalyticsWorkbook();
+      const label = state.analyticsPeriodResolved?.label || "periodo";
+      window.XLSX.writeFile(wb, `analisis-presentismo-cleanit-${label}.xlsx`);
+      toast("Excel completo generado con resumen, horas diarias, detalle RRHH y rankings.", "success");
+    });
+  }
+
+  function recordExportObject(event, profiles = state.profiles, sites = state.sites) {
+    const op = byId(profiles, event.operator_id);
+    const site = byId(sites, event.site_id);
+    const recorder = event.recorded_by ? byId(profiles, event.recorded_by) : null;
+    return {
+      "Fecha y hora": eventTimestamp(event) || event.created_at || "",
+      "Hora procesamiento sistema": event.recorded_via === "system_auto" ? (event.created_at || "") : "",
+      "Fecha servicio": event.shift_date || "",
+      "Operario": op?.full_name || event.operator_id || "",
+      "Servicio": site?.name || event.site_id || "",
+      "Dirección": site?.address || "",
+      "Tipo de trabajo": isFlexibleShiftId(event.shift_id) ? "Jornada flexible" : workTypeLabel(event.work_type || "regular"),
+      "Origen de tarea": isFlexibleShiftId(event.shift_id) ? "Jornada flexible asignada" : event.entry_source === "operator_extra" ? "Declarado por operario" : "Asignación",
+      "Validación": validationLabel(event.validation_status || "confirmed"),
+      "Registrado por": recordedViaLabel(event),
+      "Usuario que cargó": recorder?.full_name || "",
+      "Tipo": event.event_type || "",
+      "Tipo legible": eventTypeLabel(event.event_type),
+      "Estado": event.observed_status || "",
+      "Estado legible": event.recorded_via === "system_auto" && event.event_type === "checkout" ? "Cierre automático por falta de salida" : observedStatusLabel(event.observed_status),
+      "Lat": event.lat ?? "",
+      "Lng": event.lng ?? "",
+      "Precisión (m)": event.gps_accuracy_m ?? "",
+      "Distancia (m)": event.distance_m ?? "",
+      "Dentro radio": event.is_inside_site === true ? "Sí" : event.is_inside_site === false ? "No" : "",
+      "Observación": event.notes || "",
+      "Assignment ID": event.assignment_id || "",
+      "Shift ID": event.shift_id || ""
+    };
+  }
+
+  async function fetchRecordsForSelectedPeriod() {
+    const period = resolvePeriod("records");
+    const [events, profiles, sites] = await Promise.all([
+      store.listEventsRange(period.from, period.to),
+      store.listAllProfiles(),
+      store.listAllSites()
+    ]);
+    return { period, events, profiles, sites };
+  }
+
+  async function loadRecordsPeriod() {
+    const button = $("#applyRecordsBtn");
+    await withExportButton(button, "Cargando...", async () => {
+      const result = await fetchRecordsForSelectedPeriod();
+      state.recordsEvents = result.events;
+      state.bulkSelectedRecordIds.clear();
+      state.recordsProfiles = result.profiles;
+      state.recordsSites = result.sites;
+      state.recordsLoaded = true;
+      renderRecords();
+    });
+  }
+
+  async function exportRecordsExcel() {
+    const button = $("#exportRecordsExcelBtn");
+    await withExportButton(button, "Generando...", async () => {
+      if (!window.XLSX) throw new Error("No se pudo cargar el módulo de Excel.");
+      const { period, events, profiles, sites } = await fetchRecordsForSelectedPeriod();
+      const rows = events.map(event => recordExportObject(event, profiles, sites));
+      const wb = window.XLSX.utils.book_new();
+      const ws = window.XLSX.utils.json_to_sheet(rows.length ? rows : [{ "Sin datos": "No hay marcaciones en el período seleccionado." }]);
+      applyWorksheetUsability(ws, [22, 14, 28, 30, 34, 14, 16, 16, 18, 14, 14, 15, 15, 15, 38, 38, 42]);
+      window.XLSX.utils.book_append_sheet(wb, ws, "Marcaciones");
+      window.XLSX.writeFile(wb, `marcaciones-cleanit-${period.label}.xlsx`);
+      toast(`${rows.length} marcación${rows.length === 1 ? "" : "es"} exportada${rows.length === 1 ? "" : "s"} a Excel.`, "success");
+    });
+  }
+
+  function currentRecordSources() {
+    return {
+      events: state.recordsLoaded ? state.recordsEvents : state.events,
+      profiles: state.recordsLoaded ? state.recordsProfiles : state.profiles,
+      sites: state.recordsLoaded ? state.recordsSites : state.sites
+    };
+  }
+
+  function filteredRecordsForCurrentView() {
+    const { events, profiles, sites } = currentRecordSources();
+    const searchTerm = sectionSearchTerm("records");
+    if (!searchTerm) return events;
+    return events.filter(event => {
+      const op = byId(profiles, event.operator_id);
+      const site = byId(sites, event.site_id);
+      const recorder = event.recorded_by ? byId(profiles, event.recorded_by) : null;
+      const eventStatusLabel = event.recorded_via === "system_auto" && event.event_type === "checkout" ? "Cierre automático por falta de salida" : observedStatusLabel(event.observed_status);
+      return valuesMatchSearch(searchTerm, op?.full_name, site?.name, site?.address, site?.zone, workTypeLabel(event.work_type || "regular"), eventTypeLabel(event.event_type), eventStatusLabel, recordedViaLabel(event), recorder?.full_name, event.notes, event.shift_date);
+    });
+  }
+
+  function updateRecordsSelectionSummary() {
+    const label = $("#recordsSelectionSummary");
+    if (!label) return;
+    const count = state.bulkSelectedRecordIds.size;
+    label.textContent = `${count} registro${count === 1 ? "" : "s"} seleccionado${count === 1 ? "" : "s"}.`;
+    const deleteBtn = $("#deleteSelectedRecordsBtn");
+    if (deleteBtn) deleteBtn.disabled = count === 0;
+  }
+
+  async function deleteAttendanceRecords(ids) {
+    if (!isManagementProfile()) return toast("No tenés permisos para eliminar registros.");
+    const uniqueIds = [...new Set((ids || []).filter(Boolean))];
+    if (!uniqueIds.length) return toast("Seleccioná al menos un registro.");
+    const phrase = "ELIMINAR REGISTROS";
+    const typed = window.prompt(`Vas a eliminar ${uniqueIds.length} registro${uniqueIds.length === 1 ? "" : "s"} de presentismo.\n\nEsta acción modifica el historial operativo. Se conservará una copia de auditoría en Supabase.\n\nEscribí exactamente: ${phrase}`);
+    if (typed === null) return;
+    if (typed.trim() !== phrase) return toast("La frase de seguridad no coincide. No se eliminó nada.");
+    if (!window.confirm(`Última confirmación: ¿eliminar ${uniqueIds.length} registro${uniqueIds.length === 1 ? "" : "s"}?`)) return;
+
+    try {
+      const deleted = await store.deleteAttendanceEvents(uniqueIds, phrase);
+      const deletedSet = new Set(uniqueIds);
+      state.events = state.events.filter(event => !deletedSet.has(event.id));
+      state.recordsEvents = state.recordsEvents.filter(event => !deletedSet.has(event.id));
+      uniqueIds.forEach(id => state.bulkSelectedRecordIds.delete(id));
+      updateRecordsSelectionSummary();
+      toast(`${deleted} registro${deleted === 1 ? "" : "s"} eliminado${deleted === 1 ? "" : "s"}.`, "success");
+      if (state.recordsLoaded) await loadRecordsPeriod();
+      else renderRecords();
+      // Actualiza también el estado visible sin forzar una nueva ausencia automática en este mismo instante.
+      const date = $("#dashboardDate")?.value || todayISO();
+      await refreshBaseData(date);
+      renderDashboard();
+      renderFichaje();
+    } catch (error) {
+      toast(error.message || "No se pudieron eliminar los registros.");
+    }
+  }
+
   function renderRecords() {
-    const rows = state.events.map(event => {
-      const op = byId(state.profiles, event.operator_id);
-      const site = byId(state.sites, event.site_id);
+    const { events, profiles: profileSource, sites: siteSource } = currentRecordSources();
+    const searchTerm = sectionSearchTerm("records");
+    const filteredEvents = filteredRecordsForCurrentView();
+    updateSectionSearchCount("records", filteredEvents.length, events.length);
+    const displayLimit = 1000;
+    const displayEvents = filteredEvents.slice(0, displayLimit);
+    const rows = displayEvents.map(event => {
+      const op = byId(profileSource, event.operator_id);
+      const site = byId(siteSource, event.site_id);
+      const recorder = event.recorded_by ? byId(profileSource, event.recorded_by) : null;
+      const selected = state.bulkSelectedRecordIds.has(event.id);
       return `
-        <tr>
-          <td>${formatDateTime(event.created_at)}</td>
+        <tr class="${searchTerm ? "search-match-row" : ""}">
+          <td class="record-select-cell"><input type="checkbox" data-select-record="${escapeHtml(event.id)}" ${selected ? "checked" : ""} aria-label="Seleccionar registro" /></td>
+          <td>${formatDateTime(eventTimestamp(event) || event.created_at)}</td>
           <td>${escapeHtml(event.shift_date || "—")}</td>
           <td>${escapeHtml(op?.full_name || event.operator_id || "—")}</td>
           <td>${escapeHtml(site?.name || event.site_id || "—")}</td>
-          <td><strong>${escapeHtml(eventTypeLabel(event.event_type))}</strong><br><span class="muted small">${escapeHtml(observedStatusLabel(event.observed_status))}</span></td>
-          <td>${event.lat ? `${Number(event.lat).toFixed(6)}, ${Number(event.lng).toFixed(6)}` : "—"}</td>
-          <td>${event.gps_accuracy_m ? `${Math.round(event.gps_accuracy_m)} m` : "—"}</td>
-          <td>${event.distance_m ? `${Math.round(event.distance_m)} m` : "—"}</td>
+          <td>${escapeHtml(isFlexibleShiftId(event.shift_id) ? "Jornada flexible" : workTypeLabel(event.work_type || "regular"))}${isFlexibleShiftId(event.shift_id) ? `<br><span class="muted small">Sin horario fijo · hora real</span>` : event.entry_source === "operator_extra" ? `<br><span class="muted small">Declarado por operario · ${escapeHtml(validationLabel(event.validation_status || "pending"))}</span>` : ""}</td>
+          <td><strong>${escapeHtml(eventTypeLabel(event.event_type))}</strong><br><span class="muted small">${escapeHtml(event.recorded_via === "system_auto" && event.event_type === "checkout" ? "Cierre automático" : observedStatusLabel(event.observed_status))}</span></td>
+          <td><strong>${escapeHtml(recordedViaLabel(event))}</strong>${recorder?.full_name ? `<br><span class="muted small">${escapeHtml(recorder.full_name)}</span>` : ""}${event.recorded_via === "system_auto" && event.created_at ? `<br><span class="muted small">Ejecutado ${escapeHtml(formatDateTime(event.created_at))}</span>` : ""}</td>
+          <td>${event.lat != null ? `${Number(event.lat).toFixed(6)}, ${Number(event.lng).toFixed(6)}` : "—"}</td>
+          <td>${event.gps_accuracy_m != null ? `${Math.round(Number(event.gps_accuracy_m))} m` : "—"}</td>
+          <td>${event.distance_m != null ? `${Math.round(Number(event.distance_m))} m` : "—"}</td>
           <td>${event.is_inside_site === true ? "Sí" : event.is_inside_site === false ? "No" : "—"}</td>
           <td>${escapeHtml(event.notes || "")}</td>
+          <td><button class="danger-btn small-btn" data-delete-record="${escapeHtml(event.id)}" type="button">Eliminar</button></td>
         </tr>`;
     }).join("");
 
     $("#recordsTable").innerHTML = `
       <table>
-        <thead><tr><th>Hora registro</th><th>Fecha servicio</th><th>Operario</th><th>Servicio</th><th>Tipo</th><th>GPS</th><th>Precisión</th><th>Distancia</th><th>Dentro radio</th><th>Obs.</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="10">Todavía no hay marcaciones.</td></tr>`}</tbody>
+        <thead><tr><th>Sel.</th><th>Hora registro</th><th>Fecha servicio</th><th>Operario</th><th>Servicio</th><th>Tipo de trabajo</th><th>Marcación</th><th>Registrado por</th><th>GPS</th><th>Precisión</th><th>Distancia</th><th>Dentro radio</th><th>Obs.</th><th>Acción</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="14">No hay marcaciones para el período seleccionado.</td></tr>`}</tbody>
       </table>`;
+
+    const summary = $("#recordsRangeSummary");
+    if (summary) {
+      let label = "registros cargados";
+      try {
+        const period = resolvePeriod("records");
+        label = period.isAll ? "historial completo" : period.from === period.to ? formatOperationalDate(period.from) : `${formatOperationalDate(period.from)} al ${formatOperationalDate(period.to)}`;
+      } catch (_) { /* conserva etiqueta genérica */ }
+      const displayNote = filteredEvents.length > displayLimit ? ` · mostrando ${displayLimit} coincidencias en pantalla` : "";
+      const searchNote = searchTerm ? ` · ${filteredEvents.length} coincidencia${filteredEvents.length === 1 ? "" : "s"} de ${events.length}` : "";
+      summary.textContent = `${events.length} marcación${events.length === 1 ? "" : "es"} · ${label}${searchNote}${displayNote}`;
+    }
+    updateRecordsSelectionSummary();
   }
 
-  function exportCsv() {
-    const header = ["fecha_hora", "fecha_servicio", "operario", "servicio", "tipo", "tipo_legible", "estado", "estado_legible", "lat", "lng", "precision_m", "distancia_m", "dentro_radio", "observacion", "assignment_id", "shift_id"];
-    const lines = state.events.map(event => {
-      const op = byId(state.profiles, event.operator_id);
-      const site = byId(state.sites, event.site_id);
-      const values = [
-        event.created_at,
-        event.shift_date || "",
-        op?.full_name || event.operator_id || "",
-        site?.name || event.site_id || "",
-        event.event_type || "",
-        eventTypeLabel(event.event_type),
-        event.observed_status || "",
-        observedStatusLabel(event.observed_status),
-        event.lat || "",
-        event.lng || "",
-        event.gps_accuracy_m || "",
-        event.distance_m || "",
-        event.is_inside_site === true ? "si" : event.is_inside_site === false ? "no" : "",
-        event.notes || "",
-        event.assignment_id || "",
-        event.shift_id || ""
-      ];
-      return values.map(value => `"${String(value).replace(/"/g, '""')}"`).join(",");
+  async function exportCsv() {
+    const button = $("#exportCsvBtn");
+    await withExportButton(button, "Generando...", async () => {
+      const { period, events, profiles, sites } = await fetchRecordsForSelectedPeriod();
+      const headers = ["fecha_hora", "fecha_servicio", "operario", "servicio", "tipo", "tipo_legible", "estado", "estado_legible", "registrado_por", "usuario_que_cargo", "lat", "lng", "precision_m", "distancia_m", "dentro_radio", "observacion", "assignment_id", "shift_id", "tipo_trabajo", "origen_tarea", "validacion"];
+      const rows = events.map(event => {
+        const op = byId(profiles, event.operator_id);
+        const site = byId(sites, event.site_id);
+        const recorder = event.recorded_by ? byId(profiles, event.recorded_by) : null;
+        return {
+          fecha_hora: event.created_at || "",
+          fecha_servicio: event.shift_date || "",
+          operario: op?.full_name || event.operator_id || "",
+          servicio: site?.name || event.site_id || "",
+          tipo_trabajo: workTypeLabel(event.work_type || "regular"),
+          origen_tarea: isFlexibleShiftId(event.shift_id) ? "Jornada flexible" : event.entry_source === "operator_extra" ? "Declarado por operario" : "Asignación",
+          validacion: validationLabel(event.validation_status || "confirmed"),
+          tipo: event.event_type || "",
+          tipo_legible: eventTypeLabel(event.event_type),
+          estado: event.observed_status || "",
+          estado_legible: observedStatusLabel(event.observed_status),
+          registrado_por: recordedViaLabel(event),
+          usuario_que_cargo: recorder?.full_name || "",
+          lat: event.lat ?? "",
+          lng: event.lng ?? "",
+          precision_m: event.gps_accuracy_m ?? "",
+          distancia_m: event.distance_m ?? "",
+          dentro_radio: event.is_inside_site === true ? "si" : event.is_inside_site === false ? "no" : "",
+          observacion: event.notes || "",
+          assignment_id: event.assignment_id || "",
+          shift_id: event.shift_id || ""
+        };
+      });
+      downloadCsvObjects(rows, headers, `presentismo-cleanit-${period.label}.csv`);
+      toast(`${rows.length} marcación${rows.length === 1 ? "" : "es"} exportada${rows.length === 1 ? "" : "s"} a CSV.`, "success");
     });
-    const blob = new Blob([[header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `presentismo-cleanit-${todayISO()}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
   }
 
   function bindEvents() {
@@ -1314,22 +7601,185 @@
       renderLoginMode();
     }));
     $("#supabaseLoginForm").addEventListener("submit", handleSupabaseLogin);
+    $("#forgotPasswordBtn").addEventListener("click", () => {
+      $("#forgotIdentifier").value = $("#email").value.trim();
+      setView("#forgotPasswordView");
+    });
+    $("#backToLoginBtn").addEventListener("click", () => setView("#loginView"));
+    $("#forgotPasswordForm").addEventListener("submit", handleForgotPassword);
+    $("#resetPasswordForm").addEventListener("submit", handleResetPassword);
     $("#operatorLogoutBtn").addEventListener("click", logout);
+    $("#refreshOperatorBtn")?.addEventListener("click", () => renderOperatorView().catch(error => operatorException(error, "No se pudieron actualizar los servicios.", { action: "actualizar_jornada" })));
     $("#supervisorLogoutBtn").addEventListener("click", logout);
-    $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => renderTab(btn.dataset.tab)));
-    $("#refreshDashboardBtn").addEventListener("click", renderSupervisorView);
-    $("#dashboardDate").addEventListener("change", renderSupervisorView);
-    $("#coverageSearch").addEventListener("input", renderCoverage);
-    $("#clearCoverageSearchBtn").addEventListener("click", () => { $("#coverageSearch").value = ""; renderCoverage(); });
-
-    $("#siteForm").addEventListener("submit", async (event) => {
+    $("#contextSearchInput")?.addEventListener("input", (event) => {
+      const tab = state.activeTab;
+      state.sectionSearch[tab] = event.target.value || "";
+      syncContextSearchUI(tab);
+      renderSectionForContextSearch(tab);
+      scheduleContextSearchAutoScroll();
+    });
+    $("#contextSearchInput")?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
       event.preventDefault();
-      await store.upsertSite(sitePayloadFromForm());
-      resetSiteForm();
-      toast("Servicio guardado.");
+      focusCurrentSearchResults();
+    });
+    $("#clearContextSearchBtn")?.addEventListener("click", () => {
+      const tab = state.activeTab;
+      state.sectionSearch[tab] = "";
+      syncContextSearchUI(tab);
+      renderSectionForContextSearch(tab);
+      $("#contextSearchInput")?.focus();
+    });
+    $$(".tab-btn").forEach(btn => btn.addEventListener("click", () => {
+      renderTab(btn.dataset.tab);
+      scheduleManagedTableRefresh(true);
+      scheduleOperationalMapAutoRefresh();
+      if (btn.dataset.tab === "opsmap") {
+        if (!state.operationalMapLoaded || state.operationalMapDate !== ($("#operationalMapDate")?.value || todayISO())) loadOperationalMapData().catch(error => toast(error.message || "No se pudo cargar el mapa operativo."));
+        else renderOperationalMapFromState();
+      }
+      if (btn.dataset.tab === "errors") loadErrorLogs().catch(error => toast(error.message || "No se pudieron cargar los errores.", "error"));
+      if (btn.dataset.tab === "records") loadRecordsPeriod().catch(error => toast(error.message || "No se pudieron cargar los registros."));
+      if (btn.dataset.tab === "analytics" && !state.analyticsLoaded) loadAnalyticsData().catch(error => toast(error.message || "No se pudo generar el análisis."));
+      if (btn.dataset.tab === "fichaje") loadFichajePeriod().catch(error => toast(error.message || "No se pudo cargar el fichaje del período."));
+    }));
+    $("#refreshDashboardBtn").addEventListener("click", renderSupervisorView);
+    $("#dashboardDate").addEventListener("change", async () => {
+      syncPeriodControls("live", false);
       await renderSupervisorView();
     });
+    $("#operationalMapDate")?.addEventListener("change", () => {
+      state.operationalMapDate = $("#operationalMapDate").value || todayISO();
+      state.operationalMapLoaded = false;
+      loadOperationalMapData().catch(error => toast(error.message || "No se pudo cargar el mapa operativo."));
+    });
+    $("#operationalMapTodayBtn")?.addEventListener("click", () => {
+      $("#operationalMapDate").value = todayISO();
+      state.operationalMapDate = todayISO();
+      state.operationalMapLoaded = false;
+      loadOperationalMapData().catch(error => toast(error.message || "No se pudo cargar el mapa operativo."));
+    });
+    $("#refreshOperationalMapBtn")?.addEventListener("click", () => loadOperationalMapData().catch(error => toast(error.message || "No se pudo cargar el mapa operativo.")));
+    $("#operationalMapFilters")?.addEventListener("click", event => {
+      const button = event.target.closest("[data-ops-map-filter]");
+      if (!button) return;
+      state.operationalMapFilter = button.dataset.opsMapFilter || "all";
+      renderOperationalMapFromState();
+    });
+    $("#liveExportPeriod").addEventListener("change", () => syncPeriodControls("live", false));
+    $("#analyticsPeriod")?.addEventListener("change", () => { syncPeriodControls("analytics", false); state.analyticsLoaded = false; });
+    $("#applyAnalyticsBtn")?.addEventListener("click", () => loadAnalyticsData().catch(error => toast(error.message || "No se pudo generar el análisis.")));
+    $("#analyticsService")?.addEventListener("change", renderAnalyticsFromState);
+    $("#analyticsOrder")?.addEventListener("change", renderAnalyticsFromState);
+    $("#analyticsImageFormat")?.addEventListener("change", event => syncAnalyticsImageFormatControls(event.target.value));
+    $("#analyticsSelectionImageFormat")?.addEventListener("change", event => syncAnalyticsImageFormatControls(event.target.value));
+    analyticsSelectionCheckboxes().forEach(input => input.addEventListener("change", updateAnalyticsSelectionSummary));
+    $("#analyticsSelectAllChartsBtn")?.addEventListener("click", () => setAnalyticsSelection("charts"));
+    $("#analyticsSelectAllRankingsBtn")?.addEventListener("click", () => setAnalyticsSelection("rankings"));
+    $("#analyticsSelectAllTablesBtn")?.addEventListener("click", () => setAnalyticsSelection("tables"));
+    $("#analyticsSelectEverythingBtn")?.addEventListener("click", () => setAnalyticsSelection("all"));
+    $("#analyticsClearSelectionBtn")?.addEventListener("click", () => setAnalyticsSelection("clear"));
+    $("#downloadSelectedAnalyticsBtn")?.addEventListener("click", () => exportSelectedAnalytics().catch(error => toast(error.message || "No se pudo descargar la selección.")));
+    updateAnalyticsSelectionSummary();
+    syncAnalyticsImageFormatControls($("#analyticsSelectionImageFormat")?.value || $("#analyticsImageFormat")?.value || "png");
+    $("#exportAnalyticsCsvBtn")?.addEventListener("click", () => exportAnalyticsCsv().catch(error => toast(error.message || "No se pudo exportar el análisis a CSV.")));
+    $("#exportAnalyticsExcelBtn")?.addEventListener("click", () => exportAnalyticsExcel().catch(error => toast(error.message || "No se pudo exportar el análisis a Excel.")));
+    $("#downloadAnalyticsBundleBtn")?.addEventListener("click", () => exportAnalyticsBundle().catch(error => toast(error.message || "No se pudo generar el paquete completo.")));
+    $("#analyticsTab")?.addEventListener("click", event => {
+      const imageButton = event.target.closest("[data-export-analytics-image]");
+      if (imageButton) {
+        exportAnalyticsImage(imageButton.dataset.exportAnalyticsImage, imageButton).catch(error => toast(error.message || "No se pudo descargar la imagen."));
+        return;
+      }
+      const tableButton = event.target.closest("[data-export-analytics-table]");
+      if (tableButton) exportAnalyticsTable(tableButton.dataset.exportAnalyticsTable, tableButton).catch(error => toast(error.message || "No se pudo descargar la tabla."));
+    });
+    $("#exportLiveCsvBtn").addEventListener("click", () => exportLiveCsv().catch(error => toast(error.message || "No se pudo exportar el estado operativo.")));
+    $("#exportLiveExcelBtn").addEventListener("click", () => exportLiveExcel().catch(error => toast(error.message || "No se pudo exportar el estado operativo.")));
+    $("#kpiGrid").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-kpi-detail]");
+      if (button) openQuickDetail(button.dataset.kpiDetail);
+    });
+    $("#liveStatusFilters").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-live-filter]");
+      if (!button) return;
+      state.liveStatusFilter = button.dataset.liveFilter || "all";
+      renderDashboard();
+    });
+    $("#liveTable").addEventListener("click", (event) => {
+      const mapButton = event.target.closest("[data-map-event]");
+      if (mapButton) return openAttendanceMap(mapButton.dataset.mapEvent);
+      const observationButton = event.target.closest("[data-observation-shift]");
+      if (observationButton) return openShiftObservations(observationButton.dataset.observationShift);
+      const validationButton = event.target.closest("[data-extra-validation]");
+      if (validationButton) return updateExtraValidation(validationButton.dataset.extraShift, validationButton.dataset.extraValidation).catch(error => toast(error.message || "No se pudo validar el registro."));
+      const markDayOffButton = event.target.closest("[data-mark-dayoff]");
+      if (markDayOffButton) return markShiftAsDayOff(markDayOffButton.dataset.markDayoff);
+      const clearDayOffButton = event.target.closest("[data-clear-dayoff]");
+      if (clearDayOffButton) return clearShiftDayOff(clearDayOffButton.dataset.clearDayoff);
+      const quickAbsenceButton = event.target.closest("[data-quick-absence]");
+      if (quickAbsenceButton) return openQuickAbsenceModal(quickAbsenceButton.dataset.quickAbsence);
+      const overtimeButton = event.target.closest("[data-overtime-authorization]");
+      if (overtimeButton) return openOvertimeAuthorizationModal(overtimeButton.dataset.overtimeAuthorization);
+      const manualButton = event.target.closest("[data-manual-attendance]");
+      if (manualButton) return openManualAttendanceModal(manualButton.dataset.manualShift, manualButton.dataset.manualAttendance);
+    });
+    $("#quickDetailBody").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-map-event]");
+      if (button) openAttendanceMap(button.dataset.mapEvent);
+    });
+    $$('[data-close-modal]').forEach(button => button.addEventListener("click", () => closeModal(button.dataset.closeModal)));
+    $$(".modal-backdrop").forEach(modal => modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeModal(modal.id);
+    }));
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      if (!$("#manualAttendanceModal").classList.contains("hidden")) closeModal("manualAttendanceModal");
+      else if (!$("#quickAbsenceModal").classList.contains("hidden")) closeModal("quickAbsenceModal");
+      else if (!$("#operatorOvertimeRequestModal").classList.contains("hidden")) closeModal("operatorOvertimeRequestModal");
+      else if (!$("#overtimeAuthorizationModal").classList.contains("hidden")) closeModal("overtimeAuthorizationModal");
+      else if (!$("#observationModal").classList.contains("hidden")) closeModal("observationModal");
+      else if (!$("#serviceLocationModal").classList.contains("hidden")) closeModal("serviceLocationModal");
+      else if (!$("#locationModal").classList.contains("hidden")) closeModal("locationModal");
+      else if (!$("#quickDetailModal").classList.contains("hidden")) closeModal("quickDetailModal");
+    });
+    $("#manualAttendanceForm")?.addEventListener("submit", saveManualAttendance);
+    $("#quickAbsenceForm")?.addEventListener("submit", saveQuickAbsence);
+    $("#operatorOvertimeRequestForm")?.addEventListener("submit", saveOperatorOvertimeRequest);
+    $("#overtimeAuthorizationForm")?.addEventListener("submit", saveOvertimeAuthorization);
+    $("#rejectOvertimeRequestBtn")?.addEventListener("click", rejectOvertimeRequest);
+    $("#revokeOvertimeAuthorizationBtn")?.addEventListener("click", revokeOvertimeAuthorization);
+    $("#siteForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        await store.upsertSite(sitePayloadFromForm());
+        resetSiteForm();
+        toast("Servicio guardado.");
+        await renderSupervisorView();
+      } catch (error) {
+        toast(error.message || "No se pudo guardar el servicio.");
+      }
+    });
     $("#cancelSiteEditBtn").addEventListener("click", resetSiteForm);
+    $("#selectAllSitesBtn").addEventListener("click", () => {
+      state.bulkSelectedSiteIds = new Set(state.sites.map(site => site.id));
+      renderSites();
+    });
+    $("#clearSelectedSitesBtn").addEventListener("click", () => {
+      state.bulkSelectedSiteIds.clear();
+      renderSites();
+    });
+    $("#bulkSiteScope").addEventListener("change", updateBulkSelectionSummaries);
+    $("#applyBulkSitesBtn").addEventListener("click", () => applyBulkSiteRadius().catch(error => toast(error.message || "No se pudo actualizar el radio GPS.")));
+
+    $("#specialAssignmentForm")?.addEventListener("submit", (event) => saveSpecialAssignment(event).catch(error => toast(error.message || "No se pudo guardar la asignación especial.")));
+    $("#cancelSpecialAssignmentEditBtn")?.addEventListener("click", resetSpecialAssignmentForm);
+    $("#extraAssignmentForm")?.addEventListener("submit", (event) => saveExtraAssignment(event).catch(error => toast(error.message || "No se pudo crear la tarea extraordinaria.")));
+
+    $("#leaveForm")?.addEventListener("submit", (event) => saveLeave(event).catch(error => toast(error.message || "No se pudo guardar la novedad.")));
+    $("#planVacationBtn")?.addEventListener("click", prepareVacationPlanning);
+    $("#cancelLeaveEditBtn")?.addEventListener("click", resetLeaveForm);
+    $("#leaveStatusFilter")?.addEventListener("change", renderLeaves);
 
     $("#assignmentForm").addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -1350,45 +7800,307 @@
     $("#presetAllDaysBtn").addEventListener("click", applyAllDaysPreset);
     $("#copyFirstScheduleBtn").addEventListener("click", copyFirstScheduleToActiveDays);
     $("#clearScheduleBtn").addEventListener("click", clearAssignmentSchedule);
+    $("#selectAllAssignmentsBtn").addEventListener("click", () => {
+      state.bulkSelectedAssignmentIds = new Set(state.assignments.map(assignment => assignment.id));
+      renderAssignments();
+    });
+    $("#clearSelectedAssignmentsBtn").addEventListener("click", () => {
+      state.bulkSelectedAssignmentIds.clear();
+      renderAssignments();
+    });
+    $("#bulkAssignmentScope").addEventListener("change", updateBulkSelectionSummaries);
+    $("#applyBulkAssignmentsBtn").addEventListener("click", () => applyBulkAssignmentSettings().catch(error => toast(error.message || "No se pudieron actualizar las tolerancias.")));
+
+    $("#assignmentAuditFile")?.addEventListener("change", (event) => {
+      const file = event.target.files?.[0];
+      state.assignmentAuditFileName = file?.name || "";
+      state.assignmentAuditParsed = null;
+      state.assignmentAuditAnalysis = null;
+      state.assignmentAuditSelectedKeys.clear();
+      if ($("#assignmentAuditFileInfo")) $("#assignmentAuditFileInfo").textContent = file ? `${file.name} listo para analizar.` : "Todavía no cargaste un archivo.";
+      renderAssignmentAudit();
+    });
+    $("#assignmentAuditEffectiveDate")?.addEventListener("change", () => {
+      if (state.assignmentAuditParsed) analyzeParsedAssignmentAudit();
+    });
+    $("#analyzeAssignmentsExcelBtn")?.addEventListener("click", () => analyzeAssignmentAuditFile().catch(error => toast(error.message || "No se pudo analizar el Excel.")));
+    $("#clearAssignmentsExcelBtn")?.addEventListener("click", clearAssignmentAudit);
+    $("#assignmentAuditFilters")?.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-audit-filter]");
+      if (!button) return;
+      state.assignmentAuditFilter = button.dataset.auditFilter || "alerts";
+      renderAssignmentAudit();
+    });
+    $("#selectAuditAlertsBtn")?.addEventListener("click", () => {
+      state.assignmentAuditSelectedKeys = new Set(auditSyncableAlertKeys());
+      renderAssignmentAudit();
+    });
+    $("#clearAuditSelectionBtn")?.addEventListener("click", () => {
+      state.assignmentAuditSelectedKeys.clear();
+      renderAssignmentAudit();
+    });
+    $("#applySelectedAuditBtn")?.addEventListener("click", () => applyAssignmentAuditKeys([...state.assignmentAuditSelectedKeys]).catch(error => toast(error.message || "No se pudieron sincronizar las diferencias seleccionadas.")));
+    $("#applyAllAuditBtn")?.addEventListener("click", () => {
+      const keys = auditSyncableAlertKeys();
+      const blocked = state.assignmentAuditAnalysis?.stats?.blocked || 0;
+      if (!keys.length) return toast(blocked ? "No hay diferencias corregibles automáticamente hasta resolver los bloqueos." : "No hay diferencias para corregir.");
+      applyAssignmentAuditKeys(keys).catch(error => toast(error.message || "No se pudieron sincronizar todas las diferencias."));
+    });
 
     $("#userForm").addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
-        await store.upsertProfile(userPayloadFromForm());
+        const isEditing = Boolean($("#userId").value);
+        const payload = userAccountPayloadFromForm();
+        const flexibleAttendance = Boolean(payload.flexible_attendance);
+        const flexibleSiteIds = Array.isArray(payload.flexible_site_ids) ? payload.flexible_site_ids.filter(Boolean) : [];
+        if (flexibleAttendance && !flexibleSiteIds.length) throw new Error("Seleccioná al menos un servicio para la jornada flexible.");
+        if (isEditing) {
+          const editingId = $("#userId").value;
+          const currentFlexibleModes = flexibleModesForOperatorDate(editingId, todayISO());
+          const currentFlexibleSiteIds = currentFlexibleModes.map(mode => mode.site_id).filter(Boolean).sort();
+          const nextFlexibleSiteIds = [...flexibleSiteIds].sort();
+          const flexGroups = flexibleAttendanceGroupsForOperator(editingId);
+          const hasOpenFlexibleShift = [...flexGroups.values()].some(events => latestEventFromList(events, "present") && !latestEventFromList(events, "checkout"));
+          const changesFlexibleMode = Boolean(currentFlexibleModes.length) !== flexibleAttendance || (flexibleAttendance && (currentFlexibleSiteIds.length !== nextFlexibleSiteIds.length || currentFlexibleSiteIds.some((siteId, index) => siteId !== nextFlexibleSiteIds[index])));
+          if (hasOpenFlexibleShift && changesFlexibleMode) throw new Error("Este operario tiene un tramo de jornada flexible abierto. Registrá primero su salida antes de cambiar o desactivar esta modalidad.");
+        }
+        const accountPayload = { ...payload };
+        delete accountPayload.flexible_attendance;
+        delete accountPayload.flexible_site_ids;
+        let savedProfile;
+        if (isEditing) {
+          savedProfile = await store.updateManagedUser($("#userId").value, accountPayload);
+        } else {
+          savedProfile = await store.createManagedUser(accountPayload);
+        }
+        const profileId = isEditing ? $("#userId").value : savedProfile?.id;
+        if (profileId && String(accountPayload.role) === "operator") {
+          await store.setFlexibleAttendanceMode?.(profileId, flexibleAttendance, flexibleSiteIds, todayISO());
+        } else if (profileId) {
+          await store.setFlexibleAttendanceMode?.(profileId, false, [], todayISO());
+        }
         resetUserForm();
-        toast("Usuario guardado.");
+        toast(isEditing ? "Usuario actualizado." : "Usuario creado.", "success");
         await renderSupervisorView();
       } catch (error) {
         toast(error.message || "No se pudo guardar el usuario.");
       }
     });
+    $("#userRole").addEventListener("change", syncUserFormFields);
+    $("#userFlexibleAttendance")?.addEventListener("change", syncUserFormFields);
     $("#cancelUserEditBtn").addEventListener("click", resetUserForm);
-    $("#exportCsvBtn").addEventListener("click", exportCsv);
+    $("#errorLogDate")?.addEventListener("change", () => { state.errorLogDate = $("#errorLogDate").value || todayISO(); state.errorLogsLoaded = false; });
+    $("#errorLogStatus")?.addEventListener("change", () => { state.errorLogStatus = $("#errorLogStatus").value || "all"; loadErrorLogs().catch(error => toast(error.message || "No se pudieron cargar los errores.", "error")); });
+    $("#refreshErrorLogsBtn")?.addEventListener("click", () => loadErrorLogs().catch(error => toast(error.message || "No se pudieron cargar los errores.", "error")));
+    $("#errorLogsTodayBtn")?.addEventListener("click", () => {
+      $("#errorLogDate").value = todayISO();
+      state.errorLogDate = todayISO();
+      state.errorLogsLoaded = false;
+      loadErrorLogs().catch(error => toast(error.message || "No se pudieron cargar los errores.", "error"));
+    });
+    $("#errorLogsTable")?.addEventListener("click", (event) => {
+      const reviewButton = event.target.closest("[data-review-error]");
+      if (reviewButton) return reviewErrorLog(reviewButton.dataset.reviewError);
+      const reopenButton = event.target.closest("[data-reopen-error]");
+      if (reopenButton) return reopenErrorLog(reopenButton.dataset.reopenError);
+    });
 
-    const firstDay = new Date();
-    firstDay.setDate(1);
-    $("#fichajeFrom").value = firstDay.toISOString().slice(0, 10);
+    $("#recordsPeriod").addEventListener("change", () => {
+      syncPeriodControls("records", false);
+      state.recordsLoaded = false;
+      if (state.activeTab === "records") loadRecordsPeriod().catch(error => toast(error.message || "No se pudieron cargar los registros."));
+    });
+    $("#applyRecordsBtn").addEventListener("click", () => loadRecordsPeriod().catch(error => toast(error.message || "No se pudieron cargar los registros.")));
+    $("#exportCsvBtn").addEventListener("click", () => exportCsv().catch(error => toast(error.message || "No se pudo exportar el CSV.")));
+    $("#exportRecordsExcelBtn").addEventListener("click", () => exportRecordsExcel().catch(error => toast(error.message || "No se pudo exportar el Excel.")));
+    $("#selectAllRecordsBtn")?.addEventListener("click", () => {
+      filteredRecordsForCurrentView().forEach(event => state.bulkSelectedRecordIds.add(event.id));
+      renderRecords();
+    });
+    $("#clearSelectedRecordsBtn")?.addEventListener("click", () => {
+      state.bulkSelectedRecordIds.clear();
+      renderRecords();
+    });
+    $("#deleteSelectedRecordsBtn")?.addEventListener("click", () => deleteAttendanceRecords([...state.bulkSelectedRecordIds]));
+    $("#recordsTable")?.addEventListener("change", (event) => {
+      const input = event.target.closest("[data-select-record]");
+      if (!input) return;
+      if (input.checked) state.bulkSelectedRecordIds.add(input.dataset.selectRecord);
+      else state.bulkSelectedRecordIds.delete(input.dataset.selectRecord);
+      updateRecordsSelectionSummary();
+    });
+    $("#recordsTable")?.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-delete-record]");
+      if (button) deleteAttendanceRecords([button.dataset.deleteRecord]);
+    });
+
+    $("#fichajeFrom").value = monthStartISO(todayISO());
     $("#fichajeTo").value = todayISO();
-    $("#applyFichajeBtn").addEventListener("click", renderFichaje);
-    $("#exportFichajeBtn").addEventListener("click", exportFichajeExcel);
+    $("#applyFichajeBtn").addEventListener("click", () => loadFichajePeriod().catch(error => toast(error.message || "No se pudo cargar el fichaje.")));
+    $("#exportFichajeBtn").addEventListener("click", () => exportFichajeExcel().catch(error => toast(error.message || "No se pudo exportar el fichaje.")));
   }
+
+  let deferredPwaInstallPrompt = null;
+
+  function isPwaStandalone() {
+    return window.matchMedia?.("(display-mode: standalone)")?.matches === true
+      || window.navigator.standalone === true;
+  }
+
+  function isIosDevice() {
+    return /iphone|ipad|ipod/i.test(window.navigator.userAgent || "");
+  }
+
+  function isChromiumBrowser() {
+    const ua = window.navigator.userAgent || "";
+    return /Chrome|Chromium|CriOS|Edg/i.test(ua) && !/Firefox|FxiOS/i.test(ua);
+  }
+
+  function syncPwaInstallUi() {
+    const button = $("#installPwaBtn");
+    const badge = $("#pwaInstalledBadge");
+    if (!button || !badge) return;
+    const installed = isPwaStandalone();
+    badge.classList.toggle("hidden", !installed);
+    button.classList.toggle("hidden", installed);
+    button.textContent = deferredPwaInstallPrompt ? "Instalar app" : "Instalar app";
+  }
+
+  async function requestPwaInstall() {
+    if (isPwaStandalone()) {
+      toast("Presentismo ya está instalado como app.", "success");
+      return;
+    }
+
+    if (deferredPwaInstallPrompt) {
+      const promptEvent = deferredPwaInstallPrompt;
+      deferredPwaInstallPrompt = null;
+      await promptEvent.prompt();
+      const choice = await promptEvent.userChoice.catch(() => null);
+      if (choice?.outcome === "accepted") toast("Instalando Presentismo…", "success");
+      else syncPwaInstallUi();
+      return;
+    }
+
+    if (isIosDevice()) {
+      toast("En iPhone/iPad: Compartir → Agregar a pantalla de inicio.");
+      return;
+    }
+
+    if (isChromiumBrowser()) {
+      toast("Chrome todavía está validando la instalación. Usá la app al menos 30 segundos, tocá alguna opción y luego volvé a presionar “Instalar app”.");
+      return;
+    }
+
+    toast("Abrí el menú del navegador y elegí Instalar app / Agregar a pantalla de inicio.");
+  }
+
+  window.addEventListener("beforeinstallprompt", (event) => {
+    event.preventDefault();
+    deferredPwaInstallPrompt = event;
+    syncPwaInstallUi();
+  });
+
+  window.addEventListener("appinstalled", () => {
+    deferredPwaInstallPrompt = null;
+    syncPwaInstallUi();
+    toast("Presentismo quedó instalado como aplicación.", "success");
+  });
+
+  window.matchMedia?.("(display-mode: standalone)")?.addEventListener?.("change", syncPwaInstallUi);
 
   async function init() {
     renderConnectionMode();
     renderLoginMode();
     renderAssignmentSchedule();
     $("#dashboardDate").value = todayISO();
+    if ($("#operationalMapDate")) $("#operationalMapDate").value = todayISO();
+    state.operationalMapDate = todayISO();
     $("#assignmentValidFrom").value = todayISO();
+    if ($("#assignmentAuditEffectiveDate")) $("#assignmentAuditEffectiveDate").value = todayISO();
+    if ($("#extraAssignmentDate")) $("#extraAssignmentDate").value = todayISO();
+    if ($("#specialAssignmentDate")) $("#specialAssignmentDate").value = todayISO();
+    if ($("#leaveStartDate")) $("#leaveStartDate").value = todayISO();
+    if ($("#leaveEndDate")) $("#leaveEndDate").value = todayISO();
+    if ($("#errorLogDate")) $("#errorLogDate").value = todayISO();
+    state.errorLogDate = todayISO();
+    syncPeriodControls("live", false);
+    syncPeriodControls("records", false);
+    syncPeriodControls("analytics", false);
     bindEvents();
+    setupManagedTableUX();
+    $("#installPwaBtn")?.addEventListener("click", () => requestPwaInstall().catch(() => toast("No se pudo abrir el instalador. Probá nuevamente.")));
+    syncPwaInstallUi();
+
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" })
+        .then(registration => registration.update().catch(() => {}))
+        .catch(() => { /* la app sigue funcionando online */ });
+    }
+    window.addEventListener("error", (event) => {
+      if (state.currentProfile?.role !== "operator") return;
+      const error = event.error || new Error(event.message || "Error JavaScript no controlado");
+      reportOperatorIssue({
+        message: event.message || error.message || "Error JavaScript no controlado",
+        error,
+        action: "javascript_error",
+        category: "javascript",
+        severity: "critical",
+        extra: { filename: event.filename || null, lineno: event.lineno || null, colno: event.colno || null }
+      }).catch(() => {});
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      if (state.currentProfile?.role !== "operator") return;
+      const reason = event.reason instanceof Error ? event.reason : new Error(String(event.reason || "Promesa rechazada sin detalle"));
+      reportOperatorIssue({
+        message: reason.message || "Error interno no controlado",
+        error: reason,
+        action: "promise_rejection",
+        category: "javascript",
+        severity: "critical"
+      }).catch(() => {});
+    });
+
+    window.addEventListener("offline", () => {
+      if (state.currentProfile?.role === "operator") renderOperatorConnectivity();
+    });
+    window.addEventListener("online", async () => {
+      if (state.currentProfile?.role !== "operator") return;
+      await syncOfflineAttendance({ notify: true });
+      try { await store.flushOfflineErrorQueue?.(); } catch (_) { /* se reintentará luego */ }
+      try { await renderOperatorView(); } catch (error) { operatorException(error, "No se pudo actualizar tu jornada.", { action: "actualizar_jornada" }); }
+    });
+
+    store.onAuthStateChange((event, session) => {
+      if (event === "PASSWORD_RECOVERY") {
+        showPasswordResetView(Boolean(session?.user));
+      }
+    });
+
+    if (looksLikePasswordRecoveryUrl()) {
+      showPasswordResetView(false);
+      try {
+        const session = await store.getSession();
+        if (session?.user) showPasswordResetView(true);
+      } catch (_) { /* el formulario mostrará el error si el enlace es inválido */ }
+      return;
+    }
 
     try {
       const session = await store.getCurrentSessionProfile();
+      if (passwordRecoveryActive) return;
       if (session?.user && session?.profile) {
         state.currentUser = session.user;
         state.currentProfile = session.profile;
         await afterLogin();
       }
     } catch (error) {
+      if (typeof navigator !== "undefined" && navigator.onLine === false) {
+        setView("#loginView");
+        toast("Sin conexión. Para fichar offline, este teléfono debe haber iniciado sesión y abierto la app previamente con internet.");
+        return;
+      }
       await store.signOut();
       setView("#loginView");
     }

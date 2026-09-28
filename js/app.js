@@ -1038,7 +1038,7 @@
     state.profiles = profiles;
     state.sites = sites;
     state.assignments = assignments;
-    state.flexibleModes = flexibleModes || [];
+    state.flexibleModes = flexibleModeRows || [];
     state.shifts = (shifts || []).filter(shift => !flexibleModeForOperatorDate(shift.operator_id, date));
     state.events = events;
     state.overtimeAuthorizations = overtimeAuthorizations || [];
@@ -1146,11 +1146,23 @@
     return true;
   }
 
-  function flexibleModeForOperatorDate(operatorId, dateString) {
-    if (!operatorId || !dateString) return null;
+  function flexibleModesForOperatorDate(operatorId, dateString) {
+    if (!operatorId || !dateString) return [];
     return (state.flexibleModes || [])
       .filter(mode => mode.operator_id === operatorId && flexibleModeAppliesOnDate(mode, dateString))
-      .sort((a, b) => String(b.valid_from || "").localeCompare(String(a.valid_from || "")))[0] || null;
+      .sort((a, b) => {
+        const validCompare = String(b.valid_from || "").localeCompare(String(a.valid_from || ""));
+        if (validCompare !== 0) return validCompare;
+        return String(byId(state.sites, a.site_id)?.name || "").localeCompare(String(byId(state.sites, b.site_id)?.name || ""));
+      });
+  }
+
+  function flexibleModeForOperatorDate(operatorId, dateString) {
+    return flexibleModesForOperatorDate(operatorId, dateString)[0] || null;
+  }
+
+  function flexibleSiteNamesForModes(modes) {
+    return (modes || []).map(mode => byId(state.sites, mode.site_id)?.name).filter(Boolean);
   }
 
   function isFlexibleShiftId(shiftId) {
@@ -1394,7 +1406,7 @@
       operatorExitProtectionTimer = null;
     }
     const today = todayISO();
-    const [sites, events, assignments, overtimeAuthorizations, overtimeRequests, leaveRecords, flexibleModes] = await Promise.all([
+    const [sites, events, assignments, overtimeAuthorizations, overtimeRequests, leaveRecords, flexibleModeRows] = await Promise.all([
       store.listSites(),
       store.listEvents(),
       store.listAssignments(),
@@ -1414,8 +1426,9 @@
     $("#operatorTitle").textContent = `Hola, ${state.currentProfile.full_name}`;
 
     const leaveToday = leaveForOperatorDate(state.currentProfile.id, today);
-    const flexibleMode = flexibleModeForOperatorDate(state.currentProfile.id, today);
-    const activeToday = flexibleMode ? [] : state.assignments.filter(a => a.operator_id === state.currentProfile.id && assignmentAppliesOnDate(a, today));
+    const flexibleModes = flexibleModesForOperatorDate(state.currentProfile.id, today);
+    const hasFlexibleMode = flexibleModes.length > 0;
+    const activeToday = hasFlexibleMode ? [] : state.assignments.filter(a => a.operator_id === state.currentProfile.id && assignmentAppliesOnDate(a, today));
     const suppressors = activeToday.filter(a => (a.assignment_type || "fixed") !== "fixed" && a.suppress_regular_assignments === true);
     const todaysAssignments = leaveToday ? [] : activeToday
       .filter(a => {
@@ -1463,8 +1476,8 @@
 
     if (leaveToday) {
       cards.push(renderOperatorLeaveCard(leaveToday));
-    } else if (flexibleMode) {
-      cards.push(renderFlexibleAttendanceCard(flexibleMode));
+    } else if (hasFlexibleMode) {
+      cards.push(renderFlexibleAttendanceCard(flexibleModes));
     } else if (!todaysAssignments.length && !overnightCarryovers.length && !extraGroups.size) {
       cards.push(`
         <article class="operator-card operator-empty-card">
@@ -1501,7 +1514,7 @@
     });
 
     const hasOpenExtra = Array.from(extraGroups.values()).some(group => group.some(e => e.event_type === "present") && !group.some(e => e.event_type === "checkout"));
-    if (!leaveToday && !flexibleMode) cards.push(renderExtraDutyStartCard(hasOpenExtra));
+    if (!leaveToday && !hasFlexibleMode) cards.push(renderExtraDutyStartCard(hasOpenExtra));
     container.innerHTML = cards.join("");
 
     overnightCarryovers.forEach(assignment => {
@@ -1520,7 +1533,7 @@
       container.querySelector(`[data-gps-checkout="${shiftId}"]`)?.addEventListener("click", () => handleGpsCheckout(shiftId));
     });
     container.querySelector("[data-extra-checkin]")?.addEventListener("click", handleExtraDutyCheckin);
-    container.querySelector("[data-flexible-checkin]")?.addEventListener("click", () => handleFlexibleCheckin(flexibleMode));
+    container.querySelector("[data-flexible-checkin]")?.addEventListener("click", () => handleFlexibleCheckin(flexibleModes));
     container.querySelectorAll("[data-flexible-checkout]").forEach(btn => btn.addEventListener("click", () => handleGpsCheckout(btn.dataset.flexibleCheckout)));
     await renderOperatorConnectivity();
     scheduleOperatorExitProtectionRefresh(container);
@@ -1535,8 +1548,9 @@
     return groups;
   }
 
-  function renderFlexibleAttendanceCard(mode) {
-    const site = byId(state.sites, mode?.site_id);
+  function renderFlexibleAttendanceCard(modes) {
+    const modeList = Array.isArray(modes) ? modes : (modes ? [modes] : []);
+    const sites = modeList.map(mode => ({ mode, site: byId(state.sites, mode?.site_id) })).filter(item => item.mode);
     const today = todayISO();
     const groups = flexibleAttendanceGroupsForOperator(state.currentProfile.id);
     const groupRows = [...groups.entries()].map(([shiftId, events]) => {
@@ -1550,29 +1564,50 @@
     const todays = groupRows
       .filter(row => row.shiftDate === today)
       .sort((a, b) => new Date(eventTimestamp(a.entry) || 0) - new Date(eventTimestamp(b.entry) || 0));
-    const hasSite = Boolean(site);
+    const openSite = open?.entry?.site_id ? byId(state.sites, open.entry.site_id) : null;
+    const defaultSite = sites[0]?.site || null;
+    const currentSite = openSite || defaultSite;
+    const hasConfiguredSites = sites.some(item => item.site);
     const entryInfo = open?.entry ? `${formatDateTime(eventTimestamp(open.entry))} · ${gpsSummary(open.entry)}` : "Sin turno abierto";
     const currentStatus = open ? "En servicio" : "Disponible para fichar";
     const currentClass = open ? "status-ok" : "status-pending";
-    const history = todays.length ? todays.map((row, index) => `
+    const siteOptions = sites.length > 1
+      ? `<label><span>Servicio a cubrir en este tramo</span><select id="flexibleSiteSelect">${sites.map(item => `<option value="${item.site?.id || item.mode.site_id}">${escapeHtml(item.site?.name || "Servicio sin configurar")}</option>`).join("")}</select></label>`
+      : ``;
+    const currentSiteMeta = openSite
+      ? `${escapeHtml(openSite.name)}${openSite.address ? ` · ${escapeHtml(openSite.address)}` : ""}`
+      : currentSite
+        ? `${escapeHtml(currentSite.name)}${currentSite.address ? ` · ${escapeHtml(currentSite.address)}` : ""}`
+        : "Sin servicio configurado";
+    const history = todays.length ? todays.map((row, index) => {
+      const rowSite = byId(state.sites, row.entry?.site_id || row.exit?.site_id);
+      return `
       <div class="flexible-cycle-row">
         <strong>Tramo ${index + 1}</strong>
+        <span>${escapeHtml(rowSite?.name || "Servicio flexible")}</span>
         <span>Entrada ${escapeHtml(formatClock(eventTimestamp(row.entry)))}</span>
         <span>${row.exit ? `Salida ${escapeHtml(formatClock(eventTimestamp(row.exit)))}` : "En curso"}</span>
-      </div>`).join("") : `<p class="muted small no-margin">Todavía no hay tramos registrados hoy.</p>`;
+      </div>`;
+    }).join("") : `<p class="muted small no-margin">Todavía no hay tramos registrados hoy.</p>`;
     const action = open ? `
       <div class="checkin-box exit-box">
         <div class="checkpoint-title-row"><strong>Registrar salida real</strong><span class="status-pill status-pending">Pendiente</span></div>
         <label class="checkbox-row"><input type="checkbox" id="confirm-out-${escapeHtml(open.shiftId)}" /><span><strong>Confirmo que estoy saliendo del servicio</strong><br><span class="muted small">Se registra la hora y la ubicación GPS reales. Luego podés volver a fichar una nueva entrada si retomás la jornada.</span></span></label>
+        <div class="meta-item compact"><strong>Servicio actual</strong><span class="meta-subline">${currentSiteMeta}</span></div>
         <label><span>Observación opcional</span><textarea id="notes-out-${escapeHtml(open.shiftId)}" placeholder="Ej. Finalizo este tramo / retomo más tarde..."></textarea></label>
         <button class="secondary-btn big-action" data-flexible-checkout="${escapeHtml(open.shiftId)}" type="button">Registrar salida con GPS</button>
       </div>` : `
       <div class="checkin-box">
         <div class="checkpoint-title-row"><strong>Registrar entrada real</strong><span class="status-pill status-pending">Sin horario fijo</span></div>
-        <label class="checkbox-row"><input type="checkbox" id="confirm-flex-in" ${hasSite ? "" : "disabled"} /><span><strong>Confirmo que estoy en el servicio</strong><br><span class="muted small">No se aplica horario programado, tardanza ni ausencia automática. Se guarda la hora y ubicación GPS reales.</span></span></label>
-        <label><span>Observación opcional</span><textarea id="notes-flex-in" placeholder="Ej. Inicio primer tramo / regreso al servicio..." ${hasSite ? "" : "disabled"}></textarea></label>
-        <button class="primary-btn big-action" data-flexible-checkin type="button" ${hasSite ? "" : "disabled"}>Registrar entrada con GPS</button>
+        ${siteOptions}
+        <label class="checkbox-row"><input type="checkbox" id="confirm-flex-in" ${hasConfiguredSites ? "" : "disabled"} /><span><strong>Confirmo que estoy en el servicio</strong><br><span class="muted small">No se aplica horario programado, tardanza ni ausencia automática. Se guarda la hora y ubicación GPS reales.</span></span></label>
+        <label><span>Observación opcional</span><textarea id="notes-flex-in" placeholder="Ej. Inicio primer tramo / regreso al servicio..." ${hasConfiguredSites ? "" : "disabled"}></textarea></label>
+        <button class="primary-btn big-action" data-flexible-checkin type="button" ${hasConfiguredSites ? "" : "disabled"}>Registrar entrada con GPS</button>
       </div>`;
+
+    const servicesSummary = sites.length
+      ? sites.map(item => escapeHtml(item.site?.name || "Servicio sin configurar")).join(" · ")
+      : "Sin servicio flexible configurado";
 
     return `
       <article class="operator-card main-checkin flexible-attendance-card">
@@ -1580,8 +1615,8 @@
           <div>
             <p class="eyebrow">Modalidad excepcional</p>
             <div class="extra-duty-meta"><span class="extra-duty-badge flexible">Jornada flexible</span></div>
-            <h3 class="service-title">${escapeHtml(site?.name || "Servicio flexible no configurado")}</h3>
-            <p class="muted">${escapeHtml(site?.address || "Pedile al supervisor que configure el servicio asignado a tu jornada flexible.")}</p>
+            <h3 class="service-title">${escapeHtml(openSite?.name || defaultSite?.name || "Servicios flexibles")}</h3>
+            <p class="muted">${escapeHtml(openSite?.address || defaultSite?.address || "Pedile al supervisor que configure al menos un servicio para tu jornada flexible.")}</p>
           </div>
           <span class="status-pill ${currentClass}">${currentStatus}</span>
         </div>
@@ -1591,6 +1626,7 @@
         </div>
         <div class="meta-grid">
           <div class="meta-item"><strong>Estado actual</strong><span class="meta-subline">${escapeHtml(entryInfo)}</span></div>
+          <div class="meta-item"><strong>Servicios habilitados</strong><span class="meta-subline">${servicesSummary}</span></div>
           <div class="meta-item"><strong>Control</strong><span class="meta-subline">GPS y hora real · sin control de tardanza</span></div>
         </div>
         ${action}
@@ -1598,15 +1634,19 @@
       </article>`;
   }
 
-  async function handleFlexibleCheckin(mode) {
-    if (!mode?.site_id) return operatorProblem("No hay un servicio configurado para tu jornada flexible.", { action: "entrada_flexible", category: "configuration", severity: "warning" });
+  async function handleFlexibleCheckin(modes) {
+    const modeList = Array.isArray(modes) ? modes : (modes ? [modes] : []);
+    const select = $("#flexibleSiteSelect");
+    const selectedSiteId = select?.value || modeList[0]?.site_id || null;
+    const selectedMode = modeList.find(mode => mode.site_id === selectedSiteId) || modeList[0] || null;
+    if (!selectedMode?.site_id) return operatorProblem("No hay un servicio configurado para tu jornada flexible.", { action: "entrada_flexible", category: "configuration", severity: "warning" });
     const confirm = $("#confirm-flex-in");
-    if (!confirm?.checked) return operatorProblem("Confirmá que estás en el servicio antes de registrar la entrada.", { action: "entrada_flexible", category: "usage", severity: "warning", siteId: mode?.site_id });
+    if (!confirm?.checked) return operatorProblem("Confirmá que estás en el servicio antes de registrar la entrada.", { action: "entrada_flexible", category: "usage", severity: "warning", siteId: selectedMode?.site_id });
     const groups = flexibleAttendanceGroupsForOperator(state.currentProfile.id);
     const hasOpen = [...groups.values()].some(events => latestEventFromList(events, "present") && !latestEventFromList(events, "checkout"));
-    if (hasOpen) return operatorProblem("Ya tenés una entrada abierta. Registrá la salida antes de iniciar otro tramo.", { action: "entrada_flexible", category: "usage", severity: "warning", siteId: mode?.site_id });
+    if (hasOpen) return operatorProblem("Ya tenés una entrada abierta. Registrá la salida antes de iniciar otro tramo.", { action: "entrada_flexible", category: "usage", severity: "warning", siteId: selectedMode?.site_id });
     try {
-      const site = byId(state.sites, mode.site_id);
+      const site = byId(state.sites, selectedMode.site_id);
       if (!site) throw new Error("No se encontró el servicio configurado para tu jornada flexible.");
       toast("Solicitando GPS de alta precisión...");
       const position = await getPosition();
@@ -1628,7 +1668,7 @@
         work_type: "regular",
         entry_source: "assignment",
         validation_status: "confirmed",
-        notes: `Jornada flexible · entrada real.${notes ? ` ${notes}` : ""}${isInside ? "" : " · Entrada fuera de radio."}`,
+        notes: `Jornada flexible · entrada real en ${site.name}.${notes ? ` ${notes}` : ""}${isInside ? "" : " · Entrada fuera de radio."}`,
         lat: latitude,
         lng: longitude,
         gps_accuracy_m: accuracy,
@@ -1641,7 +1681,7 @@
       toast(isInside ? "Entrada de jornada flexible registrada." : "Entrada registrada fuera del radio del servicio.", isInside ? "success" : undefined);
       await renderOperatorView();
     } catch (error) {
-      operatorException(error, "No se pudo registrar la entrada.", { action: "entrada_flexible", siteId: mode?.site_id });
+      operatorException(error, "No se pudo registrar la entrada.", { action: "entrada_flexible", siteId: selectedMode?.site_id });
     }
   }
 
@@ -4325,9 +4365,11 @@
     if ($("#specialAssignmentSite")) $("#specialAssignmentSite").innerHTML = siteOptions;
     if ($("#leaveOperator")) $("#leaveOperator").innerHTML = operatorOptions;
     if ($("#userFlexibleSite")) {
-      const selected = $("#userFlexibleSite").value;
-      $("#userFlexibleSite").innerHTML = `<option value="">Seleccionar servicio</option>${siteOptions}`;
-      if (selected && state.sites.some(site => site.id === selected)) $("#userFlexibleSite").value = selected;
+      const selected = Array.from($("#userFlexibleSite").selectedOptions || []).map(option => option.value);
+      $("#userFlexibleSite").innerHTML = siteOptions;
+      Array.from($("#userFlexibleSite").options || []).forEach(option => {
+        option.selected = selected.includes(option.value);
+      });
     }
     if ($("#extraCoveredOperator")) $("#extraCoveredOperator").innerHTML = `<option value="">Sin especificar</option>${operatorOptions}`;
   }
@@ -5765,9 +5807,9 @@
     const list = $("#usersList");
     const searchTerm = sectionSearchTerm("users");
     const visibleUsers = searchTerm ? state.profiles.filter(user => {
-      const flexibleMode = flexibleModeForOperatorDate(user.id, todayISO());
-      const flexSite = flexibleMode ? byId(state.sites, flexibleMode.site_id) : null;
-      return valuesMatchSearch(searchTerm, user.full_name, user.username, user.phone, roleLabel(user.role), user.notes, user.pending_recovery_email, flexibleMode ? "jornada flexible" : "", flexSite?.name);
+      const flexibleModes = flexibleModesForOperatorDate(user.id, todayISO());
+      const flexSites = flexibleSiteNamesForModes(flexibleModes);
+      return valuesMatchSearch(searchTerm, user.full_name, user.username, user.phone, roleLabel(user.role), user.notes, user.pending_recovery_email, flexibleModes.length ? "jornada flexible" : "", ...flexSites);
     }) : state.profiles;
     updateSectionSearchCount("users", visibleUsers.length, state.profiles.length);
     list.innerHTML = visibleUsers.map(user => {
@@ -5778,7 +5820,7 @@
       <div class="list-item ${searchTerm ? "search-match-card" : ""}">
         <div class="list-item-title">${escapeHtml(user.full_name)}</div>
         <div class="muted small">${escapeHtml(roleLabel(user.role).replace(/^./, c => c.toUpperCase()))} · Usuario: <strong>${escapeHtml(username)}</strong></div>
-        ${flexibleModeForOperatorDate(user.id, todayISO()) ? `<div class="flexible-user-badge">Jornada flexible · ${escapeHtml(byId(state.sites, flexibleModeForOperatorDate(user.id, todayISO())?.site_id)?.name || "servicio sin configurar")}</div>` : ""}
+        ${(() => { const flexModes = flexibleModesForOperatorDate(user.id, todayISO()); const flexNames = flexibleSiteNamesForModes(flexModes); return flexModes.length ? `<div class="flexible-user-badge">Jornada flexible · ${escapeHtml(flexNames.length ? flexNames.join(" · ") : "servicio sin configurar")}</div>` : ""; })()}
         ${pendingRecoveryEmail ? `<div class="recovery-request-box"><strong>Recuperación solicitada:</strong> ${escapeHtml(pendingRecoveryEmail)}<div class="muted small">La persona informó este correo desde «Olvidaste tu contraseña».</div></div>` : ""}
         <div class="muted small">${escapeHtml(user.phone || "Sin teléfono")}</div>
         ${user.notes ? `<div class="muted small">Notas: ${escapeHtml(user.notes)}</div>` : ""}
@@ -5890,7 +5932,7 @@
       role: $("#userRole").value,
       notes: $("#userNotes").value.trim(),
       flexible_attendance: $("#userRole").value === "operator" && Boolean($("#userFlexibleAttendance")?.checked),
-      flexible_site_id: $("#userRole").value === "operator" && $("#userFlexibleAttendance")?.checked ? ($("#userFlexibleSite")?.value || null) : null
+      flexible_site_ids: $("#userRole").value === "operator" && $("#userFlexibleAttendance")?.checked ? Array.from($("#userFlexibleSite")?.selectedOptions || []).map(option => option.value).filter(Boolean) : []
     };
   }
 
@@ -5901,7 +5943,7 @@
     $("#userPassword").value = "";
     $("#userRole").value = "operator";
     if ($("#userFlexibleAttendance")) $("#userFlexibleAttendance").checked = false;
-    if ($("#userFlexibleSite")) $("#userFlexibleSite").value = "";
+    if ($("#userFlexibleSite")) Array.from($("#userFlexibleSite").options || []).forEach(option => option.selected = false);
     $("#userFormTitle").textContent = "Nuevo usuario";
     $("#cancelUserEditBtn").classList.add("hidden");
     syncUserFormFields();
@@ -5917,9 +5959,14 @@
     $("#userName").value = user.full_name || "";
     $("#userPhone").value = user.phone || "";
     $("#userNotes").value = user.notes || "";
-    const flexibleMode = flexibleModeForOperatorDate(user.id, todayISO());
-    if ($("#userFlexibleAttendance")) $("#userFlexibleAttendance").checked = Boolean(flexibleMode);
-    if ($("#userFlexibleSite")) $("#userFlexibleSite").value = flexibleMode?.site_id || "";
+    const flexibleModes = flexibleModesForOperatorDate(user.id, todayISO());
+    if ($("#userFlexibleAttendance")) $("#userFlexibleAttendance").checked = Boolean(flexibleModes.length);
+    if ($("#userFlexibleSite")) {
+      const selectedIds = new Set(flexibleModes.map(mode => mode.site_id));
+      Array.from($("#userFlexibleSite").options || []).forEach(option => {
+        option.selected = selectedIds.has(option.value);
+      });
+    }
     $("#userFormTitle").textContent = "Editar usuario";
     $("#cancelUserEditBtn").classList.remove("hidden");
     syncUserFormFields();
@@ -7806,19 +7853,21 @@
         const isEditing = Boolean($("#userId").value);
         const payload = userAccountPayloadFromForm();
         const flexibleAttendance = Boolean(payload.flexible_attendance);
-        const flexibleSiteId = payload.flexible_site_id || null;
-        if (flexibleAttendance && !flexibleSiteId) throw new Error("Seleccioná el servicio para la jornada flexible.");
+        const flexibleSiteIds = Array.isArray(payload.flexible_site_ids) ? payload.flexible_site_ids.filter(Boolean) : [];
+        if (flexibleAttendance && !flexibleSiteIds.length) throw new Error("Seleccioná al menos un servicio para la jornada flexible.");
         if (isEditing) {
           const editingId = $("#userId").value;
-          const currentFlexibleMode = flexibleModeForOperatorDate(editingId, todayISO());
+          const currentFlexibleModes = flexibleModesForOperatorDate(editingId, todayISO());
+          const currentFlexibleSiteIds = currentFlexibleModes.map(mode => mode.site_id).filter(Boolean).sort();
+          const nextFlexibleSiteIds = [...flexibleSiteIds].sort();
           const flexGroups = flexibleAttendanceGroupsForOperator(editingId);
           const hasOpenFlexibleShift = [...flexGroups.values()].some(events => latestEventFromList(events, "present") && !latestEventFromList(events, "checkout"));
-          const changesFlexibleMode = Boolean(currentFlexibleMode) !== flexibleAttendance || (flexibleAttendance && currentFlexibleMode?.site_id !== flexibleSiteId);
+          const changesFlexibleMode = Boolean(currentFlexibleModes.length) !== flexibleAttendance || (flexibleAttendance && (currentFlexibleSiteIds.length !== nextFlexibleSiteIds.length || currentFlexibleSiteIds.some((siteId, index) => siteId !== nextFlexibleSiteIds[index])));
           if (hasOpenFlexibleShift && changesFlexibleMode) throw new Error("Este operario tiene un tramo de jornada flexible abierto. Registrá primero su salida antes de cambiar o desactivar esta modalidad.");
         }
         const accountPayload = { ...payload };
         delete accountPayload.flexible_attendance;
-        delete accountPayload.flexible_site_id;
+        delete accountPayload.flexible_site_ids;
         let savedProfile;
         if (isEditing) {
           savedProfile = await store.updateManagedUser($("#userId").value, accountPayload);
@@ -7827,9 +7876,9 @@
         }
         const profileId = isEditing ? $("#userId").value : savedProfile?.id;
         if (profileId && String(accountPayload.role) === "operator") {
-          await store.setFlexibleAttendanceMode?.(profileId, flexibleAttendance, flexibleSiteId, todayISO());
+          await store.setFlexibleAttendanceMode?.(profileId, flexibleAttendance, flexibleSiteIds, todayISO());
         } else if (profileId) {
-          await store.setFlexibleAttendanceMode?.(profileId, false, null, todayISO());
+          await store.setFlexibleAttendanceMode?.(profileId, false, [], todayISO());
         }
         resetUserForm();
         toast(isEditing ? "Usuario actualizado." : "Usuario creado.", "success");
