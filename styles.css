@@ -2053,3 +2053,24 @@ body.modal-open { overflow: hidden; }
 .toast.error { background: #b42318; }
 .toast.success { background: #067647; }
 .tiny { font-size: 10px; }
+
+/* Análisis · selector de operarios incluidos */
+.analytics-operator-filter{margin-top:.85rem;border:1px solid rgba(15,23,42,.10);border-radius:16px;background:rgba(248,250,252,.9);overflow:hidden}
+.analytics-operator-filter>summary{display:flex;justify-content:space-between;align-items:center;gap:1rem;padding:.9rem 1rem;cursor:pointer;list-style:none}
+.analytics-operator-filter>summary::-webkit-details-marker{display:none}
+.analytics-operator-filter>summary span{display:grid;gap:.2rem}
+.analytics-operator-filter>summary small{font-weight:500;color:#64748b}
+.analytics-operator-filter-body{padding:0 1rem 1rem;display:grid;gap:.8rem}
+.analytics-operator-filter-toolbar{display:flex;gap:.75rem;justify-content:space-between;align-items:flex-end;flex-wrap:wrap}
+.analytics-operator-filter-toolbar label{min-width:min(320px,100%);flex:1 1 280px}
+.analytics-operator-filter-actions{display:flex;gap:.5rem;flex-wrap:wrap}
+.analytics-operator-checklist{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:.55rem;max-height:320px;overflow:auto;padding:.2rem}
+.analytics-operator-check{display:flex;align-items:center;gap:.65rem;border:1px solid rgba(15,23,42,.08);border-radius:12px;padding:.65rem .75rem;background:#fff;cursor:pointer}
+.analytics-operator-check:hover{border-color:rgba(15,23,42,.18)}
+.analytics-operator-check input{width:18px;height:18px;flex:0 0 auto}
+.analytics-operator-check-copy{display:grid;gap:.1rem;min-width:0}
+.analytics-operator-check-copy strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.analytics-operator-check-copy small{color:#64748b}
+.analytics-operator-check.is-excluded{opacity:.62;background:#f8fafc}
+.analytics-operator-status-inactive{font-weight:800;color:#b45309}
+@media(max-width:700px){.analytics-operator-filter>summary{align-items:flex-start;flex-direction:column}.analytics-operator-filter-actions{width:100%}.analytics-operator-filter-actions button{flex:1 1 auto}.analytics-operator-checklist{grid-template-columns:1fr;max-height:360px}}

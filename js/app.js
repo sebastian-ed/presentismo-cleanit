@@ -3,6 +3,17 @@
   const INITIAL_AUTH_URL = window.location.href;
   const store = window.StoreFactory.create();
 
+  const ANALYTICS_EXCLUDED_OPERATORS_STORAGE_KEY = "cleanit_analytics_excluded_operators_v1";
+
+  function loadAnalyticsExcludedOperatorsPreference() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(ANALYTICS_EXCLUDED_OPERATORS_STORAGE_KEY) || "[]");
+      return new Set(Array.isArray(parsed) ? parsed.filter(Boolean) : []);
+    } catch (_) {
+      return new Set();
+    }
+  }
+
   const DAYS = [
     { id: 1, short: "Lun", long: "Lunes" },
     { id: 2, short: "Mar", long: "Martes" },
@@ -47,6 +58,8 @@
     analyticsDaily: [],
     analyticsProfiles: [],
     analyticsPeriodResolved: null,
+    analyticsExcludedOperators: loadAnalyticsExcludedOperatorsPreference(),
+    analyticsOperatorFilterSearch: "",
     activeTab: "live",
     sectionSearch: { live: "", opsmap: "", analytics: "", fichaje: "", coverage: "", assignments: "", leaves: "", sites: "", users: "", errors: "", records: "" },
     operationalMapLoaded: false,
@@ -519,7 +532,7 @@
     toast._timer = window.setTimeout(() => el.classList.remove("show"), 3600);
   }
 
-  const APP_BUILD_VERSION = "20260911-error-monitor1";
+  const APP_BUILD_VERSION = "20261006-analysis-operator-filter1";
 
   function errorValue(value) {
     if (value === undefined || value === null || value === "") return null;
@@ -6741,15 +6754,115 @@
       </div>`).join("") : `<p class="muted small">Sin datos.</p>`;
   }
 
+  function analyticsOperatorKeyFromProfile(profile) {
+    if (!profile) return "";
+    if (profile.id) return `id:${profile.id}`;
+    const name = String(profile.full_name || "").trim().toLowerCase();
+    return name ? `name:${name}` : "";
+  }
+
+  function analyticsOperatorKeyFromRow(row) {
+    if (!row) return "";
+    if (row["Operator ID"]) return `id:${row["Operator ID"]}`;
+    const name = String(row.Operario || "").trim().toLowerCase();
+    return name ? `name:${name}` : "";
+  }
+
+  function persistAnalyticsExcludedOperators() {
+    try {
+      localStorage.setItem(ANALYTICS_EXCLUDED_OPERATORS_STORAGE_KEY, JSON.stringify([...state.analyticsExcludedOperators]));
+    } catch (_) {}
+  }
+
+  function analyticsOperatorOptions() {
+    const map = new Map();
+    (state.analyticsProfiles || []).filter(profile => profile.role === "operator").forEach(profile => {
+      const key = analyticsOperatorKeyFromProfile(profile);
+      if (!key) return;
+      map.set(key, {
+        key,
+        operator_id: profile.id || "",
+        name: profile.full_name || "Sin identificar",
+        active: profile.is_active !== false
+      });
+    });
+    (state.analyticsAllRows || []).forEach(row => {
+      const key = analyticsOperatorKeyFromRow(row);
+      if (!key) return;
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          operator_id: row["Operator ID"] || "",
+          name: row.Operario || "Sin identificar",
+          active: null
+        });
+      } else if (row.Operario && map.get(key).name === "Sin identificar") {
+        map.get(key).name = row.Operario;
+      }
+    });
+    return [...map.values()].sort((a, b) => String(a.name).localeCompare(String(b.name), "es"));
+  }
+
+  function analyticsOperatorIsExcludedByKey(key) {
+    return Boolean(key) && state.analyticsExcludedOperators.has(key);
+  }
+
+  function renderAnalyticsOperatorFilter() {
+    const container = $("#analyticsOperatorChecklist");
+    const summary = $("#analyticsOperatorFilterSummary");
+    if (!container || !summary) return;
+    const options = analyticsOperatorOptions();
+    const query = String(state.analyticsOperatorFilterSearch || "").trim().toLowerCase();
+    const visible = query ? options.filter(item => String(item.name || "").toLowerCase().includes(query)) : options;
+    const excludedCount = options.filter(item => analyticsOperatorIsExcludedByKey(item.key)).length;
+    const includedCount = Math.max(0, options.length - excludedCount);
+    summary.textContent = options.length ? `${includedCount} de ${options.length} incluidos${excludedCount ? ` · ${excludedCount} excluidos` : ""}` : "Sin operarios";
+    container.innerHTML = visible.length ? visible.map(item => {
+      const excluded = analyticsOperatorIsExcludedByKey(item.key);
+      const status = item.active === false ? `<small class="analytics-operator-status-inactive">Inactivo</small>` : item.active === true ? `<small>Activo</small>` : `<small>Histórico</small>`;
+      return `<label class="analytics-operator-check ${excluded ? "is-excluded" : ""}">
+        <input type="checkbox" data-analytics-operator-key="${escapeHtml(item.key)}" ${excluded ? "" : "checked"} />
+        <span class="analytics-operator-check-copy"><strong>${escapeHtml(item.name)}</strong>${status}</span>
+      </label>`;
+    }).join("") : `<p class="muted small no-margin">No hay operarios que coincidan con la búsqueda.</p>`;
+  }
+
+  function updateAnalyticsOperatorInclusion(key, included) {
+    if (!key) return;
+    if (included) state.analyticsExcludedOperators.delete(key);
+    else state.analyticsExcludedOperators.add(key);
+    persistAnalyticsExcludedOperators();
+    renderAnalyticsOperatorFilter();
+    if (state.analyticsLoaded) renderAnalyticsFromState();
+  }
+
+  function includeAllAnalyticsOperators() {
+    analyticsOperatorOptions().forEach(item => state.analyticsExcludedOperators.delete(item.key));
+    persistAnalyticsExcludedOperators();
+    renderAnalyticsOperatorFilter();
+    if (state.analyticsLoaded) renderAnalyticsFromState();
+  }
+
+  function excludeInactiveAnalyticsOperators() {
+    analyticsOperatorOptions().forEach(item => {
+      if (item.active === false) state.analyticsExcludedOperators.add(item.key);
+    });
+    persistAnalyticsExcludedOperators();
+    renderAnalyticsOperatorFilter();
+    if (state.analyticsLoaded) renderAnalyticsFromState();
+  }
+
   function renderAnalyticsFromState() {
     const service = $("#analyticsService")?.value || "";
     const allRows = state.analyticsAllRows || [];
     const serviceRows = service ? allRows.filter(row => analyticsServiceValue(row) === service) : allRows;
+    const includedServiceRows = serviceRows.filter(row => !analyticsOperatorIsExcludedByKey(analyticsOperatorKeyFromRow(row)));
     const searchTerm = sectionSearchTerm("analytics");
-    const rows = searchTerm ? serviceRows.filter(row => objectMatchesSearch(searchTerm, row)) : serviceRows;
-    const summary = buildAnalyticsSummary(rows, state.analyticsProfiles || [], !service && !searchTerm);
+    const rows = searchTerm ? includedServiceRows.filter(row => objectMatchesSearch(searchTerm, row)) : includedServiceRows;
+    const includedProfiles = (state.analyticsProfiles || []).filter(profile => !analyticsOperatorIsExcludedByKey(analyticsOperatorKeyFromProfile(profile)));
+    const summary = buildAnalyticsSummary(rows, includedProfiles, !service && !searchTerm);
     const daily = operationalHoursByOperatorDate(rows);
-    updateSectionSearchCount("analytics", rows.length, serviceRows.length);
+    updateSectionSearchCount("analytics", rows.length, includedServiceRows.length);
     state.analyticsRows = rows;
     state.analyticsSummary = summary;
     state.analyticsDaily = daily;
@@ -6802,7 +6915,10 @@
 
     const period = state.analyticsPeriodResolved;
     const serviceLabel = service ? ($("#analyticsService")?.selectedOptions?.[0]?.textContent || "Servicio filtrado") : "Todos los servicios";
-    $("#analyticsRangeSummary").textContent = period ? `${period.from || "Inicio"} → ${period.to || todayISO()} · ${serviceLabel} · ${rows.length} coberturas analizadas` : "";
+    const operatorOptions = analyticsOperatorOptions();
+    const excludedOperators = operatorOptions.filter(item => analyticsOperatorIsExcludedByKey(item.key)).length;
+    const includedOperators = Math.max(0, operatorOptions.length - excludedOperators);
+    $("#analyticsRangeSummary").textContent = period ? `${period.from || "Inicio"} → ${period.to || todayISO()} · ${serviceLabel} · ${rows.length} coberturas analizadas · ${includedOperators} operarios incluidos${excludedOperators ? ` · ${excludedOperators} excluidos` : ""}` : "";
   }
 
   async function loadAnalyticsData() {
@@ -6816,6 +6932,7 @@
       state.analyticsPeriodResolved = built.period;
       state.analyticsLoaded = true;
       updateAnalyticsServiceOptions(built.rows);
+      renderAnalyticsOperatorFilter();
       renderAnalyticsFromState();
     });
   }
@@ -7671,6 +7788,17 @@
     $("#applyAnalyticsBtn")?.addEventListener("click", () => loadAnalyticsData().catch(error => toast(error.message || "No se pudo generar el análisis.")));
     $("#analyticsService")?.addEventListener("change", renderAnalyticsFromState);
     $("#analyticsOrder")?.addEventListener("change", renderAnalyticsFromState);
+    $("#analyticsOperatorFilterSearch")?.addEventListener("input", event => {
+      state.analyticsOperatorFilterSearch = event.target.value || "";
+      renderAnalyticsOperatorFilter();
+    });
+    $("#analyticsOperatorChecklist")?.addEventListener("change", event => {
+      const input = event.target.closest("[data-analytics-operator-key]");
+      if (!input) return;
+      updateAnalyticsOperatorInclusion(input.dataset.analyticsOperatorKey, input.checked);
+    });
+    $("#analyticsIncludeAllOperatorsBtn")?.addEventListener("click", includeAllAnalyticsOperators);
+    $("#analyticsExcludeInactiveOperatorsBtn")?.addEventListener("click", excludeInactiveAnalyticsOperators);
     $("#analyticsImageFormat")?.addEventListener("change", event => syncAnalyticsImageFormatControls(event.target.value));
     $("#analyticsSelectionImageFormat")?.addEventListener("change", event => syncAnalyticsImageFormatControls(event.target.value));
     analyticsSelectionCheckboxes().forEach(input => input.addEventListener("change", updateAnalyticsSelectionSummary));

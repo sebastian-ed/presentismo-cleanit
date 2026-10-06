@@ -1,4 +1,4 @@
-const CACHE_NAME = "cleanit-presentismo-shell-20260928-flexmulti-fix1";
+const CACHE_NAME = "cleanit-presentismo-shell-20261006-analysis-operator-filter1";
 const APP_SHELL = [
   "./",
   "./index.html",

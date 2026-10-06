@@ -8,10 +8,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Presentismo GPS" />
   <title>Clean It · Presentismo GPS</title>
-  <link rel="manifest" href="manifest.webmanifest?v=20260928-flexmulti-fix1" />
+  <link rel="manifest" href="manifest.webmanifest?v=20261006-analysis-operator-filter1" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20260928-flexmulti-fix1" />
+  <link rel="stylesheet" href="styles.css?v=20261006-analysis-operator-filter1" />
 </head>
 <body>
   <div class="app-shell">
@@ -333,6 +333,23 @@
               </div>
             </div>
             <div id="analyticsRangeSummary" class="muted small analytics-range-summary"></div>
+            <details class="analytics-operator-filter" id="analyticsOperatorFilter">
+              <summary>
+                <span><strong>Operarios incluidos en el análisis</strong><small>Podés quitar del cálculo a personas que ya no querés considerar.</small></span>
+                <strong id="analyticsOperatorFilterSummary">Todos incluidos</strong>
+              </summary>
+              <div class="analytics-operator-filter-body">
+                <div class="analytics-operator-filter-toolbar">
+                  <label><span>Buscar operario</span><input id="analyticsOperatorFilterSearch" type="search" placeholder="Nombre del operario..." /></label>
+                  <div class="analytics-operator-filter-actions">
+                    <button class="ghost-btn small-btn" id="analyticsIncludeAllOperatorsBtn" type="button">Incluir todos</button>
+                    <button class="ghost-btn small-btn" id="analyticsExcludeInactiveOperatorsBtn" type="button">Excluir inactivos</button>
+                  </div>
+                </div>
+                <div id="analyticsOperatorChecklist" class="analytics-operator-checklist"></div>
+                <p class="muted small no-margin">Los operarios desmarcados no participan de KPIs, gráficos, rankings ni exportaciones del análisis. Esto no elimina sus registros históricos.</p>
+              </div>
+            </details>
             <div class="analytics-export-panel">
               <div class="analytics-export-panel-head">
                 <div>
@@ -997,8 +1014,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="js/config.js?v=20260928-flexmulti-fix1"></script>
-  <script src="js/storage.js?v=20260928-flexmulti-fix1"></script>
-  <script src="js/app.js?v=20260928-flexmulti-fix1"></script>
+  <script src="js/config.js?v=20261006-analysis-operator-filter1"></script>
+  <script src="js/storage.js?v=20261006-analysis-operator-filter1"></script>
+  <script src="js/app.js?v=20261006-analysis-operator-filter1"></script>
 </body>
 </html>
