@@ -532,7 +532,7 @@
     toast._timer = window.setTimeout(() => el.classList.remove("show"), 3600);
   }
 
-  const APP_BUILD_VERSION = "20261006-analysis-operator-filter1";
+  const APP_BUILD_VERSION = "20261006-leave-replacement1";
 
   function errorValue(value) {
     if (value === undefined || value === null || value === "") return null;
@@ -3882,8 +3882,9 @@
       const exitCell = leaveRecord
         ? `<span class="status-pill status-leave">No corresponde</span>`
         : statusDetailCell(exitStatus, exitEvent || dayOffEvent, "Sin salida");
+      const leaveReplacement = leaveRecord?.replacement_operator_id ? byId(state.profiles, leaveRecord.replacement_operator_id) : null;
       const operationalDetail = leaveRecord
-        ? `<span class="muted small">Ausencia justificada programada</span>`
+        ? `<span class="muted small">Ausencia justificada programada${leaveReplacement ? `<br>Reemplazo: <strong>${escapeHtml(leaveReplacement.full_name)}</strong>` : ""}</span>`
         : `<span class="muted small">${lastEvent ? `${eventTypeLabel(lastEvent.event_type)} · ${formatDateTime(lastEvent.client_time || lastEvent.created_at)}` : "—"}</span>${overtimeDetail}`;
 
       return `
@@ -4377,6 +4378,11 @@
     if ($("#specialAssignmentOperator")) $("#specialAssignmentOperator").innerHTML = operatorOptions;
     if ($("#specialAssignmentSite")) $("#specialAssignmentSite").innerHTML = siteOptions;
     if ($("#leaveOperator")) $("#leaveOperator").innerHTML = operatorOptions;
+    if ($("#leaveReplacementOperator")) {
+      const selectedReplacement = $("#leaveReplacementOperator").value;
+      $("#leaveReplacementOperator").innerHTML = `<option value="">Sin reemplazo programado</option>${operatorOptions}`;
+      if (selectedReplacement && operators.some(op => op.id === selectedReplacement)) $("#leaveReplacementOperator").value = selectedReplacement;
+    }
     if ($("#userFlexibleSite")) {
       const selected = Array.from($("#userFlexibleSite").selectedOptions || []).map(option => option.value);
       $("#userFlexibleSite").innerHTML = siteOptions;
@@ -5514,11 +5520,74 @@
     await renderSupervisorView();
   }
 
+  function effectiveAssignmentsForLeaveCoverage(operatorId, dateString) {
+    const candidates = (state.assignments || []).filter(assignment => {
+      if (assignment.operator_id !== operatorId || assignment.is_active === false) return false;
+      if (assignment.source_leave_id) return false;
+      const type = String(assignment.assignment_type || "fixed");
+      if (!["fixed", "special"].includes(type)) return false;
+      return assignmentAppliesOnDate(assignment, dateString);
+    });
+    const specials = candidates.filter(assignment => String(assignment.assignment_type || "") === "special");
+    return specials.length ? specials : candidates.filter(assignment => String(assignment.assignment_type || "fixed") === "fixed");
+  }
+
+  function buildLeaveReplacementCoveragePlan({ leaveId, operatorId, replacementOperatorId, startDate, endDate, leaveType }) {
+    if (!replacementOperatorId) return [];
+    const operator = byId(state.profiles, operatorId);
+    const label = leaveTypeLabel(leaveType).toLowerCase();
+    const rows = [];
+    let date = startDate;
+    let safety = 0;
+    while (date && date <= endDate && safety < 400) {
+      effectiveAssignmentsForLeaveCoverage(operatorId, date).forEach(source => {
+        rows.push({
+          operator_id: replacementOperatorId,
+          site_id: source.site_id,
+          days_of_week: [isoDayId(date)],
+          scheduled_start: String(source.scheduled_start || "").slice(0, 5),
+          scheduled_end: String(source.scheduled_end || "").slice(0, 5),
+          grace_minutes: Number(source.grace_minutes ?? 10),
+          absence_after_minutes: Number(source.absence_after_minutes ?? 30),
+          valid_from: date,
+          valid_to: date,
+          assignment_type: "coverage",
+          covered_operator_id: operatorId,
+          created_by: state.currentProfile?.id || null,
+          suppress_regular_assignments: false,
+          notes: `Reemplazo programado por ${label} de ${operator?.full_name || "operario ausente"}`,
+          source_leave_id: leaveId,
+          is_active: true
+        });
+      });
+      date = addDaysISO(date, 1);
+      safety += 1;
+    }
+    const seen = new Set();
+    return rows.filter(row => {
+      const key = [row.operator_id, row.site_id, row.valid_from, row.scheduled_start, row.scheduled_end].join("|");
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  function replacementHasLeaveDuring(replacementOperatorId, startDate, endDate, excludeLeaveId = null) {
+    return (state.leaveRecords || []).find(leave =>
+      leave.id !== excludeLeaveId
+      && leave.operator_id === replacementOperatorId
+      && isActiveLeave(leave)
+      && leave.start_date <= endDate
+      && leave.end_date >= startDate
+    ) || null;
+  }
+
   function resetLeaveForm() {
     state.leaveEditingId = null;
     $("#leaveForm")?.reset();
     if ($("#leaveStartDate")) $("#leaveStartDate").value = todayISO();
     if ($("#leaveEndDate")) $("#leaveEndDate").value = todayISO();
+    if ($("#leaveReplacementOperator")) $("#leaveReplacementOperator").value = "";
     if ($("#leaveFormTitle")) $("#leaveFormTitle").textContent = "Registrar / programar novedad";
     $("#cancelLeaveEditBtn")?.classList.add("hidden");
     if ($("#saveLeaveBtn")) $("#saveLeaveBtn").textContent = "Guardar novedad";
@@ -5539,6 +5608,7 @@
     if (!leave) return;
     state.leaveEditingId = id;
     $("#leaveOperator").value = leave.operator_id;
+    if ($("#leaveReplacementOperator")) $("#leaveReplacementOperator").value = leave.replacement_operator_id || "";
     $("#leaveType").value = leave.leave_type || "other_leave";
     $("#leaveStartDate").value = leave.start_date || todayISO();
     $("#leaveEndDate").value = leave.end_date || leave.start_date || todayISO();
@@ -5557,11 +5627,20 @@
     const leaveType = $("#leaveType")?.value || "other_leave";
     const startDate = $("#leaveStartDate")?.value;
     const endDate = $("#leaveEndDate")?.value || startDate;
+    const replacementOperatorId = $("#leaveReplacementOperator")?.value || null;
     const reference = $("#leaveReference")?.value.trim() || "";
     const notes = $("#leaveNotes")?.value.trim() || "";
     const editingId = state.leaveEditingId || null;
     if (!operatorId || !startDate || !endDate) throw new Error("Completá operario, fecha desde y fecha hasta.");
     if (endDate < startDate) throw new Error("La fecha hasta no puede ser anterior a la fecha desde.");
+    if (replacementOperatorId && replacementOperatorId === operatorId) throw new Error("El operario ausente no puede ser también su propio reemplazo.");
+    if (replacementOperatorId) {
+      const replacementLeave = replacementHasLeaveDuring(replacementOperatorId, startDate, endDate, editingId);
+      if (replacementLeave) {
+        const replacement = byId(state.profiles, replacementOperatorId);
+        throw new Error(`${replacement?.full_name || "El reemplazo seleccionado"} tiene una novedad programada entre ${leavePeriodLabel(replacementLeave)}. Elegí otro reemplazo o ajustá las fechas.`);
+      }
+    }
 
     const overlap = (state.leaveRecords || []).find(leave =>
       leave.id !== editingId
@@ -5572,7 +5651,8 @@
     );
     if (overlap && !window.confirm(`Ya existe una novedad activa para este operario entre ${leavePeriodLabel(overlap)}. ¿Querés guardar igualmente este registro superpuesto?`)) return;
 
-    await store.upsertLeaveEvent({
+    const previousLeave = editingId ? (state.leaveRecords || []).find(item => item.id === editingId) || null : null;
+    const leavePayload = {
       ...(editingId ? { id: editingId } : {}),
       operator_id: operatorId,
       leave_type: leaveType,
@@ -5583,10 +5663,35 @@
       status: "active",
       ...(!editingId ? { created_by: state.currentProfile?.id || null } : {}),
       updated_by: state.currentProfile?.id || null
+    };
+    if (replacementOperatorId || previousLeave?.replacement_operator_id) leavePayload.replacement_operator_id = replacementOperatorId;
+    const savedLeave = await store.upsertLeaveEvent(leavePayload);
+
+    const coveragePlan = buildLeaveReplacementCoveragePlan({
+      leaveId: savedLeave.id,
+      operatorId,
+      replacementOperatorId,
+      startDate,
+      endDate,
+      leaveType
     });
+    if (replacementOperatorId || previousLeave?.replacement_operator_id) {
+      try {
+        await store.replaceLeaveCoverageAssignments?.(savedLeave.id, coveragePlan);
+      } catch (coverageError) {
+        state.leaveEditingId = savedLeave.id;
+        throw new Error(`La novedad quedó guardada, pero no se pudo programar el reemplazo: ${coverageError?.message || "error al crear coberturas"}. Ejecutá la migración de reemplazos y volvé a guardar esta novedad.`);
+      }
+    }
 
     resetLeaveForm();
-    toast(`${leaveTypeLabel(leaveType)} guardado. Esos días no generarán ausencia automática.`, "success");
+    const replacement = replacementOperatorId ? byId(state.profiles, replacementOperatorId) : null;
+    const coverageMessage = replacement
+      ? coveragePlan.length
+        ? ` Reemplazo: ${replacement.full_name} · ${coveragePlan.length} cobertura${coveragePlan.length === 1 ? "" : "s"} programada${coveragePlan.length === 1 ? "" : "s"}.`
+        : ` Reemplazo seleccionado: ${replacement.full_name}, pero no había jornadas fijas/especiales para copiar en ese período.`
+      : "";
+    toast(`${leaveTypeLabel(leaveType)} guardado. Esos días no generarán ausencia automática.${coverageMessage}`, "success");
     await renderSupervisorView();
   }
 
@@ -5596,7 +5701,8 @@
     const operator = byId(state.profiles, leave.operator_id);
     if (!window.confirm(`¿Cancelar ${leaveTypeLabel(leave.leave_type).toLowerCase()} de ${operator?.full_name || "este operario"} (${leavePeriodLabel(leave)})? El registro quedará en la trazabilidad.`)) return;
     await store.cancelLeaveEvent(id, state.currentProfile?.id || null);
-    toast("Novedad cancelada. El historial se conserva.", "success");
+    if (leave.replacement_operator_id) await store.replaceLeaveCoverageAssignments?.(id, []);
+    toast(leave.replacement_operator_id ? "Novedad cancelada. También se desactivaron las coberturas automáticas asociadas; el historial se conserva." : "Novedad cancelada. El historial se conserva.", "success");
     if (state.leaveEditingId === id) resetLeaveForm();
     await renderSupervisorView();
   }
@@ -5626,7 +5732,8 @@
     const statusRows = sorted.filter(leave => statusFilter === "all" || String(leave.status || "active") === statusFilter);
     const visible = searchTerm ? statusRows.filter(leave => {
       const operator = byId(state.profiles, leave.operator_id);
-      return valuesMatchSearch(searchTerm, operator?.full_name, leaveTypeLabel(leave.leave_type), leave.start_date, leave.end_date, leave.reference, leave.notes, leave.status);
+      const replacement = leave.replacement_operator_id ? byId(state.profiles, leave.replacement_operator_id) : null;
+      return valuesMatchSearch(searchTerm, operator?.full_name, replacement?.full_name, leaveTypeLabel(leave.leave_type), leave.start_date, leave.end_date, leave.reference, leave.notes, leave.status);
     }) : statusRows;
     updateSectionSearchCount("leaves", visible.length, statusRows.length);
 
@@ -5634,6 +5741,7 @@
       const operator = byId(state.profiles, leave.operator_id);
       const creator = byId(state.profiles, leave.created_by);
       const updater = byId(state.profiles, leave.updated_by);
+      const replacement = leave.replacement_operator_id ? byId(state.profiles, leave.replacement_operator_id) : null;
       const cancelled = String(leave.status || "active") === "cancelled";
       return `
         <div class="list-item leave-list-item ${cancelled ? "leave-cancelled" : ""} ${searchTerm ? "search-match-card" : ""}">
@@ -5647,6 +5755,7 @@
               ${cancelled ? `<span class="status-pill status-rejected">Cancelada</span>` : `<span class="status-pill status-leave">Activa</span>`}
             </div>
           </div>
+          ${replacement ? `<div class="muted small"><strong>Reemplazo programado:</strong> ${escapeHtml(replacement.full_name)}</div>` : `<div class="muted small"><strong>Reemplazo programado:</strong> Sin reemplazo</div>`}
           ${leave.reference ? `<div class="muted small"><strong>Referencia:</strong> ${escapeHtml(leave.reference)}</div>` : ""}
           ${leave.notes ? `<div class="muted small"><strong>Observación:</strong> ${escapeHtml(leave.notes)}</div>` : ""}
           <div class="muted small leave-trace-line">Creada ${leave.created_at ? escapeHtml(formatDateTime(leave.created_at)) : "—"}${creator ? ` por ${escapeHtml(creator.full_name)}` : ""}${leave.updated_at && leave.updated_at !== leave.created_at ? ` · Último cambio ${escapeHtml(formatDateTime(leave.updated_at))}${updater ? ` por ${escapeHtml(updater.full_name)}` : ""}` : ""}</div>

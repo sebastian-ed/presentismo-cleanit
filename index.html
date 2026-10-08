@@ -8,10 +8,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Presentismo GPS" />
   <title>Clean It · Presentismo GPS</title>
-  <link rel="manifest" href="manifest.webmanifest?v=20261006-analysis-operator-filter1" />
+  <link rel="manifest" href="manifest.webmanifest?v=20261008-leave-coverage-planner1" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20261006-analysis-operator-filter1" />
+  <link rel="stylesheet" href="styles.css?v=20261008-leave-coverage-planner1" />
 </head>
 <body>
   <div class="app-shell">
@@ -641,6 +641,17 @@
                 </div>
               </div>
               <label><span>Operario</span><select id="leaveOperator" required></select></label>
+              <div class="leave-coverage-config">
+                <div class="card-title-row compact-row">
+                  <div>
+                    <strong>Cobertura durante la novedad <small class="muted">(opcional)</small></strong>
+                    <p class="muted small no-margin">Por defecto se copian los servicios, frecuencia y horarios del operario que se ausenta. Podés desmarcar coberturas o modificar los horarios antes de guardar.</p>
+                  </div>
+                  <button class="secondary-btn small-btn" id="createReplacementOperatorBtn" type="button">+ Crear nuevo operario</button>
+                </div>
+                <label><span>Operario que cubrirá</span><select id="leaveReplacementOperator"><option value="">Sin reemplazo programado</option></select></label>
+                <div id="leaveCoveragePlanner" class="leave-coverage-planner"><p class="muted small no-margin">Seleccioná operario y fechas para ver las asignaciones a cubrir.</p></div>
+              </div>
               <label><span>Tipo de novedad</span>
                 <select id="leaveType" required>
                   <option value="medical_certificate">Certificado médico</option>
@@ -969,6 +980,27 @@
     </section>
   </div>
 
+  <div id="leaveReplacementUserModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="leaveReplacementUserModalTitle">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div><p class="eyebrow">Alta rápida</p><h3 id="leaveReplacementUserModalTitle">Crear nuevo operario reemplazante</h3></div>
+        <button class="icon-button" type="button" data-close-modal="leaveReplacementUserModal" aria-label="Cerrar">×</button>
+      </div>
+      <form id="leaveReplacementUserForm" class="form-stack">
+        <label><span>Nombre completo</span><input id="leaveNewUserName" required placeholder="Nombre y apellido" /></label>
+        <label><span>Nombre de usuario (login)</span><input id="leaveNewUserUsername" required autocomplete="off" placeholder="ej: juanperez" /></label>
+        <label><span>Contraseña inicial</span><input id="leaveNewUserPassword" type="password" minlength="6" required autocomplete="new-password" placeholder="Mínimo 6 caracteres" /></label>
+        <p class="muted small no-margin">Para operarios podés usar el DNI como contraseña inicial.</p>
+        <label><span>Teléfono <small class="muted">(opcional)</small></span><input id="leaveNewUserPhone" placeholder="+549..." /></label>
+        <label><span>Notas <small class="muted">(opcional)</small></span><textarea id="leaveNewUserNotes" placeholder="Observaciones internas"></textarea></label>
+        <div class="modal-actions">
+          <button class="ghost-btn" type="button" data-close-modal="leaveReplacementUserModal">Cancelar</button>
+          <button class="primary-btn" type="submit">Crear operario y seleccionar</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="locationModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="locationModalTitle">
     <section class="modal-panel modal-panel-map">
       <div class="modal-head">
@@ -1014,8 +1046,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="js/config.js?v=20261006-analysis-operator-filter1"></script>
-  <script src="js/storage.js?v=20261006-analysis-operator-filter1"></script>
-  <script src="js/app.js?v=20261006-analysis-operator-filter1"></script>
+  <script src="js/config.js?v=20261008-leave-coverage-planner1"></script>
+  <script src="js/storage.js?v=20261008-leave-coverage-planner1"></script>
+  <script src="js/app.js?v=20261008-leave-coverage-planner1"></script>
 </body>
 </html>

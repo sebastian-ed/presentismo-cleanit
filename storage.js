@@ -615,6 +615,27 @@
       return data;
     }
 
+    async replaceLeaveCoverageAssignments(leaveId, assignments = []) {
+      if (!leaveId) throw new Error("Falta identificar la novedad para sincronizar el reemplazo.");
+
+      const { error: deactivateError } = await this.client
+        .from("assignments")
+        .update({ is_active: false })
+        .eq("source_leave_id", leaveId)
+        .eq("is_active", true);
+      if (deactivateError) throw deactivateError;
+
+      const rows = (assignments || []).map(item => this.clean({ ...item, source_leave_id: leaveId, is_active: true }));
+      if (!rows.length) return [];
+
+      const { data, error } = await this.client
+        .from("assignments")
+        .insert(rows)
+        .select("*");
+      if (error) throw error;
+      return data || [];
+    }
+
     async listLeaveAudit() {
       const { data, error } = await this.client
         .from("attendance_leave_audit")

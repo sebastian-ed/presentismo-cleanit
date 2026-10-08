@@ -54,6 +54,7 @@ create table if not exists public.assignments (
   covered_operator_id uuid references public.profiles(id) on delete set null,
   created_by uuid references public.profiles(id) on delete set null,
   suppress_regular_assignments boolean not null default false,
+  source_leave_id uuid,
   is_active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -789,6 +790,7 @@ create table if not exists public.attendance_leaves (
   leave_type text not null check (leave_type in ('medical_certificate', 'medical_leave', 'other_leave', 'vacation')),
   start_date date not null,
   end_date date not null,
+  replacement_operator_id uuid references public.profiles(id) on delete set null,
   reference text,
   notes text,
   status text not null default 'active' check (status in ('active', 'cancelled')),
@@ -811,6 +813,22 @@ create table if not exists public.attendance_leave_audit (
 
 create index if not exists idx_attendance_leaves_operator_dates on public.attendance_leaves(operator_id, start_date, end_date);
 create index if not exists idx_attendance_leaves_status on public.attendance_leaves(status);
+create index if not exists idx_attendance_leaves_replacement on public.attendance_leaves(replacement_operator_id, start_date, end_date);
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'assignments_source_leave_id_fkey'
+      and conrelid = 'public.assignments'::regclass
+  ) then
+    alter table public.assignments
+      add constraint assignments_source_leave_id_fkey
+      foreign key (source_leave_id) references public.attendance_leaves(id) on delete set null;
+  end if;
+end $$;
+
+create index if not exists idx_assignments_source_leave on public.assignments(source_leave_id) where source_leave_id is not null;
 create index if not exists idx_attendance_leave_audit_changed_at on public.attendance_leave_audit(changed_at desc);
 
 create or replace function public.touch_attendance_leave_updated_at()

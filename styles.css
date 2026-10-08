@@ -2074,3 +2074,31 @@ body.modal-open { overflow: hidden; }
 .analytics-operator-check.is-excluded{opacity:.62;background:#f8fafc}
 .analytics-operator-status-inactive{font-weight:800;color:#b45309}
 @media(max-width:700px){.analytics-operator-filter>summary{align-items:flex-start;flex-direction:column}.analytics-operator-filter-actions{width:100%}.analytics-operator-filter-actions button{flex:1 1 auto}.analytics-operator-checklist{grid-template-columns:1fr;max-height:360px}}
+
+/* Coberturas planificadas desde vacaciones/licencias */
+.leave-coverage-config {
+  border: 1px solid var(--line, #d9e0ea);
+  border-radius: 16px;
+  padding: 14px;
+  background: rgba(248, 250, 252, 0.72);
+  display: grid;
+  gap: 12px;
+}
+.leave-coverage-config .compact-row { align-items: flex-start; gap: 12px; }
+.leave-coverage-planner { display: grid; gap: 10px; }
+.leave-coverage-row {
+  border: 1px solid var(--line, #d9e0ea);
+  border-radius: 14px;
+  padding: 12px;
+  background: #fff;
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(220px, 0.8fr);
+  gap: 12px;
+  align-items: center;
+}
+.leave-coverage-row .coverage-enable { margin: 0; }
+.leave-coverage-row .compact-grid { margin: 0; }
+@media (max-width: 760px) {
+  .leave-coverage-row { grid-template-columns: 1fr; }
+  .leave-coverage-config .compact-row { flex-direction: column; }
+}

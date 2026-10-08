@@ -8,10 +8,10 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Presentismo GPS" />
   <title>Clean It · Presentismo GPS</title>
-  <link rel="manifest" href="manifest.webmanifest?v=20261006-analysis-operator-filter1" />
+  <link rel="manifest" href="manifest.webmanifest?v=20261006-leave-replacement1" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="styles.css?v=20261006-analysis-operator-filter1" />
+  <link rel="stylesheet" href="styles.css?v=20261006-leave-replacement1" />
 </head>
 <body>
   <div class="app-shell">
@@ -641,6 +641,7 @@
                 </div>
               </div>
               <label><span>Operario</span><select id="leaveOperator" required></select></label>
+              <label><span>Reemplazo durante la novedad <small class="muted">(opcional)</small></span><select id="leaveReplacementOperator"><option value="">Sin reemplazo programado</option></select><small class="muted">Si elegís un reemplazo, se le crearán automáticamente las coberturas de los días y horarios que normalmente debía cumplir el operario ausente.</small></label>
               <label><span>Tipo de novedad</span>
                 <select id="leaveType" required>
                   <option value="medical_certificate">Certificado médico</option>
@@ -1014,8 +1015,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="js/config.js?v=20261006-analysis-operator-filter1"></script>
-  <script src="js/storage.js?v=20261006-analysis-operator-filter1"></script>
-  <script src="js/app.js?v=20261006-analysis-operator-filter1"></script>
+  <script src="js/config.js?v=20261006-leave-replacement1"></script>
+  <script src="js/storage.js?v=20261006-leave-replacement1"></script>
+  <script src="js/app.js?v=20261006-leave-replacement1"></script>
 </body>
 </html>
