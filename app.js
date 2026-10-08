@@ -533,7 +533,7 @@
     toast._timer = window.setTimeout(() => el.classList.remove("show"), 3600);
   }
 
-  const APP_BUILD_VERSION = "20261008-leave-coverage-planner1";
+  const APP_BUILD_VERSION = "20261008-leave-coverage-contrast2";
 
   function errorValue(value) {
     if (value === undefined || value === null || value === "") return null;
@@ -4382,7 +4382,7 @@
     if ($("#leaveOperator")) $("#leaveOperator").innerHTML = operatorOptions;
     if ($("#leaveReplacementOperator")) {
       const selectedReplacement = $("#leaveReplacementOperator").value;
-      $("#leaveReplacementOperator").innerHTML = `<option value="">Sin reemplazo programado</option>${operatorOptions}`;
+      $("#leaveReplacementOperator").innerHTML = `<option value="">Sin reemplazo — solo registrar licencia/vacaciones</option>${operatorOptions}`;
       if (selectedReplacement && operators.some(op => op.id === selectedReplacement)) $("#leaveReplacementOperator").value = selectedReplacement;
     }
     if ($("#userFlexibleSite")) {

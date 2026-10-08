@@ -2102,3 +2102,66 @@ body.modal-open { overflow: hidden; }
   .leave-coverage-row { grid-template-columns: 1fr; }
   .leave-coverage-config .compact-row { flex-direction: column; }
 }
+
+
+/* Alta rápida de operario desde Vacaciones / Licencias: contraste reforzado */
+.replacement-user-modal-panel {
+  width: min(100%, 640px);
+  background: #ffffff;
+  color: #0f172a;
+  border: 1px solid #cbd5e1;
+}
+.replacement-user-modal-head {
+  background: rgba(255,255,255,.98);
+  color: #0f172a;
+}
+.replacement-user-modal-panel h3,
+.replacement-user-modal-panel strong,
+.replacement-user-modal-panel label > span {
+  color: #0f172a;
+}
+.replacement-user-modal-panel .eyebrow {
+  color: #475569;
+}
+.replacement-user-modal-panel .muted {
+  color: #64748b;
+}
+.replacement-user-modal-panel input,
+.replacement-user-modal-panel select,
+.replacement-user-modal-panel textarea {
+  background: #ffffff;
+  color: #0f172a;
+  border-color: #94a3b8;
+  caret-color: #0f172a;
+}
+.replacement-user-modal-panel input::placeholder,
+.replacement-user-modal-panel textarea::placeholder {
+  color: #64748b;
+  opacity: 1;
+}
+.replacement-user-modal-panel input:focus,
+.replacement-user-modal-panel select:focus,
+.replacement-user-modal-panel textarea:focus {
+  border-color: #334155;
+  box-shadow: 0 0 0 4px rgba(51,65,85,.12);
+}
+.replacement-user-modal-panel .icon-button {
+  color: #0f172a;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+}
+.replacement-user-modal-panel .modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 4px;
+}
+.leave-no-replacement-help {
+  display: block;
+  margin-top: 2px;
+  color: #475569;
+  font-size: .78rem;
+  line-height: 1.4;
+  font-weight: 700;
+}

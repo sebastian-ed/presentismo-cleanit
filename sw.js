@@ -1,4 +1,4 @@
-const CACHE_NAME = "cleanit-presentismo-shell-20261008-leave-coverage-planner1";
+const CACHE_NAME = "cleanit-presentismo-shell-20261008-leave-coverage-contrast2";
 const APP_SHELL = [
   "./",
   "./index.html",

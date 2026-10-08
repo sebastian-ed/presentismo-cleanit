@@ -39,6 +39,7 @@
     flexibleModes: [],
     leaveAudit: [],
     leaveEditingId: null,
+    leaveCoverageDraft: [],
     specialAssignmentEditingId: null,
     dashboardRows: [],
     liveStatusFilter: "all",
@@ -532,7 +533,7 @@
     toast._timer = window.setTimeout(() => el.classList.remove("show"), 3600);
   }
 
-  const APP_BUILD_VERSION = "20261006-leave-replacement1";
+  const APP_BUILD_VERSION = "20261008-leave-coverage-contrast2";
 
   function errorValue(value) {
     if (value === undefined || value === null || value === "") return null;
@@ -2717,6 +2718,7 @@
     renderCoverage();
     renderSites();
     renderAssignmentSelectors();
+    if (!state.leaveEditingId) renderLeaveCoveragePlanner();
     renderAssignments();
     if (state.activeTab === "leaves" || !state.leaveAudit.length) await refreshLeaveAudit();
     renderLeaves();
@@ -4380,7 +4382,7 @@
     if ($("#leaveOperator")) $("#leaveOperator").innerHTML = operatorOptions;
     if ($("#leaveReplacementOperator")) {
       const selectedReplacement = $("#leaveReplacementOperator").value;
-      $("#leaveReplacementOperator").innerHTML = `<option value="">Sin reemplazo programado</option>${operatorOptions}`;
+      $("#leaveReplacementOperator").innerHTML = `<option value="">Sin reemplazo — solo registrar licencia/vacaciones</option>${operatorOptions}`;
       if (selectedReplacement && operators.some(op => op.id === selectedReplacement)) $("#leaveReplacementOperator").value = selectedReplacement;
     }
     if ($("#userFlexibleSite")) {
@@ -5532,23 +5534,135 @@
     return specials.length ? specials : candidates.filter(assignment => String(assignment.assignment_type || "fixed") === "fixed");
   }
 
-  function buildLeaveReplacementCoveragePlan({ leaveId, operatorId, replacementOperatorId, startDate, endDate, leaveType }) {
+  function buildDefaultLeaveCoverageDraft(operatorId, startDate, endDate, existingLeaveId = null) {
+    if (!operatorId || !startDate || !endDate || endDate < startDate) return [];
+    const existingCoverages = existingLeaveId
+      ? (state.assignments || []).filter(a => a.source_leave_id === existingLeaveId && a.is_active !== false)
+      : [];
+    const groups = new Map();
+    let date = startDate;
+    let safety = 0;
+    while (date && date <= endDate && safety < 400) {
+      const sources = effectiveAssignmentsForLeaveCoverage(operatorId, date);
+      sources.forEach(source => {
+        const baseKey = [source.id || "source", source.site_id, String(source.scheduled_start || "").slice(0, 5), String(source.scheduled_end || "").slice(0, 5)].join("|");
+        if (!groups.has(baseKey)) {
+          groups.set(baseKey, {
+            key: baseKey,
+            source_assignment_id: source.id || null,
+            site_id: source.site_id,
+            dates: [],
+            scheduled_start: String(source.scheduled_start || "").slice(0, 5),
+            scheduled_end: String(source.scheduled_end || "").slice(0, 5),
+            grace_minutes: Number(source.grace_minutes ?? 10),
+            absence_after_minutes: Number(source.absence_after_minutes ?? 30),
+            selected: true
+          });
+        }
+        groups.get(baseKey).dates.push(date);
+      });
+      date = addDaysISO(date, 1);
+      safety += 1;
+    }
+
+    const rows = [...groups.values()];
+    if (!existingCoverages.length) return rows;
+
+    rows.forEach(row => {
+      const matching = existingCoverages.filter(coverage => row.dates.includes(coverage.valid_from) && coverage.site_id === row.site_id);
+      if (!matching.length) {
+        row.selected = false;
+        return;
+      }
+      const first = matching[0];
+      row.scheduled_start = String(first.scheduled_start || row.scheduled_start).slice(0, 5);
+      row.scheduled_end = String(first.scheduled_end || row.scheduled_end).slice(0, 5);
+      row.grace_minutes = Number(first.grace_minutes ?? row.grace_minutes);
+      row.absence_after_minutes = Number(first.absence_after_minutes ?? row.absence_after_minutes);
+      row.selected = true;
+    });
+    return rows;
+  }
+
+  function leaveCoverageFrequencyLabel(dates) {
+    const uniqueDays = [...new Set((dates || []).map(isoDayId))].sort((a, b) => a - b);
+    const dayLabels = uniqueDays.map(dayId => DAYS.find(day => day.id === dayId)?.short || String(dayId));
+    if (!dates?.length) return "Sin días";
+    if (dates.length === 1) return `${formatISODate(dates[0], { day: "2-digit", month: "2-digit", year: "numeric" })}`;
+    return `${dayLabels.join(" · ")} · ${dates.length} día${dates.length === 1 ? "" : "s"}`;
+  }
+
+  function readLeaveCoveragePlannerDraft() {
+    const container = $("#leaveCoveragePlanner");
+    if (!container) return state.leaveCoverageDraft || [];
+    const rows = [...container.querySelectorAll("[data-leave-coverage-row]")].map(row => {
+      let dates = [];
+      try { dates = JSON.parse(row.dataset.coverageDates || "[]"); } catch (_) { dates = []; }
+      return {
+        key: row.dataset.coverageKey || "",
+        source_assignment_id: row.dataset.sourceAssignmentId || null,
+        site_id: row.dataset.siteId || null,
+        dates,
+        selected: Boolean(row.querySelector("[data-coverage-enabled]")?.checked),
+        scheduled_start: row.querySelector("[data-coverage-start]")?.value || "",
+        scheduled_end: row.querySelector("[data-coverage-end]")?.value || "",
+        grace_minutes: Number(row.dataset.graceMinutes || 10),
+        absence_after_minutes: Number(row.dataset.absenceMinutes || 30)
+      };
+    });
+    if (rows.length) state.leaveCoverageDraft = rows;
+    return rows;
+  }
+
+  function renderLeaveCoveragePlanner({ useExistingLeave = false } = {}) {
+    const container = $("#leaveCoveragePlanner");
+    if (!container) return;
+    const operatorId = $("#leaveOperator")?.value || null;
+    const startDate = $("#leaveStartDate")?.value || null;
+    const endDate = $("#leaveEndDate")?.value || startDate;
+    if (!operatorId || !startDate || !endDate || endDate < startDate) {
+      state.leaveCoverageDraft = [];
+      container.innerHTML = `<p class="muted small no-margin">Seleccioná operario y fechas válidas para ver las asignaciones a cubrir.</p>`;
+      return;
+    }
+    const editingId = useExistingLeave ? state.leaveEditingId : null;
+    state.leaveCoverageDraft = buildDefaultLeaveCoverageDraft(operatorId, startDate, endDate, editingId);
+    if (!state.leaveCoverageDraft.length) {
+      container.innerHTML = `<div class="inline-info"><strong>No hay asignaciones para copiar en ese período.</strong><br><span class="muted small">Podés guardar la novedad sin reemplazo o crear una cobertura manual desde Asignaciones.</span></div>`;
+      return;
+    }
+    container.innerHTML = state.leaveCoverageDraft.map((row, index) => {
+      const site = byId(state.sites, row.site_id);
+      const datesJson = escapeHtml(JSON.stringify(row.dates || []));
+      return `
+        <div class="leave-coverage-row" data-leave-coverage-row data-coverage-key="${escapeHtml(row.key)}" data-source-assignment-id="${escapeHtml(row.source_assignment_id || "")}" data-site-id="${escapeHtml(row.site_id || "")}" data-coverage-dates="${datesJson}" data-grace-minutes="${escapeHtml(String(row.grace_minutes ?? 10))}" data-absence-minutes="${escapeHtml(String(row.absence_after_minutes ?? 30))}">
+          <label class="checkbox-row coverage-enable"><input type="checkbox" data-coverage-enabled ${row.selected ? "checked" : ""} /><span><strong>${escapeHtml(site?.name || "Servicio")}</strong><br><span class="muted small">${escapeHtml(leaveCoverageFrequencyLabel(row.dates))}${site?.address ? ` · ${escapeHtml(site.address)}` : ""}</span></span></label>
+          <div class="form-grid two-cols compact-grid">
+            <label><span>Entrada</span><input type="time" data-coverage-start value="${escapeHtml(row.scheduled_start || "")}" /></label>
+            <label><span>Salida</span><input type="time" data-coverage-end value="${escapeHtml(row.scheduled_end || "")}" /></label>
+          </div>
+        </div>`;
+    }).join("");
+  }
+
+  function buildLeaveReplacementCoveragePlan({ leaveId, operatorId, replacementOperatorId, leaveType, draftRows = [] }) {
     if (!replacementOperatorId) return [];
     const operator = byId(state.profiles, operatorId);
     const label = leaveTypeLabel(leaveType).toLowerCase();
     const rows = [];
-    let date = startDate;
-    let safety = 0;
-    while (date && date <= endDate && safety < 400) {
-      effectiveAssignmentsForLeaveCoverage(operatorId, date).forEach(source => {
+    (draftRows || []).filter(row => row.selected).forEach(row => {
+      const start = String(row.scheduled_start || "").slice(0, 5);
+      const end = String(row.scheduled_end || "").slice(0, 5);
+      if (!row.site_id || !row.dates?.length || !start || !end || start === end) return;
+      row.dates.forEach(date => {
         rows.push({
           operator_id: replacementOperatorId,
-          site_id: source.site_id,
+          site_id: row.site_id,
           days_of_week: [isoDayId(date)],
-          scheduled_start: String(source.scheduled_start || "").slice(0, 5),
-          scheduled_end: String(source.scheduled_end || "").slice(0, 5),
-          grace_minutes: Number(source.grace_minutes ?? 10),
-          absence_after_minutes: Number(source.absence_after_minutes ?? 30),
+          scheduled_start: start,
+          scheduled_end: end,
+          grace_minutes: Number(row.grace_minutes ?? 10),
+          absence_after_minutes: Number(row.absence_after_minutes ?? 30),
           valid_from: date,
           valid_to: date,
           assignment_type: "coverage",
@@ -5560,9 +5674,7 @@
           is_active: true
         });
       });
-      date = addDaysISO(date, 1);
-      safety += 1;
-    }
+    });
     const seen = new Set();
     return rows.filter(row => {
       const key = [row.operator_id, row.site_id, row.valid_from, row.scheduled_start, row.scheduled_end].join("|");
@@ -5570,6 +5682,33 @@
       seen.add(key);
       return true;
     });
+  }
+
+  function openLeaveReplacementUserModal() {
+    $("#leaveReplacementUserForm")?.reset();
+    openModal("leaveReplacementUserModal");
+    setTimeout(() => $("#leaveNewUserName")?.focus(), 50);
+  }
+
+  async function createLeaveReplacementUser(event) {
+    event.preventDefault();
+    const fullName = $("#leaveNewUserName")?.value.trim() || "";
+    const username = $("#leaveNewUserUsername")?.value.trim() || "";
+    const password = $("#leaveNewUserPassword")?.value || "";
+    const phone = $("#leaveNewUserPhone")?.value.trim() || "";
+    const notes = $("#leaveNewUserNotes")?.value.trim() || "";
+    if (!fullName) throw new Error("Cargá nombre y apellido.");
+    if (username.length < 3) throw new Error("El nombre de usuario debe tener al menos 3 caracteres.");
+    if (password.length < 6) throw new Error("La contraseña inicial debe tener al menos 6 caracteres.");
+    const savedProfile = await store.createManagedUser({ username, password, full_name: fullName, phone, role: "operator", notes });
+    if (!savedProfile?.id) throw new Error("El usuario fue creado pero no se recibió su perfil.");
+    state.profiles = [...state.profiles.filter(p => p.id !== savedProfile.id), savedProfile].sort((a, b) => String(a.full_name || "").localeCompare(String(b.full_name || ""), "es"));
+    const currentLeaveOperator = $("#leaveOperator")?.value || "";
+    renderAssignmentSelectors();
+    if ($("#leaveOperator") && currentLeaveOperator) $("#leaveOperator").value = currentLeaveOperator;
+    if ($("#leaveReplacementOperator")) $("#leaveReplacementOperator").value = savedProfile.id;
+    closeModal("leaveReplacementUserModal");
+    toast(`Operario ${savedProfile.full_name || fullName} creado y seleccionado como reemplazo.`, "success");
   }
 
   function replacementHasLeaveDuring(replacementOperatorId, startDate, endDate, excludeLeaveId = null) {
@@ -5584,6 +5723,7 @@
 
   function resetLeaveForm() {
     state.leaveEditingId = null;
+    state.leaveCoverageDraft = [];
     $("#leaveForm")?.reset();
     if ($("#leaveStartDate")) $("#leaveStartDate").value = todayISO();
     if ($("#leaveEndDate")) $("#leaveEndDate").value = todayISO();
@@ -5591,6 +5731,7 @@
     if ($("#leaveFormTitle")) $("#leaveFormTitle").textContent = "Registrar / programar novedad";
     $("#cancelLeaveEditBtn")?.classList.add("hidden");
     if ($("#saveLeaveBtn")) $("#saveLeaveBtn").textContent = "Guardar novedad";
+    renderLeaveCoveragePlanner();
   }
 
 
@@ -5600,6 +5741,7 @@
     if ($("#leaveType")) $("#leaveType").value = "vacation";
     if ($("#leaveFormTitle")) $("#leaveFormTitle").textContent = "Planificar vacaciones";
     if ($("#saveLeaveBtn")) $("#saveLeaveBtn").textContent = "Guardar vacaciones";
+    renderLeaveCoveragePlanner();
     scrollToActiveEditor("#leaveForm");
   }
 
@@ -5617,6 +5759,7 @@
     $("#leaveFormTitle").textContent = "Editar novedad";
     $("#cancelLeaveEditBtn").classList.remove("hidden");
     $("#saveLeaveBtn").textContent = "Guardar cambios";
+    renderLeaveCoveragePlanner({ useExistingLeave: true });
     renderTab("leaves");
     scrollToActiveEditor("#leaveForm");
   }
@@ -5651,6 +5794,16 @@
     );
     if (overlap && !window.confirm(`Ya existe una novedad activa para este operario entre ${leavePeriodLabel(overlap)}. ¿Querés guardar igualmente este registro superpuesto?`)) return;
 
+    const coverageDraft = readLeaveCoveragePlannerDraft();
+    if (replacementOperatorId) {
+      const selectedCoverageRows = coverageDraft.filter(row => row.selected);
+      if (!selectedCoverageRows.length && !window.confirm("Elegiste un reemplazo pero no dejaste ninguna asignación seleccionada para cubrir. ¿Querés guardar igualmente la novedad sin coberturas programadas?")) return;
+      for (const row of selectedCoverageRows) {
+        if (!row.scheduled_start || !row.scheduled_end) throw new Error("Completá los horarios de todas las coberturas seleccionadas.");
+        if (row.scheduled_start === row.scheduled_end) throw new Error("La hora de entrada y salida de una cobertura no pueden ser iguales.");
+      }
+    }
+
     const previousLeave = editingId ? (state.leaveRecords || []).find(item => item.id === editingId) || null : null;
     const leavePayload = {
       ...(editingId ? { id: editingId } : {}),
@@ -5671,9 +5824,8 @@
       leaveId: savedLeave.id,
       operatorId,
       replacementOperatorId,
-      startDate,
-      endDate,
-      leaveType
+      leaveType,
+      draftRows: coverageDraft
     });
     if (replacementOperatorId || previousLeave?.replacement_operator_id) {
       try {
@@ -7975,6 +8127,7 @@
       else if (!$("#quickAbsenceModal").classList.contains("hidden")) closeModal("quickAbsenceModal");
       else if (!$("#operatorOvertimeRequestModal").classList.contains("hidden")) closeModal("operatorOvertimeRequestModal");
       else if (!$("#overtimeAuthorizationModal").classList.contains("hidden")) closeModal("overtimeAuthorizationModal");
+      else if (!$("#leaveReplacementUserModal").classList.contains("hidden")) closeModal("leaveReplacementUserModal");
       else if (!$("#observationModal").classList.contains("hidden")) closeModal("observationModal");
       else if (!$("#serviceLocationModal").classList.contains("hidden")) closeModal("serviceLocationModal");
       else if (!$("#locationModal").classList.contains("hidden")) closeModal("locationModal");
@@ -8017,6 +8170,11 @@
     $("#planVacationBtn")?.addEventListener("click", prepareVacationPlanning);
     $("#cancelLeaveEditBtn")?.addEventListener("click", resetLeaveForm);
     $("#leaveStatusFilter")?.addEventListener("change", renderLeaves);
+    $("#leaveOperator")?.addEventListener("change", () => renderLeaveCoveragePlanner());
+    $("#leaveStartDate")?.addEventListener("change", () => renderLeaveCoveragePlanner());
+    $("#leaveEndDate")?.addEventListener("change", () => renderLeaveCoveragePlanner());
+    $("#createReplacementOperatorBtn")?.addEventListener("click", openLeaveReplacementUserModal);
+    $("#leaveReplacementUserForm")?.addEventListener("submit", (event) => createLeaveReplacementUser(event).catch(error => toast(error.message || "No se pudo crear el operario.")));
 
     $("#assignmentForm").addEventListener("submit", async (event) => {
       event.preventDefault();

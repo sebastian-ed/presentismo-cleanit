@@ -647,9 +647,9 @@
                     <strong>Cobertura durante la novedad <small class="muted">(opcional)</small></strong>
                     <p class="muted small no-margin">Por defecto se copian los servicios, frecuencia y horarios del operario que se ausenta. Podés desmarcar coberturas o modificar los horarios antes de guardar.</p>
                   </div>
-                  <button class="secondary-btn small-btn" id="createReplacementOperatorBtn" type="button">+ Crear nuevo operario</button>
+                  <button class="secondary-btn small-btn" id="createReplacementOperatorBtn" type="button">+ Crear nuevo operario para cubrir</button>
                 </div>
-                <label><span>Operario que cubrirá</span><select id="leaveReplacementOperator"><option value="">Sin reemplazo programado</option></select></label>
+                <label><span>Operario que cubrirá <small class="muted">(opcional)</small></span><select id="leaveReplacementOperator"><option value="">Sin reemplazo — solo registrar licencia/vacaciones</option></select><small class="leave-no-replacement-help">Si dejás esta opción, la novedad se registra normalmente, el operario titular no se marca como ausente y no se genera ninguna cobertura.</small></label>
                 <div id="leaveCoveragePlanner" class="leave-coverage-planner"><p class="muted small no-margin">Seleccioná operario y fechas para ver las asignaciones a cubrir.</p></div>
               </div>
               <label><span>Tipo de novedad</span>
@@ -981,8 +981,8 @@
   </div>
 
   <div id="leaveReplacementUserModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="leaveReplacementUserModalTitle">
-    <div class="modal-card">
-      <div class="modal-header">
+    <section class="modal-panel replacement-user-modal-panel">
+      <div class="modal-head replacement-user-modal-head">
         <div><p class="eyebrow">Alta rápida</p><h3 id="leaveReplacementUserModalTitle">Crear nuevo operario reemplazante</h3></div>
         <button class="icon-button" type="button" data-close-modal="leaveReplacementUserModal" aria-label="Cerrar">×</button>
       </div>
@@ -998,7 +998,7 @@
           <button class="primary-btn" type="submit">Crear operario y seleccionar</button>
         </div>
       </form>
-    </div>
+    </section>
   </div>
 
   <div id="locationModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="locationModalTitle">
