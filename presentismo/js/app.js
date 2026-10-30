@@ -3892,7 +3892,7 @@
       return `
         <tr class="${rowClasses}">
           <td><strong>${escapeHtml(operator?.full_name || "—")}</strong><br><span class="muted small">${escapeHtml(operator?.phone || "")}</span></td>
-          <td><strong>${escapeHtml(site?.name || "—")}</strong><br>${typeBadge ? `${typeBadge}<br>` : ""}<span class="muted small">${escapeHtml(site?.address || "")}</span></td>
+          <td class="live-service-cell"><strong>${escapeHtml(site?.name || "—")}</strong><br>${typeBadge ? `${typeBadge}<br>` : ""}<span class="live-supervisor-badge ${site?.supervisor_name ? "" : "is-empty"}"><span class="live-supervisor-label">Supervisor</span>${escapeHtml(site?.supervisor_name || "Sin asignar")}</span>${site?.address ? `<br><span class="muted small live-service-address">${escapeHtml(site.address)}</span>` : ""}</td>
           <td>${row.isFlexible ? `<span class="extra-schedule-label">Flexible · hora real</span>` : row.isSelfReportedExtra ? `<span class="extra-schedule-label">Sin horario previo</span>` : `${formatTime(shift.scheduled_start)} - ${formatTime(shift.scheduled_end)}`}</td>
           <td>${entryCell}</td>
           <td>${exitCell}</td>
@@ -4042,6 +4042,7 @@
               ${quickDetailBadge(row, kind)}
             </div>
             <div class="quick-detail-meta"><strong>${escapeHtml(site?.name || "—")}</strong> · ${escapeHtml(site?.address || "Sin dirección")}</div>
+            <div class="quick-detail-supervisor"><span class="live-supervisor-badge ${site?.supervisor_name ? "" : "is-empty"}"><span class="live-supervisor-label">Supervisor</span>${escapeHtml(site?.supervisor_name || "Sin asignar")}</span></div>
             <div class="quick-detail-meta">${quickDetailMeta(row, kind)}</div>
           </div>
           <div class="quick-detail-actions">${quickDetailMapActions(row, kind)}</div>

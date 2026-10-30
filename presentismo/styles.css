@@ -2165,3 +2165,46 @@ body.modal-open { overflow: hidden; }
   line-height: 1.4;
   font-weight: 700;
 }
+
+/* 2026-10-30 · Supervisor visible en En vivo */
+.live-service-cell {
+  min-width: 210px;
+}
+.live-supervisor-badge {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+  padding: 5px 9px;
+  border-radius: 9px;
+  border: 1px solid #c7d2fe;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: .75rem;
+  font-weight: 900;
+  line-height: 1.15;
+}
+.live-supervisor-badge.is-empty {
+  border-color: #e2e8f0;
+  background: #f8fafc;
+  color: #64748b;
+}
+.live-supervisor-label {
+  font-size: .65rem;
+  font-weight: 950;
+  letter-spacing: .055em;
+  text-transform: uppercase;
+  opacity: .78;
+}
+.live-service-address {
+  display: inline-block;
+  margin-top: 6px;
+}
+.quick-detail-supervisor {
+  margin-top: 6px;
+}
+@media (max-width: 720px) {
+  .live-service-cell { min-width: 180px; }
+  .live-supervisor-badge { font-size: .72rem; }
+}

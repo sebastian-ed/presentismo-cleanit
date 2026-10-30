@@ -1,12 +1,12 @@
-const CACHE_NAME = "cleanit-presentismo-shell-20261008-leave-coverage-contrast2";
+const CACHE_NAME = "cleanit-presentismo-shell-20261030-live-supervisor1";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css?v=20261008-leave-coverage-planner1",
-  "./js/config.js?v=20261008-leave-coverage-planner1",
-  "./js/storage.js?v=20261008-leave-coverage-planner1",
-  "./js/app.js?v=20261008-leave-coverage-planner1",
-  "./manifest.webmanifest?v=20261008-leave-coverage-planner1",
+  "./styles.css?v=20261030-live-supervisor1",
+  "./js/config.js?v=20261030-live-supervisor1",
+  "./js/storage.js?v=20261030-live-supervisor1",
+  "./js/app.js?v=20261030-live-supervisor1",
+  "./manifest.webmanifest?v=20261030-live-supervisor1",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2",
